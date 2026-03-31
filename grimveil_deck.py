@@ -1,12 +1,13 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.3.0
+# Version: 1.3.1
 # Build Date: 2026-03-31
 # Summary:
 #   Stable alpha refactor for deterministic date/time handling, memory-first prompting,
 #   authoritative Python task/reminder workflows, persistent registry UI, and wake continuity.
 # Changelog:
+#   - Fixed PyQt6 DayOfWeek enum comparisons in MiniCalendarWidget to use .value and prevent launch-time TypeError.
 #   - Expanded Task Registry panel into a compact, scrollable due/task/status board sourced from tasks.jsonl with urgency colors.
 #   - Added registry auto-refresh hooks (task file mtime watch + explicit lifecycle refreshes) across add/trigger/ack/retry/complete/clear.
 #   - Broadened reminder interception/parser coverage for natural phrasing and preserved strict Python-side scheduling bypass.
@@ -44,7 +45,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 VERSION_DATE = "2026-03-31"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -671,9 +672,9 @@ class MiniCalendarWidget(QWidget):
             d = QDate(year, month, day)
             fmt = QTextCharFormat()
             weekday = d.dayOfWeek()
-            if weekday == int(Qt.DayOfWeek.Saturday):
+            if weekday == Qt.DayOfWeek.Saturday.value:
                 fmt.setForeground(QColor(C_CYAN))
-            elif weekday == int(Qt.DayOfWeek.Sunday):
+            elif weekday == Qt.DayOfWeek.Sunday.value:
                 fmt.setForeground(QColor(C_RED))
             else:
                 fmt.setForeground(QColor("#e7edf3"))
