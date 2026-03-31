@@ -379,7 +379,7 @@ def extract_keywords(text: str, limit=12):
 
 def infer_record_type(user_text: str, assistant_text: str = ""):
     t = (user_text + "\n" + assistant_text).lower()
-    if "remind me" in t or "reminder" in t:
+    if has_reminder_intent(t):
         return "task"
     if "dream" in t:
         return "dream"
@@ -411,7 +411,7 @@ def infer_tags(record_type: str, text: str, keywords):
         tags.append("lsl")
     if "python" in text_l:
         tags.append("python")
-    if "remind me" in text_l or "reminder" in text_l:
+    if has_reminder_intent(text_l):
         tags.append("reminder")
     if "task" in text_l:
         tags.append("task")
@@ -486,10 +486,23 @@ def answer_datetime_query(text: str) -> str:
     now = datetime.now()
     t = text.lower()
     if "time" in t:
-        return f"It is {now.strftime('%I:%M:%S %p')} local time on {now.strftime('%Y-%m-%d')}."
+        return f"It is {datetime.now().strftime('%I:%M:%S %p')} local time on {datetime.now().strftime('%Y-%m-%d')}."
     if "day" in t:
         return f"Today is {now.strftime('%A, %Y-%m-%d')}."
     return f"Today's date is {now.strftime('%Y-%m-%d')} ({now.strftime('%A')})."
+
+
+def has_reminder_intent(text: str) -> bool:
+    lowered = text.lower()
+    patterns = (
+        r"\bremind me\b",
+        r"\bplease remind me\b",
+        r"\bset a reminder\b",
+        r"\badd a reminder\b",
+        r"\bi want a reminder\b",
+        r"\bwant a reminder\b",
+    )
+    return any(re.search(p, lowered) for p in patterns)
 
 
 def parse_duration_phrase(phrase: str):
@@ -637,13 +650,17 @@ class MiniCalendarWidget(QWidget):
     def _apply_formats(self):
         base = QTextCharFormat()
         base.setForeground(QColor("#e7edf3"))
+        saturday = QTextCharFormat()
+        saturday.setForeground(QColor(C_CYAN))
+        sunday = QTextCharFormat()
+        sunday.setForeground(QColor(C_RED))
         self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Monday, base)
         self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Tuesday, base)
         self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Wednesday, base)
         self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Thursday, base)
         self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Friday, base)
-        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Saturday, base)
-        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Sunday, base)
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Saturday, saturday)
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Sunday, sunday)
 
         spill = QTextCharFormat()
         spill.setForeground(QColor("#7f8fa0"))
@@ -1812,27 +1829,37 @@ class GrimveilDeck(QMainWindow):
         if not hasattr(self, 'task_log'):
             return
         tasks = self.memory.load_tasks()
-        active = [t for t in tasks if t.get('status') != 'completed']
-        if not active:
-            self.task_log.setHtml(f"<span style='color:{C_TEXT_DIM};'>No active tasks.</span>")
+        if not tasks:
+            self.task_log.setHtml(f"<span style='color:{C_TEXT_DIM};'>No tasks logged.</span>")
             return
         now = datetime.now()
         lines = []
-        for task in sorted(active, key=lambda x: x.get('due_at', x.get('due', ''))):
+        for task in sorted(tasks, key=lambda x: x.get('due_at', x.get('due', ''))):
             due = parse_iso(task.get('due_at') or task.get('due'))
+            status = task.get('status', 'pending')
+            is_completed = status == "completed" or bool(task.get("acknowledged_at"))
             if due:
-                if due < now and not task.get('acknowledged_at'):
+                if is_completed:
+                    color = C_GREEN
+                    cue = "✅ COMPLETED"
+                elif due < now:
                     color = C_RED
+                    cue = "⛔ OVERDUE"
                 elif due - now <= timedelta(hours=1):
                     color = C_GOLD
+                    cue = "⚠️ DUE SOON"
                 else:
-                    color = C_TEXT
+                    color = C_CYAN
+                    cue = "🕒 FUTURE"
                 due_str = due.strftime('%b %d %I:%M %p')
             else:
-                color = C_TEXT_DIM
+                color = C_GREEN if is_completed else C_TEXT_DIM
+                cue = "✅ COMPLETED" if is_completed else "⏳ UNSCHEDULED"
                 due_str = task.get('due_at', task.get('due', 'unknown'))
-            status = task.get('status', 'pending')
-            lines.append(f"<span style='color:{color};'>• {due_str} — {task.get('text','')} [{status}]</span>")
+            lines.append(
+                f"<span style='color:{color};'>• {cue} | {due_str} | {task.get('text','')} "
+                f"| status={status}</span>"
+            )
         self.task_log.setHtml("<br>".join(lines))
 
     def _refresh_anchor_ui(self):
@@ -1959,11 +1986,20 @@ class GrimveilDeck(QMainWindow):
             self.history.append({"role": "user", "content": text})
             return
 
-        parsed_task = self._try_create_task(text)
+        parsed_task = self._try_create_task(text, force_intent=has_reminder_intent(lowered))
         if parsed_task:
             due_obj = parse_iso(parsed_task.get("due_at") or parsed_task.get("due"))
             due_str = due_obj.strftime("%Y-%m-%d %I:%M %p") if due_obj else parsed_task.get("due_at", "scheduled time")
             self._append_chat("SYSTEM", f"Reminder scheduled for {due_str}: {parsed_task['text']}")
+            self._store_message("user", text)
+            self.history.append({"role": "user", "content": text})
+            return
+        if has_reminder_intent(lowered):
+            self._append_chat(
+                "SYSTEM",
+                "Reminder intent detected, but I could not parse a schedule. Use formats like "
+                "'remind me in 10m to ...' or 'set a reminder for 2026-04-01 at 11am to ...'."
+            )
             self._store_message("user", text)
             self.history.append({"role": "user", "content": text})
             return
@@ -2140,8 +2176,8 @@ class GrimveilDeck(QMainWindow):
         self.send_btn.setEnabled(True)
         self.input_field.setEnabled(True)
 
-    def _try_create_task(self, text: str):
-        parsed = self._parse_reminder_command(text)
+    def _try_create_task(self, text: str, force_intent: bool = False):
+        parsed = self._parse_reminder_command(text, force_intent=force_intent)
         if not parsed:
             return None
         task_text, due_dt = parsed
@@ -2149,20 +2185,21 @@ class GrimveilDeck(QMainWindow):
         self._refresh_task_registry_panel()
         return task
 
-    def _parse_reminder_command(self, text: str):
+    def _parse_reminder_command(self, text: str, force_intent: bool = False):
         t = text.strip()
         lower = t.lower()
-        if not any(k in lower for k in ("remind me", "set a reminder", "add a reminder")):
+        if not force_intent and not has_reminder_intent(lower):
             return None
 
-        in_match = re.search(r"(?:remind me|set a reminder|add a reminder)\s+in\s+(.+?)\s+to\s+(.+)$", t, re.I)
+        prefix = r"(?:grim[\s,]+)?(?:please\s+)?(?:remind me|set a reminder|add a reminder|(?:i\s+)?want a reminder(?:\s+for)?)"
+        in_match = re.search(rf"{prefix}\s+in\s+(.+?)\s+to\s+(.+)$", t, re.I)
         if in_match:
             delta = parse_duration_phrase(in_match.group(1))
             if delta:
                 return in_match.group(2).strip().rstrip(".!?"), datetime.now() + delta
 
         dt_match = re.search(
-            r"(?:remind me|set a reminder|add a reminder)\s+(?:on|for)\s+(\d{4}-\d{2}-\d{2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s+to\s+|,\s*)(.+)$",
+            rf"{prefix}\s+(?:on|for)\s+(\d{{4}}-\d{{2}}-\d{{2}})\s+at\s+(\d{{1,2}})(?::(\d{{2}}))?\s*(am|pm)?(?:\s+to\s+|,\s*)(.+)$",
             t, re.I
         )
         if dt_match:
@@ -2177,7 +2214,7 @@ class GrimveilDeck(QMainWindow):
                     hour += 12
             return dt_match.group(5).strip().rstrip(".!?"), d.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
 
-        at_match = re.search(r"(?:remind me|set a reminder|add a reminder)\s+(?:for|at)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+to\s+(.+)$", t, re.I)
+        at_match = re.search(rf"{prefix}\s+(?:for|at)\s+(\d{{1,2}})(?::(\d{{2}}))?\s*(am|pm)?\s+to\s+(.+)$", t, re.I)
         if at_match:
             hour = int(at_match.group(1))
             minute = int(at_match.group(2) or 0)
