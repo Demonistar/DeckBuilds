@@ -1,9 +1,17 @@
 
-# Script Name: grimveil_deck.py
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
-# Version: v1.1.1
+# Filename: grimveil_deck.py
+# Version: 1.2.0
 # Build Date: 2026-03-31
-# Purpose: Local persona deck with persistent JSONL memory, wake mode, and reminder scheduler.
+# Summary:
+#   Stable alpha refactor for deterministic date/time handling, memory-first prompting,
+#   authoritative Python task/reminder workflows, persistent registry UI, and wake continuity.
+# Changelog:
+#   - Added deterministic date/time interception and runtime temporal context injection.
+#   - Expanded reminder parser and task command routing (model bypass for task intents).
+#   - Normalized persistent task schema with restart-safe JSONL handling.
+#   - Improved memory title cleanup, startup continuity messaging, and task registry rendering.
+#   - Enhanced calendar coloring/navigation behavior and right-panel stability.
 
 import sys
 import time
@@ -31,11 +39,11 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import (
     QFont, QColor, QPainter, QLinearGradient,
-    QPixmap, QPen, QPainterPath
+    QPixmap, QPen, QPainterPath, QTextCharFormat
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.2.0"
 APP_BUILD_DATE = "2026-03-31"
 APP_FILENAME = "grimveil_deck.py"
 
@@ -95,9 +103,12 @@ C_BLUE        = "#4f9fff"
 RUNES = "▣ ▤ ▣ ▤ ▣ ▤ ▣ ▤ ▣"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-MEMORY_DIR = SCRIPT_DIR / "GrimVeil_Memories"
-FACES_DIR  = r"C:\AI\Models\Faces\Grimveil"
-MODEL_PATH = r"C:\AI\Models\dolphin-2.6-7b"
+AI_MODELS_DIR = SCRIPT_DIR / "AI" / "Models"
+if SCRIPT_DIR.name.lower() == "models" and SCRIPT_DIR.parent.name.lower() == "ai":
+    AI_MODELS_DIR = SCRIPT_DIR
+MEMORY_DIR = AI_MODELS_DIR / "GrimVeil_Memories"
+FACES_DIR = str(AI_MODELS_DIR / "Faces" / "Grimveil")
+MODEL_PATH = str(AI_MODELS_DIR / "dolphin-2.6-7b")
 
 FACE_FILES = {
     "neutral":     "Grimveil_Neutral",
@@ -242,7 +253,11 @@ MEMORY_QUERY_HINTS = (
     "have i told you", "remember when"
 )
 
-ACK_PHRASES = {"ack", "acknowledged", "got it", "done", "completed", "dismiss", "dismissed", "okay", "ok"}
+ACK_PHRASES = {
+    "ack", "acknowledge", "acknowledged", "done", "complete", "completed",
+    "dismiss", "dismissed", "stop reminder", "cancel reminder", "got it",
+    "handled", "all set", "okay", "ok"
+}
 
 
 def utc_now_iso():
@@ -417,9 +432,18 @@ def infer_tags(record_type: str, text: str, keywords):
 
 
 def infer_title(record_type: str, user_text: str, keywords):
+    def clean_words(words):
+        pretty = []
+        for w in words:
+            w = w.strip(" -_.,!?")
+            if not w or w.lower() in STOPWORDS:
+                continue
+            pretty.append(w.capitalize())
+        return pretty
+
     if record_type == "dream":
         if keywords:
-            return f"{' '.join(k.title() for k in keywords[:3])} Dream"
+            return f"{' '.join(clean_words(keywords[:3]))} Dream".strip()
         return "Dream Memory"
     if record_type == "task":
         match = re.search(r"remind me .*? to (.+)", user_text, re.I)
@@ -428,23 +452,62 @@ def infer_title(record_type: str, user_text: str, keywords):
         return "Reminder Task"
     if record_type == "issue":
         if keywords:
-            return f"Issue: {' '.join(k.title() for k in keywords[:4])}"
+            return f"Issue: {' '.join(clean_words(keywords[:4]))}".strip()
         return "Technical Issue"
     if record_type == "resolution":
         if keywords:
-            return f"Resolution: {' '.join(k.title() for k in keywords[:4])}"
+            return f"Resolution: {' '.join(clean_words(keywords[:4]))}".strip()
         return "Technical Resolution"
     if record_type == "idea":
         if keywords:
-            return f"Idea: {' '.join(k.title() for k in keywords[:4])}"
+            return f"Idea: {' '.join(clean_words(keywords[:4]))}".strip()
         return "Idea Memory"
     if record_type == "preference":
         if keywords:
-            return f"Preference: {' '.join(k.title() for k in keywords[:4])}"
+            return f"Preference: {' '.join(clean_words(keywords[:4]))}".strip()
         return "Preference Memory"
     if keywords:
-        return " ".join(k.title() for k in keywords[:5])
+        cleaned = clean_words(keywords[:5])
+        return " ".join(cleaned) if cleaned else "Conversation Memory"
     return "Conversation Memory"
+
+
+def is_datetime_query(text: str) -> bool:
+    t = text.lower().strip()
+    patterns = (
+        "what is today's date", "what is todays date", "what's today's date", "what day is it",
+        "what date is it", "current date", "current time", "what time is it",
+        "today's date", "todays date"
+    )
+    return any(p in t for p in patterns)
+
+
+def answer_datetime_query(text: str) -> str:
+    now = datetime.now()
+    t = text.lower()
+    if "time" in t:
+        return f"It is {now.strftime('%I:%M:%S %p')} local time on {now.strftime('%Y-%m-%d')}."
+    if "day" in t:
+        return f"Today is {now.strftime('%A, %Y-%m-%d')}."
+    return f"Today's date is {now.strftime('%Y-%m-%d')} ({now.strftime('%A')})."
+
+
+def parse_duration_phrase(phrase: str):
+    tokens = re.findall(r"(\d+)\s*(d|day|days|h|hr|hour|hours|m|min|minute|minutes|s|sec|second|seconds)", phrase.lower())
+    if not tokens:
+        return None
+    seconds = 0
+    for amount_s, unit in tokens:
+        amount = int(amount_s)
+        if unit.startswith("d"):
+            seconds += amount * 86400
+        elif unit.startswith("h"):
+            seconds += amount * 3600
+        elif unit.startswith("m"):
+            seconds += amount * 60
+        elif unit.startswith("s"):
+            seconds += amount
+    return timedelta(seconds=seconds) if seconds > 0 else None
 
 
 def summarize_memory(record_type: str, user_text: str, assistant_text: str = ""):
@@ -553,15 +616,45 @@ class MiniCalendarWidget(QWidget):
         self.calendar.setGridVisible(True)
         self.calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
         self.calendar.setNavigationBarVisible(False)
-        self.calendar.setStyleSheet(f"QCalendarWidget QWidget{{alternate-background-color:{C_BG2};}} QToolButton{{color:{C_GOLD};}} QCalendarWidget QAbstractItemView:enabled{{background:{C_BG2}; color:{C_TEXT}; selection-background-color:{C_CYAN_DIM}; selection-color:{C_TEXT}; gridline-color:{C_BORDER};}}")
+        self.calendar.setStyleSheet(
+            f"QCalendarWidget QWidget{{alternate-background-color:{C_BG2};}} "
+            f"QToolButton{{color:{C_GOLD};}} "
+            f"QCalendarWidget QAbstractItemView:enabled{{background:{C_BG2}; color:#ffffff; selection-background-color:{C_CYAN_DIM}; selection-color:{C_TEXT}; gridline-color:{C_BORDER};}} "
+            f"QCalendarWidget QAbstractItemView:disabled{{color:#8b95a1;}}"
+        )
         layout.addWidget(self.calendar)
         self.prev_btn.clicked.connect(lambda: self.calendar.showPreviousMonth())
         self.next_btn.clicked.connect(lambda: self.calendar.showNextMonth())
         self.calendar.currentPageChanged.connect(self._update_label)
         self._update_label()
+        self._apply_formats()
     def _update_label(self, *args):
-        d = self.calendar.selectedDate()
-        self.month_lbl.setText(d.toString('MMMM yyyy'))
+        year = self.calendar.yearShown()
+        month = self.calendar.monthShown()
+        self.month_lbl.setText(f"{date(year, month, 1).strftime('%B %Y')}")
+        self._apply_formats()
+
+    def _apply_formats(self):
+        base = QTextCharFormat()
+        base.setForeground(QColor("#e7edf3"))
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Monday, base)
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Tuesday, base)
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Wednesday, base)
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Thursday, base)
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Friday, base)
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Saturday, base)
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Sunday, base)
+
+        spill = QTextCharFormat()
+        spill.setForeground(QColor("#7f8fa0"))
+        self.calendar.setDateTextFormat(self.calendar.minimumDate(), spill)
+
+        today_fmt = QTextCharFormat()
+        today_fmt.setForeground(QColor("#68d39a"))
+        today_fmt.setBackground(QColor("#163825"))
+        today_fmt.setFontWeight(QFont.Weight.Bold)
+        self.calendar.setDateTextFormat(self.calendar.selectedDate(), QTextCharFormat())
+        self.calendar.setDateTextFormat(self.calendar.selectedDate().currentDate(), today_fmt)
 
 
 class CollapsibleSection(QWidget):
@@ -603,6 +696,7 @@ class MemoryManager:
         if not self.memory_dir.exists():
             self.memory_dir.mkdir(parents=True, exist_ok=True)
             self.first_run = True
+        (self.memory_dir / "sounds").mkdir(parents=True, exist_ok=True)
         for path in (self.messages_path, self.memories_path, self.tasks_path):
             if not path.exists():
                 path.write_text("", encoding="utf-8")
@@ -621,6 +715,9 @@ class MemoryManager:
             })
         if not self.index_path.exists():
             self.index_path.write_text(json.dumps({"version": APP_VERSION}, indent=2), encoding="utf-8")
+        wav_path = self.memory_dir / "sounds" / "grimveil_alert.wav"
+        if not wav_path.exists():
+            generate_grimveil_alert(wav_path)
 
     def load_state(self):
         try:
@@ -749,15 +846,23 @@ class MemoryManager:
             if 'id' not in task:
                 task['id'] = f"task_{uuid.uuid4().hex[:10]}"
                 changed = True
-            task.setdefault('created', local_now_iso())
+            if "created_at" not in task:
+                task["created_at"] = task.get("created", local_now_iso())
+                changed = True
+            if "due_at" not in task:
+                task["due_at"] = task.get("due")
+                changed = True
             task.setdefault('status', 'pending')
-            task.setdefault('repeat_count', 0)
-            task.setdefault('acknowledged', False)
+            task.setdefault('retry_count', int(task.get('repeat_count', 0) or 0))
+            task.setdefault('acknowledged_at', None)
             task.setdefault('last_triggered_at', None)
             task.setdefault('next_retry_at', None)
             task.setdefault('pre_announced', False)
-            if task.get('due') and not task.get('pre_trigger'):
-                due = parse_iso(task.get('due'))
+            task.setdefault('source', task.get('created_from', 'user'))
+            task.setdefault('metadata', {})
+            due_raw = task.get('due_at') or task.get('due')
+            if due_raw and not task.get('pre_trigger'):
+                due = parse_iso(due_raw)
                 if due:
                     task['pre_trigger'] = (due - timedelta(minutes=1)).isoformat(timespec='seconds')
                     changed = True
@@ -776,16 +881,17 @@ class MemoryManager:
         tasks = self.load_tasks()
         task = {
             "id": f"task_{uuid.uuid4().hex[:10]}",
-            "created": local_now_iso(),
-            "due": due_dt.isoformat(timespec="seconds"),
+            "created_at": local_now_iso(),
+            "due_at": due_dt.isoformat(timespec="seconds"),
             "pre_trigger": (due_dt - timedelta(minutes=1)).isoformat(timespec="seconds"),
             "text": text.strip(),
             "status": "pending",
-            "repeat_count": 0,
-            "acknowledged": False,
+            "acknowledged_at": None,
+            "retry_count": 0,
             "last_triggered_at": None,
             "next_retry_at": None,
-            "created_from": created_from,
+            "source": "user_command",
+            "metadata": {"input": created_from},
         }
         tasks.append(task)
         self.save_all_tasks(tasks)
@@ -796,9 +902,9 @@ class MemoryManager:
         changed = []
         active = False
         for task in tasks:
-            if task.get("status") in {"triggered", "retry_pending", "pending"} and not task.get("acknowledged"):
+            if task.get("status") in {"triggered", "snoozed", "retry_pending", "pending"} and not task.get("acknowledged_at"):
                 task["status"] = "completed"
-                task["acknowledged"] = True
+                task["acknowledged_at"] = local_now_iso()
                 task["completed_at"] = local_now_iso()
                 changed.append(task)
                 active = True
@@ -822,12 +928,12 @@ class MemoryManager:
         changed = False
         for task in tasks:
             status = task.get("status", "pending")
-            due = parse_iso(task.get("due"))
+            due = parse_iso(task.get("due_at") or task.get("due"))
             pre = parse_iso(task.get("pre_trigger"))
             last_triggered = parse_iso(task.get("last_triggered_at"))
             next_retry = parse_iso(task.get("next_retry_at"))
 
-            if task.get("acknowledged"):
+            if task.get("acknowledged_at"):
                 continue
 
             if status == "pending" and pre and now >= pre and not task.get("pre_announced"):
@@ -846,15 +952,15 @@ class MemoryManager:
             if status == "triggered":
                 deadline = parse_iso(task.get("alert_deadline"))
                 if deadline and now >= deadline:
-                    task["status"] = "retry_pending"
+                    task["status"] = "snoozed"
                     task["next_retry_at"] = (now + timedelta(minutes=12)).isoformat(timespec="seconds")
                     events.append(("retry_scheduled", task))
                     changed = True
                     continue
 
-            if status == "retry_pending" and next_retry and now >= next_retry:
+            if status in {"retry_pending", "snoozed"} and next_retry and now >= next_retry:
                 task["status"] = "triggered"
-                task["repeat_count"] = int(task.get("repeat_count", 0)) + 1
+                task["retry_count"] = int(task.get("retry_count", 0)) + 1
                 task["last_triggered_at"] = local_now_iso()
                 task["alert_deadline"] = (now + timedelta(minutes=3)).isoformat(timespec="seconds")
                 task["next_retry_at"] = None
@@ -1438,7 +1544,7 @@ class GrimveilDeck(QMainWindow):
 
         self.send_btn = QPushButton("EXECUTE")
         self.send_btn.setFixedWidth(110)
-        self.send_btn.setStyleSheet(f"background-color: {C_CYAN_DIM}; color: {C_CYAN}; border: 1px solid {C_CYAN}; border-radius: 2px; font-family: 'Georgia', serif; font-size: 9px; font-weight: bold; padding: 4px 6px; letter-spacing: 1px;")
+        self.send_btn.setStyleSheet(f"background-color: {C_CYAN_DIM}; color: {C_CYAN}; border: 1px solid {C_CYAN}; border-radius: 2px; font-family: 'Georgia', serif; font-size: 8px; font-weight: bold; padding: 2px 4px;")
         self.send_btn.clicked.connect(self._send_message)
 
         input_row.addWidget(prompt_sym)
@@ -1617,7 +1723,7 @@ class GrimveilDeck(QMainWindow):
 
     def _emit_wake_mode(self):
         last_shutdown = parse_iso(self.state.get("last_shutdown"))
-        pending = [t for t in self.memory.load_tasks() if not t.get("acknowledged") and t.get("status") != "completed"]
+        pending = [t for t in self.memory.load_tasks() if not t.get("acknowledged_at") and t.get("status") != "completed"]
 
         if self.memory.first_run:
             self._append_chat("SYSTEM", "Persistent memory scaffold established. Future disappointments will now be archived properly. 😎")
@@ -1712,10 +1818,10 @@ class GrimveilDeck(QMainWindow):
             return
         now = datetime.now()
         lines = []
-        for task in sorted(active, key=lambda x: x.get('due', '')):
-            due = parse_iso(task.get('due'))
+        for task in sorted(active, key=lambda x: x.get('due_at', x.get('due', ''))):
+            due = parse_iso(task.get('due_at') or task.get('due'))
             if due:
-                if due < now and not task.get('acknowledged'):
+                if due < now and not task.get('acknowledged_at'):
                     color = C_RED
                 elif due - now <= timedelta(hours=1):
                     color = C_GOLD
@@ -1724,7 +1830,7 @@ class GrimveilDeck(QMainWindow):
                 due_str = due.strftime('%b %d %I:%M %p')
             else:
                 color = C_TEXT_DIM
-                due_str = task.get('due', 'unknown')
+                due_str = task.get('due_at', task.get('due', 'unknown'))
             status = task.get('status', 'pending')
             lines.append(f"<span style='color:{color};'>• {due_str} — {task.get('text','')} [{status}]</span>")
         self.task_log.setHtml("<br>".join(lines))
@@ -1761,7 +1867,7 @@ class GrimveilDeck(QMainWindow):
 
     def _handle_task_command(self, text: str):
         normalized = text.strip().lower()
-        if normalized in {"list current tasks", "list tasks", "show reminders", "show current tasks", "show tasks"}:
+        if normalized in {"list current tasks", "list tasks", "show reminders", "show current tasks", "show tasks", "show pending tasks"}:
             tasks = self.memory.load_tasks()
             active = [t for t in tasks if t.get("status") != "completed"]
             self._refresh_task_registry_panel()
@@ -1769,9 +1875,9 @@ class GrimveilDeck(QMainWindow):
                 self._append_chat("SYSTEM", "Task registry empty. Entropy has, briefly, been denied a foothold.")
             else:
                 lines = ["GRIMVEILE-42 task registry follows. Entropy has resolved nothing. 😑"]
-                for idx, task in enumerate(sorted(active, key=lambda x: x.get('due','')), start=1):
-                    due = parse_iso(task.get('due'))
-                    due_str = due.strftime('%Y-%m-%d %I:%M %p') if due else task.get('due','unknown')
+                for idx, task in enumerate(sorted(active, key=lambda x: x.get('due_at', x.get('due',''))), start=1):
+                    due = parse_iso(task.get('due_at') or task.get('due'))
+                    due_str = due.strftime('%Y-%m-%d %I:%M %p') if due else task.get('due_at', task.get('due','unknown'))
                     lines.append(f"{idx}. {due_str} — {task.get('text','')} [{task.get('status','pending')}]")
                 self._append_chat("SYSTEM", "\n".join(lines))
             return True
@@ -1779,6 +1885,30 @@ class GrimveilDeck(QMainWindow):
             removed = self.memory.clear_completed_tasks()
             self._refresh_task_registry_panel()
             self._append_chat("SYSTEM", f"Completed task purge executed. Removed {removed} entr{'y' if removed==1 else 'ies'}.")
+            return True
+        if normalized in {"reset tasks"}:
+            self.memory.save_all_tasks([])
+            self._refresh_task_registry_panel()
+            self._append_chat("SYSTEM", "Task registry reset complete.")
+            return True
+        if normalized.startswith("complete task "):
+            token = normalized.replace("complete task ", "", 1).strip()
+            tasks = self.memory.load_tasks()
+            active = [t for t in tasks if t.get("status") != "completed"]
+            done = None
+            for idx, task in enumerate(active, start=1):
+                if token == str(idx) or token == task.get("id", "").lower():
+                    task["status"] = "completed"
+                    task["acknowledged_at"] = local_now_iso()
+                    task["completed_at"] = local_now_iso()
+                    done = task
+                    break
+            if done:
+                self.memory.save_all_tasks(tasks)
+                self._refresh_task_registry_panel()
+                self._append_chat("SYSTEM", f"Task completed: {done.get('text','(no text)')}")
+            else:
+                self._append_chat("SYSTEM", "No matching task id/index found.")
             return True
         return False
 
@@ -1805,8 +1935,17 @@ class GrimveilDeck(QMainWindow):
         self._append_chat("YOU", text)
 
         lowered = text.lower().strip()
+        if is_datetime_query(lowered):
+            deterministic = answer_datetime_query(lowered)
+            self._append_chat("GRIMVEILE", deterministic)
+            self._store_message("user", text)
+            self.history.append({"role": "user", "content": text})
+            self.history.append({"role": "assistant", "content": deterministic})
+            self._store_message("assistant", deterministic)
+            return
+
         active_ack, changed = (False, [])
-        if lowered in ACK_PHRASES or any(p in lowered for p in ACK_PHRASES):
+        if lowered in ACK_PHRASES:
             active_ack, changed = self.memory.acknowledge_due_tasks()
             if active_ack:
                 self._refresh_task_registry_panel()
@@ -1822,8 +1961,8 @@ class GrimveilDeck(QMainWindow):
 
         parsed_task = self._try_create_task(text)
         if parsed_task:
-            due_obj = parse_iso(parsed_task["due"])
-            due_str = due_obj.strftime("%Y-%m-%d %I:%M %p") if due_obj else parsed_task.get("due", "scheduled time")
+            due_obj = parse_iso(parsed_task.get("due_at") or parsed_task.get("due"))
+            due_str = due_obj.strftime("%Y-%m-%d %I:%M %p") if due_obj else parsed_task.get("due_at", "scheduled time")
             self._append_chat("SYSTEM", f"Reminder scheduled for {due_str}: {parsed_task['text']}")
             self._store_message("user", text)
             self.history.append({"role": "user", "content": text})
@@ -1878,11 +2017,18 @@ class GrimveilDeck(QMainWindow):
         return "\n".join(lines)
 
     def _build_final_prompt(self, current_text: str, retrieved):
+        now = datetime.now()
+        runtime_context = (
+            f"Runtime local datetime: {now.strftime('%Y-%m-%d %H:%M:%S')}.\n"
+            f"Runtime weekday: {now.strftime('%A')}.\n"
+            f"Never guess current date/time; use this runtime context."
+        )
         memory_block = self._build_memory_context_block(retrieved)
         recent_history = self.history[-8:]
         prompt = (
             f"<|im_start|>system\n"
             f"{self.system_prompt}\n"
+            f"{runtime_context}\n"
             f"Current anchor_state={self.anchor_state:.2f}\n"
             f"You have access to persistent memory records below. "
             f"If the user asks about prior chats, prior dreams, prior ideas, prior reminders, prior code, or anything previously discussed, "
@@ -1892,6 +2038,12 @@ class GrimveilDeck(QMainWindow):
             f"{memory_block}\n"
             f"<|im_end|>\n"
         )
+        if is_memory_query(current_text) and not retrieved:
+            prompt += (
+                "<|im_start|>system\n"
+                "Memory query detected with no relevant records. You must explicitly say no relevant memory was found.\n"
+                "<|im_end|>\n"
+            )
         for msg in recent_history:
             prompt += f"<|im_start|>{msg['role']}\n{msg['content']}<|im_end|>\n"
         prompt += f"<|im_start|>user\n{current_text}<|im_end|>\n<|im_start|>assistant\n"
@@ -1999,55 +2151,48 @@ class GrimveilDeck(QMainWindow):
 
     def _parse_reminder_command(self, text: str):
         t = text.strip()
-        low = t.lower()
-        m = re.search(r"remind me in\s+(\d+)\s*([smhd]|seconds?|minutes?|hours?|days?)\s+to\s+(.+)", low, re.I)
-        if m:
-            amount = int(m.group(1))
-            unit = m.group(2).lower()
-            task_text = t[m.start(3):].strip().rstrip('.!?')
-            if unit.startswith('s'):
-                due = datetime.now() + timedelta(seconds=amount)
-            elif unit.startswith('m'):
-                due = datetime.now() + timedelta(minutes=amount)
-            elif unit.startswith('h'):
-                due = datetime.now() + timedelta(hours=amount)
-            else:
-                due = datetime.now() + timedelta(days=amount)
-            return task_text, due
+        lower = t.lower()
+        if not any(k in lower for k in ("remind me", "set a reminder", "add a reminder")):
+            return None
 
-        m = re.search(r"(?:grim,\s*)?add a reminder for\s+(\d{4}-\d{2}-\d{2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*,?\s*(.+)", t, re.I)
-        if m:
-            date_str = m.group(1)
-            hour = int(m.group(2))
-            minute = int(m.group(3) or 0)
-            meridiem = (m.group(4) or '').lower()
-            task_text = m.group(5).strip().rstrip('.!?')
-            base = datetime.strptime(date_str, '%Y-%m-%d')
+        in_match = re.search(r"(?:remind me|set a reminder|add a reminder)\s+in\s+(.+?)\s+to\s+(.+)$", t, re.I)
+        if in_match:
+            delta = parse_duration_phrase(in_match.group(1))
+            if delta:
+                return in_match.group(2).strip().rstrip(".!?"), datetime.now() + delta
+
+        dt_match = re.search(
+            r"(?:remind me|set a reminder|add a reminder)\s+(?:on|for)\s+(\d{4}-\d{2}-\d{2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s+to\s+|,\s*)(.+)$",
+            t, re.I
+        )
+        if dt_match:
+            d = datetime.strptime(dt_match.group(1), "%Y-%m-%d")
+            hour = int(dt_match.group(2))
+            minute = int(dt_match.group(3) or 0)
+            meridiem = (dt_match.group(4) or "").lower()
             if meridiem:
                 if hour == 12:
                     hour = 0
-                if meridiem == 'pm':
+                if meridiem == "pm":
                     hour += 12
-            due = base.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
-            return task_text, due
+            return dt_match.group(5).strip().rstrip(".!?"), d.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
 
-        m = re.search(r"remind me at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+to\s+(.+)", t, re.I)
-        if not m:
-            return None
-        hour = int(m.group(1))
-        minute = int(m.group(2) or 0)
-        meridiem = (m.group(3) or '').lower()
-        task_text = m.group(4).strip().rstrip('.!?')
-        if meridiem:
-            if hour == 12:
-                hour = 0
-            if meridiem == 'pm':
-                hour += 12
-        now = datetime.now()
-        due = now.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
-        if due <= now:
-            due += timedelta(days=1)
-        return task_text, due
+        at_match = re.search(r"(?:remind me|set a reminder|add a reminder)\s+(?:for|at)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+to\s+(.+)$", t, re.I)
+        if at_match:
+            hour = int(at_match.group(1))
+            minute = int(at_match.group(2) or 0)
+            meridiem = (at_match.group(3) or "").lower()
+            if meridiem:
+                if hour == 12:
+                    hour = 0
+                if meridiem == "pm":
+                    hour += 12
+            now = datetime.now()
+            due = now.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
+            if due <= now:
+                due += timedelta(days=1)
+            return at_match.group(4).strip().rstrip(".!?"), due
+        return None
 
     def _check_due_tasks(self):
         events = self.memory.get_due_events()
@@ -2058,7 +2203,7 @@ class GrimveilDeck(QMainWindow):
                 self._append_chat("SYSTEM", f"Reminder unacknowledged. Retry scheduled in 12 minutes: {task['text']}")
             elif kind == "due":
                 play_grimveil_alert(MEMORY_DIR)
-                due_dt = parse_iso(task.get("due"))
+                due_dt = parse_iso(task.get("due_at") or task.get("due"))
                 due_str = due_dt.strftime("%Y-%m-%d %I:%M %p") if due_dt else "scheduled time"
                 self._append_chat("SYSTEM", f"[Reminder] You wanted an alarm for {due_str}: {task['text']}")
                 self.active_reminder_ids.add(task["id"])
