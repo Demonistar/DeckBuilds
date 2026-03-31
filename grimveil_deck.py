@@ -1,17 +1,17 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.2.0
+# Version: 1.3.0
 # Build Date: 2026-03-31
 # Summary:
 #   Stable alpha refactor for deterministic date/time handling, memory-first prompting,
 #   authoritative Python task/reminder workflows, persistent registry UI, and wake continuity.
 # Changelog:
-#   - Added deterministic date/time interception and runtime temporal context injection.
-#   - Expanded reminder parser and task command routing (model bypass for task intents).
-#   - Normalized persistent task schema with restart-safe JSONL handling.
-#   - Improved memory title cleanup, startup continuity messaging, and task registry rendering.
-#   - Enhanced calendar coloring/navigation behavior and right-panel stability.
+#   - Expanded Task Registry panel into a compact, scrollable due/task/status board sourced from tasks.jsonl with urgency colors.
+#   - Added registry auto-refresh hooks (task file mtime watch + explicit lifecycle refreshes) across add/trigger/ack/retry/complete/clear.
+#   - Broadened reminder interception/parser coverage for natural phrasing and preserved strict Python-side scheduling bypass.
+#   - Hardened deterministic date/time responses to always format from live datetime.now() response-time values.
+#   - Restored weekend day-cell distinction while preserving clear "today" highlighting in the tactical calendar.
 
 import sys
 import time
@@ -20,6 +20,7 @@ import threading
 import json
 import re
 import uuid
+import html
 from datetime import datetime, date, timedelta
 import urllib.request
 from pathlib import Path
@@ -36,15 +37,16 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QFrame, QCalendarWidget
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QDate
 from PyQt6.QtGui import (
     QFont, QColor, QPainter, QLinearGradient,
     QPixmap, QPen, QPainterPath, QTextCharFormat
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.2.0"
-APP_BUILD_DATE = "2026-03-31"
+APP_VERSION = "1.3.0"
+VERSION_DATE = "2026-03-31"
+APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
 
 try:
@@ -486,7 +488,7 @@ def answer_datetime_query(text: str) -> str:
     now = datetime.now()
     t = text.lower()
     if "time" in t:
-        return f"It is {datetime.now().strftime('%I:%M:%S %p')} local time on {datetime.now().strftime('%Y-%m-%d')}."
+        return f"It is {now.strftime('%I:%M:%S %p')} local time on {now.strftime('%Y-%m-%d')}."
     if "day" in t:
         return f"Today is {now.strftime('%A, %Y-%m-%d')}."
     return f"Today's date is {now.strftime('%Y-%m-%d')} ({now.strftime('%A')})."
@@ -496,11 +498,11 @@ def has_reminder_intent(text: str) -> bool:
     lowered = text.lower()
     patterns = (
         r"\bremind me\b",
-        r"\bplease remind me\b",
-        r"\bset a reminder\b",
+        r"\b(?:please\s+)?set a reminder\b",
         r"\badd a reminder\b",
         r"\bi want a reminder\b",
         r"\bwant a reminder\b",
+        r"\b(?:grim[\s,]+)?(?:please\s+)?(?:set|add)\s+a\s+reminder\b",
     )
     return any(re.search(p, lowered) for p in patterns)
 
@@ -662,16 +664,26 @@ class MiniCalendarWidget(QWidget):
         self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Saturday, saturday)
         self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Sunday, sunday)
 
-        spill = QTextCharFormat()
-        spill.setForeground(QColor("#7f8fa0"))
-        self.calendar.setDateTextFormat(self.calendar.minimumDate(), spill)
+        year = self.calendar.yearShown()
+        month = self.calendar.monthShown()
+        first_day = QDate(year, month, 1)
+        for day in range(1, first_day.daysInMonth() + 1):
+            d = QDate(year, month, day)
+            fmt = QTextCharFormat()
+            weekday = d.dayOfWeek()
+            if weekday == int(Qt.DayOfWeek.Saturday):
+                fmt.setForeground(QColor(C_CYAN))
+            elif weekday == int(Qt.DayOfWeek.Sunday):
+                fmt.setForeground(QColor(C_RED))
+            else:
+                fmt.setForeground(QColor("#e7edf3"))
+            self.calendar.setDateTextFormat(d, fmt)
 
         today_fmt = QTextCharFormat()
         today_fmt.setForeground(QColor("#68d39a"))
         today_fmt.setBackground(QColor("#163825"))
         today_fmt.setFontWeight(QFont.Weight.Bold)
-        self.calendar.setDateTextFormat(self.calendar.selectedDate(), QTextCharFormat())
-        self.calendar.setDateTextFormat(self.calendar.selectedDate().currentDate(), today_fmt)
+        self.calendar.setDateTextFormat(QDate.currentDate(), today_fmt)
 
 
 class CollapsibleSection(QWidget):
@@ -1403,6 +1415,7 @@ class GrimveilDeck(QMainWindow):
         self.memory = MemoryManager(MEMORY_DIR, "GrimVeil")
         self.state = self.memory.load_state()
         self.active_reminder_ids = set()
+        self._tasks_mtime = None
 
         self.system_prompt = (
             "You are GRIMVEIL, a machine intelligence strategist. "
@@ -1828,39 +1841,51 @@ class GrimveilDeck(QMainWindow):
     def _refresh_task_registry_panel(self):
         if not hasattr(self, 'task_log'):
             return
+        try:
+            self._tasks_mtime = self.memory.tasks_path.stat().st_mtime
+        except Exception:
+            self._tasks_mtime = None
         tasks = self.memory.load_tasks()
         if not tasks:
-            self.task_log.setHtml(f"<span style='color:{C_TEXT_DIM};'>No tasks logged.</span>")
+            self.task_log.setHtml(f"<span style='color:{C_TEXT_DIM};'>✦ Task Registry empty. Entropy currently denied.</span>")
             return
         now = datetime.now()
-        lines = []
+        lines = [
+            f"<span style='color:{C_TEXT_DIM};'>DUE               | TASK                         | STATUS</span>",
+            f"<span style='color:{C_TEXT_DIM};'>──────────────────────────────────────────────────────────────</span>",
+        ]
         for task in sorted(tasks, key=lambda x: x.get('due_at', x.get('due', ''))):
             due = parse_iso(task.get('due_at') or task.get('due'))
             status = task.get('status', 'pending')
             is_completed = status == "completed" or bool(task.get("acknowledged_at"))
             if due:
                 if is_completed:
-                    color = C_GREEN
-                    cue = "✅ COMPLETED"
+                    color = "#8b95a1"
                 elif due < now:
                     color = C_RED
-                    cue = "⛔ OVERDUE"
                 elif due - now <= timedelta(hours=1):
                     color = C_GOLD
-                    cue = "⚠️ DUE SOON"
                 else:
-                    color = C_CYAN
-                    cue = "🕒 FUTURE"
-                due_str = due.strftime('%b %d %I:%M %p')
+                    color = C_TEXT
+                due_str = due.strftime('%Y-%m-%d %I:%M%p')
             else:
-                color = C_GREEN if is_completed else C_TEXT_DIM
-                cue = "✅ COMPLETED" if is_completed else "⏳ UNSCHEDULED"
-                due_str = task.get('due_at', task.get('due', 'unknown'))
+                color = "#8b95a1" if is_completed else C_TEXT_DIM
+                due_str = "unscheduled"
+            task_text = html.escape(task.get('text', '')[:28]).ljust(28)
+            status_text = html.escape(status.upper()[:10]).ljust(10)
+            due_col = html.escape(due_str).ljust(17)
             lines.append(
-                f"<span style='color:{color};'>• {cue} | {due_str} | {task.get('text','')} "
-                f"| status={status}</span>"
+                f"<span style='color:{color}; font-family: Consolas, monospace;'>{due_col} | {task_text} | {status_text}</span>"
             )
         self.task_log.setHtml("<br>".join(lines))
+
+    def _refresh_task_registry_if_changed(self):
+        try:
+            current_mtime = self.memory.tasks_path.stat().st_mtime
+        except Exception:
+            current_mtime = None
+        if current_mtime != self._tasks_mtime:
+            self._refresh_task_registry_panel()
 
     def _refresh_anchor_ui(self):
         if self.anchor_state >= 0.85:
@@ -2191,16 +2216,25 @@ class GrimveilDeck(QMainWindow):
         if not force_intent and not has_reminder_intent(lower):
             return None
 
-        prefix = r"(?:grim[\s,]+)?(?:please\s+)?(?:remind me|set a reminder|add a reminder|(?:i\s+)?want a reminder(?:\s+for)?)"
-        in_match = re.search(rf"{prefix}\s+in\s+(.+?)\s+to\s+(.+)$", t, re.I)
+        lead_prefix = (
+            r"^\s*(?:grim[\s,]+)?(?:please\s+)?"
+            r"(?:remind me|set a reminder|add a reminder|(?:i\s+)?want a reminder)"
+            r"\s*(?:for\s+)?"
+        )
+        payload = re.sub(lead_prefix, "", t, flags=re.I).strip()
+        if not payload:
+            return None
+
+        in_match = re.search(r"^in\s+(.+?)\s+to\s+(.+)$", payload, re.I)
         if in_match:
             delta = parse_duration_phrase(in_match.group(1))
             if delta:
                 return in_match.group(2).strip().rstrip(".!?"), datetime.now() + delta
 
         dt_match = re.search(
-            rf"{prefix}\s+(?:on|for)\s+(\d{{4}}-\d{{2}}-\d{{2}})\s+at\s+(\d{{1,2}})(?::(\d{{2}}))?\s*(am|pm)?(?:\s+to\s+|,\s*)(.+)$",
-            t, re.I
+            r"^(?:on\s+|for\s+)?(\d{4}-\d{2}-\d{2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s+to\s+|,\s*|\s+)(.+)$",
+            payload,
+            re.I,
         )
         if dt_match:
             d = datetime.strptime(dt_match.group(1), "%Y-%m-%d")
@@ -2214,7 +2248,7 @@ class GrimveilDeck(QMainWindow):
                     hour += 12
             return dt_match.group(5).strip().rstrip(".!?"), d.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
 
-        at_match = re.search(rf"{prefix}\s+(?:for|at)\s+(\d{{1,2}})(?::(\d{{2}}))?\s*(am|pm)?\s+to\s+(.+)$", t, re.I)
+        at_match = re.search(r"^(?:for\s+|at\s+)(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+to\s+(.+)$", payload, re.I)
         if at_match:
             hour = int(at_match.group(1))
             minute = int(at_match.group(2) or 0)
@@ -2229,6 +2263,12 @@ class GrimveilDeck(QMainWindow):
             if due <= now:
                 due += timedelta(days=1)
             return at_match.group(4).strip().rstrip(".!?"), due
+
+        fallback_match = re.search(r"^(.+?)\s+to\s+(.+)$", payload, re.I)
+        if fallback_match:
+            maybe_duration = parse_duration_phrase(fallback_match.group(1))
+            if maybe_duration:
+                return fallback_match.group(2).strip().rstrip(".!?"), datetime.now() + maybe_duration
         return None
 
     def _check_due_tasks(self):
@@ -2252,8 +2292,7 @@ class GrimveilDeck(QMainWindow):
         self.lbl_session.setText(f"✦ SESSION: {h:02d}:{m:02d}:{s:02d}")
         self.lbl_tokens.setText(f"✦ TOKENS: {self.token_count}")
         self._refresh_anchor_ui()
-        if int(time.time()) % 5 == 0:
-            self._refresh_task_registry_panel()
+        self._refresh_task_registry_if_changed()
 
         if PSUTIL_OK:
             mem = psutil.virtual_memory()
