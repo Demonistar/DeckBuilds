@@ -1,10 +1,10 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.8.4
+# Version: 1.8.5
 # Build Date: 2026-04-01
 # Summary:
-#   Corrected moon illumination rendering math in the status/anchor panel.
+#   Hardened autonomous unsolicited output handling and normalized thread state before generation.
 # Changelog:
 #   - fixed generation lockup by explicitly passing attention_mask to all model.generate() calls
 #   - eliminated unstable no-attention-mask generation path
@@ -21,6 +21,9 @@
 #   - added persistent E-42-driven internal narrative state for unsolicited self-talk threading
 #   - unsolicited transmissions now evolve by mode and escalation level over idle intervals
 #   - active narrative thread now influences subsequent user-facing responses
+#   - removed autonomous scaffold leakage from Tactical Record
+#   - routed unsolicited thread metadata to Diagnostics/Memory Trace
+#   - normalized autonomous thread mode/escalation state before generation
 #   - added Phase 1 Google Calendar outbound sync helper for local tasks
 #   - local task creation now attempts Google Calendar event creation after local save
 #   - added desktop OAuth token reuse cache at C:\AI\Models\GrimVeil_Memories\google\token.json
@@ -85,7 +88,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.8.4"
+APP_VERSION = "1.8.5"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -2049,6 +2052,77 @@ class GrimveilDeck(QMainWindow):
         similarity = difflib.SequenceMatcher(None, c_norm, p_norm).ratio()
         return similarity >= 0.93
 
+    def _sanitize_unsolicited_output(self, text: str):
+        raw = (text or "").strip()
+        if not raw:
+            return ""
+        first_line = raw.splitlines()[0].strip()
+        cleaned = re.sub(r"\s+", " ", first_line).strip()
+        disallowed_patterns = [
+            r"\bmode\s*=",
+            r"\bturn_number\s*=",
+            r"\bescalation_level\s*=",
+            r"\bthread_summary_before\s*=",
+            r"\blast_unsolicited_output\s*=",
+            r"^T\d+\s*\[",
+            r"<\|im_start\|>",
+            r"<\|im_end\|>",
+            r"\bconnected\/E\d+\b",
+            r"\bnearby\/E\d+\b",
+            r"\babsent\/E\d+\b",
+        ]
+        for pattern in disallowed_patterns:
+            if re.search(pattern, cleaned, flags=re.IGNORECASE):
+                return ""
+        cleaned = re.sub(r"^[\-\*\•]\s*", "", cleaned).strip()
+        if not cleaned or len(cleaned) < 3:
+            return ""
+        return cleaned
+
+    def _normalize_autonomous_thread_state(self):
+        now = datetime.now()
+        current_mode = self._get_narrative_mode()
+        prior_mode = self.narrative.get("mode", current_mode)
+        prior_summary = (self.narrative.get("thread_summary", "") or "").strip()
+        if not self.narrative.get("thread_topic"):
+            self._seed_narrative_thread(current_mode)
+        self.narrative["mode"] = current_mode
+        turns = int(self.narrative.get("unsolicited_turn_count", 0) or 0)
+        silences = int(self.narrative.get("silence_intervals", 0) or 0)
+        start = parse_iso(self.narrative.get("thread_start_ts")) or now
+        elapsed_min = max(0, int((now - start).total_seconds() // 60))
+        escalation_before = int(self.narrative.get("escalation_level", 0) or 0)
+
+        if current_mode == "absent":
+            normalized_escalation = min(10, max(2, escalation_before + 1, 1 + turns + (elapsed_min // 10) + (silences // 2)))
+        elif current_mode == "nearby":
+            target = min(4, max(1, 1 + (turns // 2)))
+            normalized_escalation = target if prior_mode == "absent" else min(target, max(1, escalation_before))
+        else:
+            target = min(2, turns // 3)
+            normalized_escalation = min(target, max(0, escalation_before - 1)) if prior_mode in {"nearby", "absent"} else target
+        self.narrative["escalation_level"] = max(0, normalized_escalation)
+
+        mode_tag = f"[{current_mode}/E{self.narrative['escalation_level']}]"
+        summary = (self.narrative.get("thread_summary", "") or "").strip()
+        if not summary:
+            summary = "Monitoring thread active."
+        summary = re.sub(r"\[(?:connected|nearby|absent)/E\d+\]", mode_tag, summary, flags=re.IGNORECASE)
+        if mode_tag not in summary:
+            summary = f"{mode_tag} {summary}".strip()
+        self.narrative["thread_summary"] = summary
+        self.narrative["last_thread_update_ts"] = local_now_iso()
+
+        return {
+            "mode": current_mode,
+            "prior_mode": prior_mode,
+            "turn_number": turns + 1,
+            "escalation_before": escalation_before,
+            "escalation_after": self.narrative["escalation_level"],
+            "summary_before": prior_summary or "none",
+            "summary_after": self.narrative.get("thread_summary", "") or "none",
+        }
+
     def _generate_unsolicited_line(self, mode: str, turn_number: int, escalation: int, thread_summary: str, last_output: str, retry: bool = False):
         if not TORCH_OK or not self.model_loaded or self.model is None or self.tokenizer is None:
             return self._compose_unsolicited_line()
@@ -2081,11 +2155,15 @@ class GrimveilDeck(QMainWindow):
             raw = self.tokenizer.decode(output[0][input_ids.shape[-1]:], skip_special_tokens=True)
             line = re.sub(r"\s+", " ", raw).strip().split("\n")[0].strip()
             self.log_diagnostic("Unsolicited generation completed.", level="INFO")
-            return line if line else self._compose_unsolicited_line()
+            sanitized = self._sanitize_unsolicited_output(line)
+            if not sanitized:
+                self.log_diagnostic("Unsolicited generation produced invalid/scaffold text; candidate rejected.", level="WARN")
+                self.log_memory_trace(f"Rejected unsolicited candidate due to scaffold/empty output: {self._preview_text(line, max_chars=160)}", phase="PHASE")
+            return sanitized
         except Exception as ex:
             self.log_diagnostic(f"Unsolicited generation failed: {ex}", level="ERROR")
             self.log_diagnostic(f"Unsolicited model generation fallback engaged: {ex}", level="WARN")
-            return self._compose_unsolicited_line()
+            return ""
 
     def _update_unsolicited_thread_summary(self, prior_summary: str, accepted_line: str, mode: str, turn_number: int, escalation: int):
         prior = (prior_summary or "").strip()
@@ -2106,33 +2184,31 @@ class GrimveilDeck(QMainWindow):
             return
         self.log_diagnostic("Unsolicited transmission trigger fired.", level="INFO")
         self.narrative["silence_intervals"] = int(self.narrative.get("silence_intervals", 0)) + 1
-        current_mode = self._get_narrative_mode()
         last_update = parse_iso(self.narrative.get("last_thread_update_ts"))
         if last_update and (datetime.now() - last_update) > timedelta(hours=8):
-            self._seed_narrative_thread(current_mode)
-        if not self.narrative.get("thread_topic"):
-            self._seed_narrative_thread(current_mode)
-        elif self.narrative.get("mode") != current_mode:
-            self._transition_narrative_mode(current_mode)
-        start = parse_iso(self.narrative.get("thread_start_ts")) or datetime.now()
-        elapsed_min = max(0, int((datetime.now() - start).total_seconds() // 60))
+            self._seed_narrative_thread(self._get_narrative_mode())
+        norm = self._normalize_autonomous_thread_state()
+        current_mode = norm["mode"]
         turns = int(self.narrative.get("unsolicited_turn_count", 0))
-        silences = int(self.narrative.get("silence_intervals", 0))
-        if current_mode == "absent":
-            level = min(10, 1 + turns + (elapsed_min // 10) + (silences // 2))
-        elif current_mode == "nearby":
-            level = min(4, 1 + (turns // 2))
-        else:
-            level = min(2, turns // 3)
-        self.narrative["escalation_level"] = level
+        level = int(self.narrative.get("escalation_level", 0))
         prior_summary = self.narrative.get("thread_summary", "")
         prior_output = self.narrative.get("last_unsolicited_output", "")
         self.log_diagnostic(
             (
-                f"Autonomous thread pre-gen | turn={turns + 1} | mode={current_mode} | "
-                f"summary={prior_summary or 'none'} | last={prior_output or 'none'}"
+                f"Autonomous normalized pre-gen | prior_mode={norm['prior_mode']} | mode={current_mode} | "
+                f"turn={norm['turn_number']} | escalation={norm['escalation_before']}->{norm['escalation_after']} | "
+                f"summary_before={norm['summary_before']} | summary_after={norm['summary_after']}"
             ),
             level="DEBUG"
+        )
+        self.log_memory_trace(
+            (
+                f"Autonomous normalize | prior_mode={norm['prior_mode']} | mode={current_mode} | "
+                f"turn={norm['turn_number']} | escalation={norm['escalation_before']}->{norm['escalation_after']} | "
+                f"summary_before={self._preview_text(norm['summary_before'], 120)} | "
+                f"summary_after={self._preview_text(norm['summary_after'], 120)}"
+            ),
+            phase="PHASE",
         )
 
         line = self._generate_unsolicited_line(
@@ -2160,6 +2236,14 @@ class GrimveilDeck(QMainWindow):
             )
             if self._is_unsolicited_duplicate(line, prior_output):
                 line = f"{line} New development: focus shifted to next unresolved signal."
+        line = self._sanitize_unsolicited_output(line)
+        if not line:
+            self.log_diagnostic(
+                f"Autonomous output empty/invalid on turn {turns + 1}; using deterministic fallback line.",
+                level="WARN"
+            )
+            line = self._sanitize_unsolicited_output(self._compose_unsolicited_line())
+            self.log_memory_trace("Autonomous output fallback applied after invalid/empty model output.", phase="PHASE")
 
         self.narrative["unsolicited_turn_count"] = turns + 1
         self.narrative["last_unsolicited_output"] = line
@@ -2174,9 +2258,13 @@ class GrimveilDeck(QMainWindow):
         self.log_diagnostic(
             (
                 f"Autonomous thread post-gen | accepted={'rejected-duplicate-regenerated' if duplicate_rejected else 'accepted-first-pass'} | "
-                f"updated_summary={self.narrative.get('thread_summary', 'none')}"
+                f"final_unsolicited={line} | updated_summary={self.narrative.get('thread_summary', 'none')}"
             ),
             level="DEBUG"
+        )
+        self.log_memory_trace(
+            f"Autonomous output accepted | mode={current_mode} | turn={self.narrative['unsolicited_turn_count']} | line={self._preview_text(line, 180)}",
+            phase="SELECTED",
         )
         history_entry = (
             f"[Unsolicited thread turn {self.narrative['unsolicited_turn_count']} | "
