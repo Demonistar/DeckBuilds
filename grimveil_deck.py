@@ -1,11 +1,13 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.8.1
+# Version: 1.8.2
 # Build Date: 2026-04-01
 # Summary:
 #   Corrected moon illumination rendering math in the status/anchor panel.
 # Changelog:
+#   - added Memory Trace view for memory retrieval validation and startup continuity evidence logging
+#   - memory searches now expose retrieval metadata, candidate scoring, and selected-record markers
 #   - corrected moon illumination rendering math so displayed moon matches labeled illumination/phase
 #   - fixed idle timer lifecycle: timer now stops immediately on prompt submission and invalidates countdown target
 #   - unsolicited transmission now aborts safely during generation without restarting countdown mid-response
@@ -77,7 +79,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.8.2"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -1116,13 +1118,35 @@ class MemoryManager:
             self.save_all_tasks(tasks)
         return events
 
-    def search_memories(self, query: str, limit=6):
+    def search_memories(self, query: str, limit=6, include_trace: bool = False):
         memories = self._read_jsonl(self.memories_path)
+        trace = {
+            "query": query,
+            "total_records": len(memories),
+            "candidate_count": 0,
+            "scored_count": 0,
+            "selected_count": 0,
+            "candidates": [],
+            "selected_ids": [],
+            "no_match": False,
+        }
         if not query.strip():
-            return memories[-limit:]
+            selected = memories[-limit:]
+            trace["candidate_count"] = len(selected)
+            trace["selected_count"] = len(selected)
+            trace["selected_ids"] = [item.get("id") for item in selected if item.get("id")]
+            for index, item in enumerate(memories, start=1):
+                if item in selected:
+                    trace["candidates"].append({
+                        "score": None,
+                        "selected": True,
+                        "jsonl_index": index,
+                        "record": item,
+                    })
+            return (selected, trace) if include_trace else selected
         q_terms = extract_keywords(query, limit=16)
         results = []
-        for item in memories:
+        for index, item in enumerate(memories, start=1):
             item_terms = set(extract_keywords(" ".join([
                 item.get("title", ""),
                 item.get("summary", ""),
@@ -1146,9 +1170,30 @@ class MemoryManager:
                     score += 2
 
             if score > 0:
-                results.append((score, item))
+                results.append((score, item, index))
+                trace["candidates"].append({
+                    "score": score,
+                    "selected": False,
+                    "jsonl_index": index,
+                    "record": item,
+                })
+        trace["candidate_count"] = len(results)
+        trace["scored_count"] = len(results)
         results.sort(key=lambda x: (x[0], x[1].get("timestamp", "")), reverse=True)
-        return [item for _, item in results[:limit]]
+        selected_pairs = results[:limit]
+        selected = [item for _, item, _ in selected_pairs]
+        selected_ids = {item.get("id") for item in selected if item.get("id")}
+        trace["selected_count"] = len(selected)
+        trace["selected_ids"] = list(selected_ids)
+        trace["no_match"] = len(selected) == 0
+        for candidate in trace["candidates"]:
+            rec_id = candidate["record"].get("id")
+            if rec_id and rec_id in selected_ids:
+                candidate["selected"] = True
+        return (selected, trace) if include_trace else selected
+
+    def memory_record_count(self):
+        return len(self._read_jsonl(self.memories_path))
 
 
 class AnchorStatusPanel(QWidget):
@@ -2064,7 +2109,8 @@ class GrimveilDeck(QMainWindow):
 
         self.btn_view_tactical = QPushButton("TACTICAL RECORD")
         self.btn_view_diagnostics = QPushButton("DIAGNOSTICS")
-        for btn in (self.btn_view_tactical, self.btn_view_diagnostics):
+        self.btn_view_memory_trace = QPushButton("MEMORY TRACE")
+        for btn in (self.btn_view_tactical, self.btn_view_diagnostics, self.btn_view_memory_trace):
             btn.setCheckable(True)
             btn.setStyleSheet(
                 f"QPushButton {{ background-color: {C_BG3}; color: {C_GOLD}; border: 1px solid {C_CYAN_DIM}; "
@@ -2073,8 +2119,10 @@ class GrimveilDeck(QMainWindow):
             )
         self.btn_view_tactical.clicked.connect(lambda: self._switch_output_view("tactical"))
         self.btn_view_diagnostics.clicked.connect(lambda: self._switch_output_view("diagnostics"))
+        self.btn_view_memory_trace.clicked.connect(lambda: self._switch_output_view("memory_trace"))
         record_header_row.addWidget(self.btn_view_tactical)
         record_header_row.addWidget(self.btn_view_diagnostics)
+        record_header_row.addWidget(self.btn_view_memory_trace)
         record_header_row.addStretch()
         left_panel.addLayout(record_header_row)
 
@@ -2098,6 +2146,21 @@ class GrimveilDeck(QMainWindow):
             selection-background-color: {C_CYAN_DIM};
         """)
         self.output_stack.addWidget(self.diagnostics_display)
+
+        self.memory_trace_display = QTextEdit()
+        self.memory_trace_display.setReadOnly(True)
+        self.memory_trace_display.setMinimumWidth(580)
+        self.memory_trace_display.setStyleSheet(f"""
+            background-color: {C_MONITOR};
+            color: {C_CYAN};
+            border: 1px solid {C_CYAN_DIM};
+            border-radius: 2px;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 11px;
+            padding: 8px;
+            selection-background-color: {C_CYAN_DIM};
+        """)
+        self.output_stack.addWidget(self.memory_trace_display)
         left_panel.addWidget(self.output_stack, 1)
         self._switch_output_view("tactical")
 
@@ -2396,10 +2459,12 @@ class GrimveilDeck(QMainWindow):
     def _emit_wake_mode(self):
         last_shutdown = parse_iso(self.state.get("last_shutdown"))
         pending = [t for t in self.memory.load_tasks() if not t.get("acknowledged_at") and t.get("status") not in {"completed", "cancelled"}]
+        self.log_memory_trace("Startup continuity check initiated.", phase="BOOT")
 
         if self.memory.first_run:
             self._append_chat("SYSTEM", "Persistent memory scaffold established. Future disappointments will now be archived properly. 😎")
             self._append_chat("SYSTEM", "Report dreams, failures, ideas, or reminders requiring preservation.")
+            self.log_memory_trace("First run detected; no prior memory continuity records available.", phase="BOOT")
             return
 
         if last_shutdown:
@@ -2420,6 +2485,18 @@ class GrimveilDeck(QMainWindow):
         if recent:
             titles = ", ".join(m.get("title", "untitled") for m in recent[-3:])
             self._append_chat("SYSTEM", f"Recent memory digest loaded: {titles}.")
+            self.log_memory_trace(f"Startup continuity loaded {len(recent[-3:])} recent memory record(s).", phase="BOOT")
+            for idx, item in enumerate(recent[-3:], start=1):
+                startup_candidate = {
+                    "selected": True,
+                    "score": "startup",
+                    "jsonl_index": "n/a",
+                    "record": item,
+                }
+                self.log_memory_trace(f"Startup record {idx} used for continuity digest.", phase="BOOT")
+                self.log_memory_candidate(startup_candidate)
+        else:
+            self.log_memory_trace("Startup continuity found no recent memory records.", phase="BOOT")
         if pending:
             self._append_chat("SYSTEM", f"{len(pending)} unresolved task(s) detected. Naturally, entropy handled nothing. 😑")
         self._refresh_task_registry_panel()
@@ -2485,10 +2562,21 @@ class GrimveilDeck(QMainWindow):
         self.chat_display.verticalScrollBar().setValue(self.chat_display.verticalScrollBar().maximum())
 
     def _switch_output_view(self, view_name: str):
-        tactical = (view_name or "").strip().lower() != "diagnostics"
-        self.btn_view_tactical.setChecked(tactical)
-        self.btn_view_diagnostics.setChecked(not tactical)
-        self.output_stack.setCurrentWidget(self.chat_display if tactical else self.diagnostics_display)
+        normalized = (view_name or "").strip().lower()
+        target = "tactical"
+        if normalized in {"diagnostics", "memory_trace"}:
+            target = normalized
+
+        self.btn_view_tactical.setChecked(target == "tactical")
+        self.btn_view_diagnostics.setChecked(target == "diagnostics")
+        self.btn_view_memory_trace.setChecked(target == "memory_trace")
+
+        widget_map = {
+            "tactical": self.chat_display,
+            "diagnostics": self.diagnostics_display,
+            "memory_trace": self.memory_trace_display,
+        }
+        self.output_stack.setCurrentWidget(widget_map.get(target, self.chat_display))
 
     def log_diagnostic(self, message: str, level: str = "INFO"):
         if not hasattr(self, "diagnostics_display"):
@@ -2513,6 +2601,63 @@ class GrimveilDeck(QMainWindow):
     def log_exception(self, context: str, exception: Exception):
         detail = f"{exception.__class__.__name__}: {exception}"
         self.log_diagnostic(f"{context} failed with {detail}", level="ERROR")
+
+    def log_memory_trace(self, message: str, phase: str = "INFO"):
+        if not hasattr(self, "memory_trace_display"):
+            return
+        ts = datetime.now().strftime("%H:%M:%S")
+        phase_label = (phase or "INFO").upper()
+        phase_colors = {
+            "START": C_GOLD,
+            "PHASE": C_PURPLE,
+            "CANDIDATE": C_TEXT_DIM,
+            "SELECTED": C_GREEN,
+            "NONE": C_RED,
+            "INFO": C_CYAN,
+            "BOOT": C_GOLD,
+        }
+        color = phase_colors.get(phase_label, C_CYAN)
+        safe = html.escape(str(message))
+        self.memory_trace_display.append(
+            f'<span style="color:{C_TEXT_DIM};">[{ts}]</span> '
+            f'<span style="color:{color}; font-weight:bold;">[{phase_label}]</span> '
+            f'<span style="color:{C_CYAN};">{safe}</span>'
+        )
+        self.memory_trace_display.verticalScrollBar().setValue(self.memory_trace_display.verticalScrollBar().maximum())
+
+    def _preview_text(self, text: str, max_chars: int = 120):
+        clean = " ".join((text or "").split())
+        if len(clean) <= max_chars:
+            return clean
+        return f"{clean[:max_chars - 3]}..."
+
+    def log_memory_candidate(self, candidate: dict):
+        record = candidate.get("record", {}) if isinstance(candidate, dict) else {}
+        selected = bool(candidate.get("selected"))
+        marker = "SELECTED" if selected else "MATCHED"
+        msg = (
+            f"{marker} | id={record.get('id', 'n/a')} | idx={candidate.get('jsonl_index', 'n/a')} | "
+            f"score={candidate.get('score', 'n/a')} | ts={record.get('timestamp', 'n/a')} | "
+            f"type={record.get('type', 'n/a')} | title={record.get('title', 'untitled')} | "
+            f"keywords={record.get('keywords', [])[:8]} | tags={record.get('tags', [])[:8]} | "
+            f"src_msgs={record.get('source_message_ids', [])} | preview={self._preview_text(record.get('summary') or record.get('content', ''))}"
+        )
+        self.log_memory_trace(msg, phase="SELECTED" if selected else "CANDIDATE")
+
+    def log_memory_selection(self, trace: dict):
+        selected_count = int((trace or {}).get("selected_count", 0) or 0)
+        candidate_count = int((trace or {}).get("candidate_count", 0) or 0)
+        scored_count = int((trace or {}).get("scored_count", 0) or 0)
+        if selected_count <= 0:
+            self.log_memory_trace(
+                f"Retrieval finished: candidates={candidate_count}, scored={scored_count}, selected=0 (no relevant memory found).",
+                phase="NONE",
+            )
+            return
+        self.log_memory_trace(
+            f"Retrieval finished: candidates={candidate_count}, scored={scored_count}, selected={selected_count}.",
+            phase="PHASE",
+        )
 
     def _check_generation_watchdog(self):
         if self.status != "GENERATING" or not self._generation_started_at:
@@ -2937,7 +3082,18 @@ class GrimveilDeck(QMainWindow):
                 self._log_emotion("alert")
             self.face_locked = False
 
-            retrieved = self.memory.search_memories(text, limit=6)
+            self.log_memory_trace(
+                f"Memory search started | query=\"{self._preview_text(text, max_chars=100)}\" | total_records={self.memory.memory_record_count()}",
+                phase="START",
+            )
+            retrieved, retrieval_trace = self.memory.search_memories(text, limit=6, include_trace=True)
+            self.log_memory_trace(
+                f"Memory search phase: candidate records found={retrieval_trace.get('candidate_count', 0)}.",
+                phase="PHASE",
+            )
+            for candidate in retrieval_trace.get("candidates", []):
+                self.log_memory_candidate(candidate)
+            self.log_memory_selection(retrieval_trace)
             prompt = self._build_final_prompt(normalized_text, retrieved)
 
             self.send_btn.setEnabled(False)
