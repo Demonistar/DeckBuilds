@@ -1,7 +1,7 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.5.1
+# Version: 1.5.2
 # Build Date: 2026-04-01
 # Summary:
 #   Phase 1 outbound Google Calendar push for local task creation.
@@ -11,6 +11,8 @@
 #   - added desktop OAuth token reuse cache at C:\AI\Models\GrimVeil_Memories\google\token.json
 #   - improved Google Calendar outbound sync diagnostics
 #   - now surfaces actual push failure reason
+#   - fixed Google Calendar timed event payload timezone formatting
+#   - now sends valid IANA timezone with start/end event objects
 
 import sys
 import time
@@ -56,7 +58,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -124,6 +126,13 @@ MEMORY_DIR = AI_MODELS_DIR / "GrimVeil_Memories"
 GOOGLE_CREDENTIALS_PATH = Path(r"C:\AI\config\google_credentials.json")
 GOOGLE_TOKEN_PATH = Path(r"C:\AI\Models\GrimVeil_Memories\google\token.json")
 GOOGLE_SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
+DEFAULT_GOOGLE_IANA_TIMEZONE = "America/Chicago"
+WINDOWS_TZ_TO_IANA = {
+    "Central Standard Time": "America/Chicago",
+    "Eastern Standard Time": "America/New_York",
+    "Pacific Standard Time": "America/Los_Angeles",
+    "Mountain Standard Time": "America/Denver",
+}
 FACES_DIR = r"C:\AI\Models\Faces"
 MODEL_PATH = str(AI_MODELS_DIR / "dolphin-2.6-7b")
 FACE_FALLBACK_FILENAME = "GrimVeile Neutral.png"
@@ -1393,6 +1402,34 @@ class GoogleCalendarService:
         print("[GCal][DEBUG] Authenticated Google Calendar service created successfully.")
         return link_established
 
+    def _get_google_event_timezone(self) -> str:
+        local_tzinfo = datetime.now().astimezone().tzinfo
+        candidates = []
+        if local_tzinfo is not None:
+            candidates.extend([
+                getattr(local_tzinfo, "key", None),
+                getattr(local_tzinfo, "zone", None),
+                str(local_tzinfo),
+                local_tzinfo.tzname(datetime.now()),
+            ])
+
+        env_tz = os.environ.get("TZ")
+        if env_tz:
+            candidates.append(env_tz)
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            mapped = WINDOWS_TZ_TO_IANA.get(candidate, candidate)
+            if "/" in mapped:
+                return mapped
+
+        print(
+            "[GCal][WARN] Unable to resolve local IANA timezone. "
+            f"Falling back to {DEFAULT_GOOGLE_IANA_TIMEZONE}."
+        )
+        return DEFAULT_GOOGLE_IANA_TIMEZONE
+
     def create_event_for_task(self, task: dict):
         due_at = parse_iso(task.get("due_at") or task.get("due"))
         if not due_at:
@@ -1402,23 +1439,25 @@ class GoogleCalendarService:
         if self._service is None:
             link_established = self._build_service()
 
-        start_dt = due_at
-        end_dt = due_at + timedelta(minutes=30)
-        tzinfo = datetime.now().astimezone().tzinfo
-        tz_name = getattr(tzinfo, "key", None) or (tzinfo.tzname(datetime.now()) if tzinfo else "UTC")
+        due_local = due_at.astimezone() if due_at.tzinfo else due_at
+        start_dt = due_local.replace(microsecond=0, tzinfo=None)
+        end_dt = start_dt + timedelta(minutes=30)
+        tz_name = self._get_google_event_timezone()
 
         event_payload = {
             "summary": (task.get("text") or "Reminder").strip(),
-            "start": {"dateTime": start_dt.isoformat(), "timeZone": tz_name},
-            "end": {"dateTime": end_dt.isoformat(), "timeZone": tz_name},
+            "start": {"dateTime": start_dt.isoformat(timespec="seconds"), "timeZone": tz_name},
+            "end": {"dateTime": end_dt.isoformat(timespec="seconds"), "timeZone": tz_name},
         }
         target_calendar_id = "primary"
         print(f"[GCal][DEBUG] Target calendar ID: {target_calendar_id}")
         print(
             "[GCal][DEBUG] Event payload before insert: "
             f"title='{event_payload.get('summary')}', "
-            f"start='{event_payload.get('start', {}).get('dateTime')}', "
-            f"end='{event_payload.get('end', {}).get('dateTime')}'"
+            f"start.dateTime='{event_payload.get('start', {}).get('dateTime')}', "
+            f"start.timeZone='{event_payload.get('start', {}).get('timeZone')}', "
+            f"end.dateTime='{event_payload.get('end', {}).get('dateTime')}', "
+            f"end.timeZone='{event_payload.get('end', {}).get('timeZone')}'"
         )
         try:
             created = self._service.events().insert(calendarId=target_calendar_id, body=event_payload).execute()
