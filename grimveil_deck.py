@@ -37,10 +37,10 @@ from PyQt6.QtWidgets import (
     QGridLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QFrame, QCalendarWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QDate
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QDate, QSize
 from PyQt6.QtGui import (
     QFont, QColor, QPainter, QLinearGradient,
-    QPixmap, QPen, QPainterPath, QTextCharFormat
+    QPixmap, QPen, QPainterPath, QTextCharFormat, QIcon
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
@@ -109,8 +109,37 @@ AI_MODELS_DIR = SCRIPT_DIR / "AI" / "Models"
 if SCRIPT_DIR.name.lower() == "models" and SCRIPT_DIR.parent.name.lower() == "ai":
     AI_MODELS_DIR = SCRIPT_DIR
 MEMORY_DIR = AI_MODELS_DIR / "GrimVeil_Memories"
-FACES_DIR = str(AI_MODELS_DIR / "Faces" / "Grimveil")
+FACES_DIR = r"C:\AI\Models\Faces"
 MODEL_PATH = str(AI_MODELS_DIR / "dolphin-2.6-7b")
+FACE_FALLBACK_FILENAME = "GrimVeile_Neutral.png"
+E42_ICON_FILES = {
+    "connected": "E42_Docked.png",
+    "nearby": "E42_Nearby.png",
+    "absent": "E42_Absent.png",
+}
+_PIXMAP_CACHE = {}
+_MISSING_ASSET_WARNED = set()
+
+
+def load_faces_pixmap(filename: str, use_fallback: bool = True) -> QPixmap:
+    path = os.path.join(FACES_DIR, filename)
+    if path in _PIXMAP_CACHE:
+        return _PIXMAP_CACHE[path]
+
+    pixmap = QPixmap(path)
+    if not pixmap.isNull():
+        _PIXMAP_CACHE[path] = pixmap
+        return pixmap
+
+    if filename not in _MISSING_ASSET_WARNED:
+        print(f"[WARN] Missing face asset: {filename}")
+        _MISSING_ASSET_WARNED.add(filename)
+
+    if use_fallback and filename != FACE_FALLBACK_FILENAME:
+        return load_faces_pixmap(FACE_FALLBACK_FILENAME, use_fallback=False)
+
+    _PIXMAP_CACHE[path] = QPixmap()
+    return _PIXMAP_CACHE[path]
 
 FACE_FILES = {
     "neutral":     "Grimveil_Neutral",
@@ -1285,11 +1314,9 @@ class FaceWidget(QLabel):
 
     def _load_faces(self):
         for face_key, filename in FACE_FILES.items():
-            path = os.path.join(self.faces_dir, f"{filename}.png")
-            if os.path.exists(path):
-                px = QPixmap(path)
-                if not px.isNull():
-                    self.pixmap_cache[face_key] = px
+            px = load_faces_pixmap(f"{filename}.png")
+            if not px.isNull():
+                self.pixmap_cache[face_key] = px
         self._render("neutral")
 
     def _render(self, face_name):
@@ -1570,6 +1597,7 @@ class GrimveilDeck(QMainWindow):
         anchor_row.addWidget(self.btn_nearby)
         anchor_row.addWidget(self.btn_absent)
         left_panel.addLayout(anchor_row)
+        self._apply_e42_icons()
 
         input_row = QHBoxLayout()
         input_row.setSpacing(6)
@@ -2059,6 +2087,19 @@ class GrimveilDeck(QMainWindow):
         else:
             self.lbl_anchor.setText("✦ ANCHOR: ABSENT / GRIMVEIL")
             self.lbl_anchor.setStyleSheet(f"color: {C_RED}; font-size: 10px; border: none;")
+
+    def _apply_e42_icons(self):
+        icon_map = {
+            self.btn_connected: E42_ICON_FILES["connected"],
+            self.btn_nearby: E42_ICON_FILES["nearby"],
+            self.btn_absent: E42_ICON_FILES["absent"],
+        }
+        for button, filename in icon_map.items():
+            px = load_faces_pixmap(filename)
+            if px.isNull():
+                continue
+            button.setIcon(QIcon(px))
+            button.setIconSize(QSize(16, 16))
 
     def _set_anchor_state(self, value):
         self.anchor_state = max(0.0, min(1.0, value))
