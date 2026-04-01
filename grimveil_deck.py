@@ -1,14 +1,14 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.4.3
+# Version: 1.4.4
 # Build Date: 2026-04-01
 # Summary:
-#   Visage Matrix layout/control replacement pass:
-#   replaced old anchor-state buttons with image-only E-42 control block beside the face.
+#   Anchor-state baseline face correction pass for E-42 behavior.
 # Changelog:
-#   - replaced old anchor-state buttons with image-only E-42 control block beside face
-#   - repositioned adjacent Visage Matrix instrumentation for spacing/alignment
+#   - corrected anchor-state baseline face behavior
+#   - absent state now defaults to panicked instead of neutral
+#   - docked/nearby/absent now restore to neutral/concerned/panicked respectively
 
 import sys
 import time
@@ -42,7 +42,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.4.3"
+APP_VERSION = "1.4.4"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -2114,24 +2114,27 @@ class GrimveilDeck(QMainWindow):
             button.setIcon(QIcon(px))
             button.setIconSize(QSize(36, 36))
 
+    def _anchor_baseline_face(self):
+        if self.anchor_state >= 0.85:
+            return "neutral"
+        if self.anchor_state >= 0.45:
+            return "concerned"
+        return "panicked"
+
     def _set_anchor_state(self, value):
         self.anchor_state = max(0.0, min(1.0, value))
         self._refresh_anchor_ui()
         if self.anchor_state >= 0.85:
             self._append_chat("SYSTEM", "E-42 docked. GRIMVEILE-42 stabilized.")
-            if self.status != "GENERATING":
-                self.face_widget.set_face("reassured")
-                self._log_emotion("reassured")
         elif self.anchor_state >= 0.45:
             self._append_chat("SYSTEM", "E-42 nearby. Comfort subroutine active.")
-            if self.status != "GENERATING":
-                self.face_widget.set_face("concerned")
-                self._log_emotion("concerned")
         else:
             self._append_chat("SYSTEM", "E-42 absent. GRIMVEIL operating incomplete.")
-            if self.status != "GENERATING":
-                self.face_widget.set_face("isolated")
-                self._log_emotion("isolated")
+
+        if self.status != "GENERATING":
+            baseline_face = self._anchor_baseline_face()
+            self.face_widget.set_face(baseline_face)
+            self._log_emotion(baseline_face)
 
     def _handle_task_command(self, text: str):
         normalized = text.strip().lower()
@@ -2402,7 +2405,7 @@ class GrimveilDeck(QMainWindow):
 
     def _on_sentiment(self, face_name):
         if self.anchor_state < 0.45 and face_name in ("neutral", "happy", "relieved", "reassured"):
-            face_name = "isolated"
+            face_name = "panicked"
         self.face_locked = False
         self.face_widget.set_face(face_name)
         self._log_emotion(face_name)
@@ -2411,12 +2414,7 @@ class GrimveilDeck(QMainWindow):
     def _return_to_baseline_face(self):
         if self.face_locked or self.status == "GENERATING":
             return
-        if self.anchor_state >= 0.85:
-            self.face_widget.set_face("neutral")
-        elif self.anchor_state >= 0.45:
-            self.face_widget.set_face("concerned")
-        else:
-            self.face_widget.set_face("isolated")
+        self.face_widget.set_face(self._anchor_baseline_face())
 
     def _on_error(self, error):
         self._append_chat("ERROR", error)
