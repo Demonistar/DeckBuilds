@@ -1,18 +1,17 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.3.2
+# Version: 1.4.0
 # Build Date: 2026-04-01
 # Summary:
-#   Deterministic hardening pass for persona-prefix normalization, Python-authoritative date/time,
-#   expanded reminder parser reliability, and MM/DD/YYYY presentation consistency.
+#   Functional Task Registry upgrade: interactive row-based panel with active/completed filtering,
+#   row actions, and immediate refresh persistence behavior.
 # Changelog:
-#   - Added persona-prefix preprocessing to normalize Grim/Grimveil/Grimveile callouts before intent detection.
-#   - Enforced Python-authoritative date/time responses and deterministic system-formatted confirmations.
-#   - Expanded datetime query matching to capture common natural phrasing variants after normalization.
-#   - Hardened reminder interception so only Python-confirmed task writes can produce reminder success messages.
-#   - Broadened reminder parsing for at/on/tomorrow/in patterns with optional task text fallback to "Reminder".
-#   - Switched calendar click insertion and runtime prompt date display formatting to MM/DD/YYYY.
+#   - Replaced text-only Task Registry log with a compact interactive QTableWidget task panel.
+#   - Added selectable task rows with double-click completion and action buttons (complete/cancel/show completed/purge).
+#   - Implemented active-only default task view with explicit completed visibility toggle.
+#   - Separated complete, hide/show completed, and purge completed behaviors.
+#   - Preserved JSONL task persistence and backward compatibility while adding immediate UI refresh after task updates.
 
 import sys
 import time
@@ -36,7 +35,8 @@ except ImportError:
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QGridLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QFrame, QCalendarWidget
+    QGridLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QFrame, QCalendarWidget,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QDate
 from PyQt6.QtGui import (
@@ -45,7 +45,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.4.0"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -955,7 +955,7 @@ class MemoryManager:
 
     def clear_completed_tasks(self):
         tasks = self.load_tasks()
-        kept = [t for t in tasks if t.get('status') != 'completed']
+        kept = [t for t in tasks if t.get('status') not in {'completed', 'cancelled'}]
         removed = len(tasks) - len(kept)
         if removed:
             self.save_all_tasks(kept)
@@ -1678,19 +1678,67 @@ class GrimveilDeck(QMainWindow):
         task_content = QWidget()
         task_layout = QVBoxLayout(task_content)
         task_layout.setContentsMargins(0, 0, 0, 0)
-        task_layout.setSpacing(0)
-        self.task_log = QTextEdit()
-        self.task_log.setReadOnly(True)
-        self.task_log.setMaximumHeight(130)
-        self.task_log.setStyleSheet(f"""
+        task_layout.setSpacing(4)
+        self.task_show_completed = False
+        self.task_row_ids = []
+
+        self.task_table = QTableWidget(0, 4)
+        self.task_table.setHorizontalHeaderLabels(["DATE", "TIME", "TASK", "STATUS"])
+        self.task_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.task_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.task_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.task_table.setAlternatingRowColors(False)
+        self.task_table.verticalHeader().setVisible(False)
+        self.task_table.horizontalHeader().setStretchLastSection(False)
+        self.task_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.task_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.task_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.task_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.task_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.task_table.setShowGrid(False)
+        self.task_table.setWordWrap(False)
+        self.task_table.setMinimumHeight(116)
+        self.task_table.setMaximumHeight(158)
+        self.task_table.setStyleSheet(f"""
             background-color: {C_BG3};
             color: {C_TEXT};
             border: 1px solid {C_BORDER};
             font-family: Georgia, serif;
             font-size: 10px;
-            padding: 4px;
+            padding: 2px;
         """)
-        task_layout.addWidget(self.task_log)
+        self.task_table.horizontalHeader().setStyleSheet(
+            f"QHeaderView::section {{ background-color: {C_PANEL}; color: {C_TEXT_DIM}; border: none; padding: 2px 4px; font-size: 9px; }}"
+        )
+        self.task_table.itemSelectionChanged.connect(self._on_task_selection_changed)
+        self.task_table.itemDoubleClicked.connect(self._on_task_row_double_clicked)
+        task_layout.addWidget(self.task_table)
+
+        task_actions = QHBoxLayout()
+        task_actions.setContentsMargins(0, 0, 0, 0)
+        task_actions.setSpacing(4)
+        self.btn_complete_task = QPushButton("COMPLETE SELECTED")
+        self.btn_cancel_task = QPushButton("CANCEL SELECTED")
+        self.btn_toggle_completed = QPushButton("SHOW COMPLETED")
+        self.btn_purge_completed = QPushButton("PURGE COMPLETED")
+        for btn in (self.btn_complete_task, self.btn_cancel_task, self.btn_toggle_completed, self.btn_purge_completed):
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {C_BG3}; color: {C_CYAN}; border: 1px solid {C_CYAN_DIM}; "
+                f"border-radius: 2px; font-size: 9px; padding: 3px 6px; letter-spacing: 1px; }}"
+                f"QPushButton:hover {{ background-color: {C_CYAN_DIM}; color: {C_TEXT}; border-color: {C_CYAN}; }}"
+                f"QPushButton:disabled {{ background-color: {C_BG}; color: {C_TEXT_DIM}; border-color: {C_TEXT_DIM}; }}"
+            )
+        self.btn_complete_task.clicked.connect(self._complete_selected_task)
+        self.btn_cancel_task.clicked.connect(self._cancel_selected_task)
+        self.btn_toggle_completed.clicked.connect(self._toggle_show_completed_tasks)
+        self.btn_purge_completed.clicked.connect(self._purge_completed_tasks)
+        self.btn_complete_task.setEnabled(False)
+        self.btn_cancel_task.setEnabled(False)
+        task_actions.addWidget(self.btn_complete_task)
+        task_actions.addWidget(self.btn_cancel_task)
+        task_actions.addWidget(self.btn_toggle_completed)
+        task_actions.addWidget(self.btn_purge_completed)
+        task_layout.addLayout(task_actions)
         self.task_section = CollapsibleSection("TASK REGISTRY", task_content, expanded=True)
         right_panel.addWidget(self.task_section)
 
@@ -1764,7 +1812,7 @@ class GrimveilDeck(QMainWindow):
 
     def _emit_wake_mode(self):
         last_shutdown = parse_iso(self.state.get("last_shutdown"))
-        pending = [t for t in self.memory.load_tasks() if not t.get("acknowledged_at") and t.get("status") != "completed"]
+        pending = [t for t in self.memory.load_tasks() if not t.get("acknowledged_at") and t.get("status") not in {"completed", "cancelled"}]
 
         if self.memory.first_run:
             self._append_chat("SYSTEM", "Persistent memory scaffold established. Future disappointments will now be archived properly. 😎")
@@ -1850,24 +1898,48 @@ class GrimveilDeck(QMainWindow):
         self.emo_log.setHtml("<br>".join(self.emotion_history))
 
     def _refresh_task_registry_panel(self):
-        if not hasattr(self, 'task_log'):
+        if not hasattr(self, 'task_table'):
             return
         try:
             self._tasks_mtime = self.memory.tasks_path.stat().st_mtime
         except Exception:
             self._tasks_mtime = None
-        tasks = self.memory.load_tasks()
-        if not tasks:
-            self.task_log.setHtml(f"<span style='color:{C_TEXT_DIM};'>✦ Task Registry empty. Entropy currently denied.</span>")
+        all_tasks = self.memory.load_tasks()
+        selected_id = self._get_selected_task_id()
+
+        active_tasks = []
+        completed_tasks = []
+        for task in all_tasks:
+            status = (task.get("status") or "pending").lower()
+            is_completed = status == "completed" or bool(task.get("acknowledged_at"))
+            if is_completed or status == "cancelled":
+                completed_tasks.append(task)
+            else:
+                active_tasks.append(task)
+
+        visible_tasks = active_tasks + completed_tasks if self.task_show_completed else active_tasks
+        visible_tasks = sorted(visible_tasks, key=lambda x: x.get('due_at', x.get('due', '')))
+        self.task_row_ids = [task.get("id", "") for task in visible_tasks]
+
+        self.task_table.setRowCount(0)
+        if not visible_tasks:
+            self.task_table.setRowCount(1)
+            for col in range(4):
+                item = QTableWidgetItem("")
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+                self.task_table.setItem(0, col, item)
+            self.task_table.setItem(0, 2, QTableWidgetItem("Task Registry empty. Entropy currently denied."))
+            msg_item = self.task_table.item(0, 2)
+            msg_item.setForeground(QColor(C_TEXT_DIM))
+            self.task_table.setRowHeight(0, 20)
+            self._on_task_selection_changed()
             return
+
         now = datetime.now()
-        lines = [
-            f"<span style='color:{C_TEXT_DIM};'>DUE               | TASK                         | STATUS</span>",
-            f"<span style='color:{C_TEXT_DIM};'>──────────────────────────────────────────────────────────────</span>",
-        ]
-        for task in sorted(tasks, key=lambda x: x.get('due_at', x.get('due', ''))):
+        self.task_table.setRowCount(len(visible_tasks))
+        for row, task in enumerate(visible_tasks):
             due = parse_iso(task.get('due_at') or task.get('due'))
-            status = task.get('status', 'pending')
+            status = (task.get('status', 'pending') or "pending").lower()
             is_completed = status == "completed" or bool(task.get("acknowledged_at"))
             if due:
                 if is_completed:
@@ -1878,17 +1950,97 @@ class GrimveilDeck(QMainWindow):
                     color = C_GOLD
                 else:
                     color = C_TEXT
-                due_str = due.strftime('%m/%d/%Y %I:%M %p')
+                date_str = due.strftime('%m/%d/%Y')
+                time_str = due.strftime('%I:%M %p')
             else:
                 color = "#8b95a1" if is_completed else C_TEXT_DIM
-                due_str = "unscheduled"
-            task_text = html.escape(task.get('text', '')[:28]).ljust(28)
-            status_text = html.escape(status.upper()[:10]).ljust(10)
-            due_col = html.escape(due_str).ljust(17)
-            lines.append(
-                f"<span style='color:{color}; font-family: Consolas, monospace;'>{due_col} | {task_text} | {status_text}</span>"
-            )
-        self.task_log.setHtml("<br>".join(lines))
+                date_str = "unscheduled"
+                time_str = "--:--"
+
+            cells = [
+                date_str,
+                time_str,
+                (task.get('text', '') or '')[:64],
+                status.upper()
+            ]
+            for col, value in enumerate(cells):
+                item = QTableWidgetItem(value)
+                item.setForeground(QColor(color))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                self.task_table.setItem(row, col, item)
+            self.task_table.setRowHeight(row, 18)
+
+        if selected_id and selected_id in self.task_row_ids:
+            idx = self.task_row_ids.index(selected_id)
+            self.task_table.selectRow(idx)
+        self._on_task_selection_changed()
+
+    def _get_selected_task_id(self):
+        if not hasattr(self, "task_table"):
+            return None
+        row = self.task_table.currentRow()
+        if row < 0 or row >= len(getattr(self, "task_row_ids", [])):
+            return None
+        return self.task_row_ids[row]
+
+    def _set_task_status(self, task_id: str, status: str):
+        tasks = self.memory.load_tasks()
+        target = None
+        for task in tasks:
+            if task.get("id") == task_id:
+                target = task
+                break
+        if not target:
+            return None
+        target["status"] = status
+        if status == "completed":
+            target["acknowledged_at"] = local_now_iso()
+            target["completed_at"] = local_now_iso()
+        elif status == "cancelled":
+            target["acknowledged_at"] = target.get("acknowledged_at") or local_now_iso()
+            target["cancelled_at"] = local_now_iso()
+        self.memory.save_all_tasks(tasks)
+        self._refresh_task_registry_panel()
+        return target
+
+    def _on_task_selection_changed(self):
+        selected_id = self._get_selected_task_id()
+        enabled = bool(selected_id)
+        if hasattr(self, "btn_complete_task"):
+            self.btn_complete_task.setEnabled(enabled)
+            self.btn_cancel_task.setEnabled(enabled)
+
+    def _on_task_row_double_clicked(self, _item):
+        self._complete_selected_task()
+
+    def _complete_selected_task(self):
+        task_id = self._get_selected_task_id()
+        if not task_id:
+            return
+        task = self._set_task_status(task_id, "completed")
+        if task:
+            self._append_chat("SYSTEM", f"Task completed: {task.get('text','(no text)')}")
+
+    def _cancel_selected_task(self):
+        task_id = self._get_selected_task_id()
+        if not task_id:
+            return
+        task = self._set_task_status(task_id, "cancelled")
+        if task:
+            self._append_chat("SYSTEM", f"Task cancelled: {task.get('text','(no text)')}")
+
+    def _toggle_show_completed_tasks(self):
+        self.task_show_completed = not self.task_show_completed
+        if self.task_show_completed:
+            self.btn_toggle_completed.setText("HIDE COMPLETED")
+        else:
+            self.btn_toggle_completed.setText("SHOW COMPLETED")
+        self._refresh_task_registry_panel()
+
+    def _purge_completed_tasks(self):
+        removed = self.memory.clear_completed_tasks()
+        self._refresh_task_registry_panel()
+        self._append_chat("SYSTEM", f"Completed task purge executed. Removed {removed} entr{'y' if removed==1 else 'ies'}.")
 
     def _refresh_task_registry_if_changed(self):
         try:
@@ -1932,7 +2084,7 @@ class GrimveilDeck(QMainWindow):
         normalized = text.strip().lower()
         if normalized in {"list current tasks", "list tasks", "show reminders", "show current tasks", "show tasks", "show pending tasks"}:
             tasks = self.memory.load_tasks()
-            active = [t for t in tasks if t.get("status") != "completed"]
+            active = [t for t in tasks if t.get("status") not in {"completed", "cancelled"}]
             self._refresh_task_registry_panel()
             if not active:
                 self._append_chat("SYSTEM", "Task registry empty. Entropy has, briefly, been denied a foothold.")
@@ -1945,9 +2097,17 @@ class GrimveilDeck(QMainWindow):
                 self._append_chat("SYSTEM", "\n".join(lines))
             return True
         if normalized in {"clear completed tasks", "purge completed tasks"}:
-            removed = self.memory.clear_completed_tasks()
+            self._purge_completed_tasks()
+            return True
+        if normalized in {"show completed tasks", "show completed"}:
+            self.task_show_completed = True
+            self.btn_toggle_completed.setText("HIDE COMPLETED")
             self._refresh_task_registry_panel()
-            self._append_chat("SYSTEM", f"Completed task purge executed. Removed {removed} entr{'y' if removed==1 else 'ies'}.")
+            return True
+        if normalized in {"hide completed tasks", "hide completed"}:
+            self.task_show_completed = False
+            self.btn_toggle_completed.setText("SHOW COMPLETED")
+            self._refresh_task_registry_panel()
             return True
         if normalized in {"reset tasks"}:
             self.memory.save_all_tasks([])
@@ -1957,7 +2117,7 @@ class GrimveilDeck(QMainWindow):
         if normalized.startswith("complete task "):
             token = normalized.replace("complete task ", "", 1).strip()
             tasks = self.memory.load_tasks()
-            active = [t for t in tasks if t.get("status") != "completed"]
+            active = [t for t in tasks if t.get("status") not in {"completed", "cancelled"}]
             done = None
             for idx, task in enumerate(active, start=1):
                 if token == str(idx) or token == task.get("id", "").lower():
