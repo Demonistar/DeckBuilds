@@ -1,13 +1,14 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.4.2
+# Version: 1.4.3
 # Build Date: 2026-04-01
 # Summary:
-#   Asset filename mapping patch for GrimVeile face images:
-#   align disk filename resolution with real face image names while preserving internal Grimveil logic.
+#   Visage Matrix layout/control replacement pass:
+#   replaced old anchor-state buttons with image-only E-42 control block beside the face.
 # Changelog:
-#   - fixed face asset filename mapping to use real GrimVeile image names on disk
+#   - replaced old anchor-state buttons with image-only E-42 control block beside face
+#   - repositioned adjacent Visage Matrix instrumentation for spacing/alignment
 
 import sys
 import time
@@ -41,7 +42,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.4.3"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -1567,33 +1568,48 @@ class GrimveilDeck(QMainWindow):
         left_panel.addWidget(face_label)
 
         face_kb_row = QHBoxLayout()
-        face_kb_row.setSpacing(6)
+        face_kb_row.setSpacing(10)
 
         self.face_widget = FaceWidget(FACES_DIR)
         self.face_widget.setFixedSize(180, 160)
         face_kb_row.addWidget(self.face_widget)
 
-        self.anchor_panel = AnchorStatusPanel()
-        self.anchor_panel.setMinimumSize(300, 160)
-        face_kb_row.addWidget(self.anchor_panel, 1)
-        left_panel.addLayout(face_kb_row)
+        self.e42_control_block = QWidget()
+        self.e42_control_block.setStyleSheet("background: transparent; border: none;")
+        e42_controls_layout = QGridLayout(self.e42_control_block)
+        e42_controls_layout.setContentsMargins(0, 0, 0, 0)
+        e42_controls_layout.setHorizontalSpacing(4)
+        e42_controls_layout.setVerticalSpacing(4)
 
-        anchor_row = QHBoxLayout()
-        anchor_row.setSpacing(6)
-
-        self.btn_connected = QPushButton("DOCK E-42")
+        self.btn_connected = QPushButton("")
+        self.btn_connected.setToolTip("Dock E-42")
         self.btn_connected.clicked.connect(lambda: self._set_anchor_state(1.0))
 
-        self.btn_nearby = QPushButton("E-42 NEARBY")
+        self.btn_nearby = QPushButton("")
+        self.btn_nearby.setToolTip("E-42 Nearby")
         self.btn_nearby.clicked.connect(lambda: self._set_anchor_state(0.65))
 
-        self.btn_absent = QPushButton("E-42 ABSENT")
+        self.btn_absent = QPushButton("")
+        self.btn_absent.setToolTip("E-42 Absent")
         self.btn_absent.clicked.connect(lambda: self._set_anchor_state(0.15))
 
-        anchor_row.addWidget(self.btn_connected)
-        anchor_row.addWidget(self.btn_nearby)
-        anchor_row.addWidget(self.btn_absent)
-        left_panel.addLayout(anchor_row)
+        for btn in (self.btn_connected, self.btn_nearby, self.btn_absent):
+            btn.setFixedSize(44, 44)
+            btn.setIconSize(QSize(36, 36))
+            btn.setStyleSheet(
+                f"background: transparent; border: 1px solid {C_CYAN_DIM}; border-radius: 2px; padding: 0px;"
+            )
+
+        e42_controls_layout.addWidget(self.btn_connected, 0, 0)
+        e42_controls_layout.addWidget(self.btn_nearby, 0, 1)
+        e42_controls_layout.addWidget(self.btn_absent, 1, 0, 1, 2, Qt.AlignmentFlag.AlignHCenter)
+
+        face_kb_row.addWidget(self.e42_control_block, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.anchor_panel = AnchorStatusPanel()
+        self.anchor_panel.setMinimumSize(320, 160)
+        face_kb_row.addWidget(self.anchor_panel, 1)
+        left_panel.addLayout(face_kb_row)
         self._apply_e42_icons()
 
         input_row = QHBoxLayout()
@@ -2096,7 +2112,7 @@ class GrimveilDeck(QMainWindow):
             if px.isNull():
                 continue
             button.setIcon(QIcon(px))
-            button.setIconSize(QSize(16, 16))
+            button.setIconSize(QSize(36, 36))
 
     def _set_anchor_state(self, value):
         self.anchor_state = max(0.0, min(1.0, value))
