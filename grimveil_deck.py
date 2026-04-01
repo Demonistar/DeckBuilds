@@ -1,7 +1,7 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.5.2
+# Version: 1.5.3
 # Build Date: 2026-04-01
 # Summary:
 #   Phase 1 outbound Google Calendar push for local task creation.
@@ -13,6 +13,7 @@
 #   - now surfaces actual push failure reason
 #   - fixed Google Calendar timed event payload timezone formatting
 #   - now sends valid IANA timezone with start/end event objects
+#   - local cancel/complete now removes matching Google Calendar events when google_event_id exists
 
 import sys
 import time
@@ -58,7 +59,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.5.3"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -1479,6 +1480,16 @@ class GoogleCalendarService:
             print(f"[GCal][ERROR] Event insert failed with unexpected error: {ex}")
             raise
 
+    def delete_event_for_task(self, google_event_id: str):
+        if not google_event_id:
+            raise ValueError("Google event id is missing; cannot delete event.")
+
+        if self._service is None:
+            self._build_service()
+
+        target_calendar_id = "primary"
+        self._service.events().delete(calendarId=target_calendar_id, eventId=google_event_id).execute()
+
 
 class FaceWidget(QLabel):
     def __init__(self, faces_dir, parent=None):
@@ -2206,6 +2217,52 @@ class GrimveilDeck(QMainWindow):
             return None
         return self.task_row_ids[row]
 
+    def _should_delete_google_event_for_terminal_status(self, task: dict):
+        event_id = (task or {}).get("google_event_id")
+        sync_status = ((task or {}).get("sync_status") or "").strip().lower()
+        return bool(event_id and sync_status == "synced")
+
+    def _delete_task_google_calendar_event_if_needed(self, task: dict, terminal_status: str):
+        if not task:
+            return
+        task_id = task.get("id")
+        google_event_id = task.get("google_event_id")
+        sync_status = task.get("sync_status")
+        print(
+            f"[GCal][DEBUG] Terminal sync check: task_id={task_id}, status={terminal_status}, "
+            f"sync_status={sync_status}, google_event_id={google_event_id}"
+        )
+        if not self._should_delete_google_event_for_terminal_status(task):
+            return
+
+        print(f"[GCal][DEBUG] Delete attempt started: task_id={task_id}, google_event_id={google_event_id}")
+        try:
+            self.google_calendar.delete_event_for_task(google_event_id)
+            self.memory.update_task_google_sync(
+                task_id=task_id,
+                sync_status="deleted",
+                google_event_id=google_event_id,
+                last_synced_at=local_now_iso(),
+                error_message=None,
+            )
+            print(f"[GCal][DEBUG] Delete success: task_id={task_id}, google_event_id={google_event_id}")
+            self._append_chat("SYSTEM", "Google Calendar event removed for terminal local task state.")
+        except Exception as ex:
+            local_terminal_label = "canceled" if terminal_status == "cancelled" else "completed"
+            print(
+                f"[GCal][ERROR] Delete failed: task_id={task_id}, google_event_id={google_event_id}, "
+                f"exception={ex}"
+            )
+            if terminal_status == "cancelled":
+                self._append_chat(
+                    "SYSTEM",
+                    "Google Calendar cancel sync failed; local task was still canceled.",
+                )
+            else:
+                self._append_chat(
+                    "SYSTEM",
+                    f"Google Calendar terminal sync failed; local task was still {local_terminal_label}.",
+                )
     def _set_task_status(self, task_id: str, status: str):
         tasks = self.memory.load_tasks()
         target = None
@@ -2223,6 +2280,7 @@ class GrimveilDeck(QMainWindow):
             target["acknowledged_at"] = target.get("acknowledged_at") or local_now_iso()
             target["cancelled_at"] = local_now_iso()
         self.memory.save_all_tasks(tasks)
+        self._delete_task_google_calendar_event_if_needed(target, status)
         self._refresh_task_registry_panel()
         return target
 
@@ -2360,14 +2418,9 @@ class GrimveilDeck(QMainWindow):
             done = None
             for idx, task in enumerate(active, start=1):
                 if token == str(idx) or token == task.get("id", "").lower():
-                    task["status"] = "completed"
-                    task["acknowledged_at"] = local_now_iso()
-                    task["completed_at"] = local_now_iso()
-                    done = task
+                    done = self._set_task_status(task.get("id"), "completed")
                     break
             if done:
-                self.memory.save_all_tasks(tasks)
-                self._refresh_task_registry_panel()
                 self._append_chat("SYSTEM", f"Task completed: {done.get('text','(no text)')}")
             else:
                 self._append_chat("SYSTEM", "No matching task id/index found.")
