@@ -1,11 +1,12 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.8.0
+# Version: 1.8.1
 # Build Date: 2026-04-01
 # Summary:
-#   Added Google Calendar inbound sync polling and local reconciliation.
+#   Corrected moon illumination rendering math in the status/anchor panel.
 # Changelog:
+#   - corrected moon illumination rendering math so displayed moon matches labeled illumination/phase
 #   - fixed idle timer lifecycle: timer now stops immediately on prompt submission and invalidates countdown target
 #   - unsolicited transmission now aborts safely during generation without restarting countdown mid-response
 #   - countdown now shows inactive marker (⏱ --:--) while generating and restarts fresh after return to IDLE
@@ -76,7 +77,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.8.1"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -1251,21 +1252,47 @@ class AnchorStatusPanel(QWidget):
         painter.setPen(QColor(C_SILVER_DIM))
         painter.setBrush(QColor(20, 24, 32))
         painter.drawEllipse(int(cx - r), int(cy - r), int(r * 2), int(r * 2))
-        phase = self.moon_fill
-        cycle_day = phase * 29.53
+        phase = self.moon_fill % 1.0
+        illumination = (1.0 - math.cos(2.0 * math.pi * phase)) / 2.0
+        waxing = phase < 0.5
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(220, 220, 200))
         painter.drawEllipse(int(cx - r), int(cy - r), int(r * 2), int(r * 2))
 
-        if cycle_day < 14.77:
-            shadow_offset = (0.5 - phase) * r * 4
+        shadow_fraction = max(0.0, min(1.0, 1.0 - illumination))
+        if shadow_fraction > 0.0:
+            moon_area = math.pi * r * r
+
+            def overlap_fraction(distance):
+                distance = max(0.0, min(2.0 * r, distance))
+                if distance <= 0.0:
+                    return 1.0
+                if distance >= 2.0 * r:
+                    return 0.0
+                overlap_area = (
+                    (2.0 * r * r * math.acos(distance / (2.0 * r)))
+                    - (0.5 * distance * math.sqrt(max(0.0, (4.0 * r * r) - (distance * distance))))
+                )
+                return overlap_area / moon_area
+
+            target_overlap = shadow_fraction
+            lo, hi = 0.0, 2.0 * r
+            for _ in range(24):
+                mid = (lo + hi) * 0.5
+                if overlap_fraction(mid) > target_overlap:
+                    lo = mid
+                else:
+                    hi = mid
+            shadow_offset = (lo + hi) * 0.5
+            shadow_dir = -1.0 if waxing else 1.0
             painter.setBrush(QColor(15, 18, 30))
-            painter.drawEllipse(int(cx - r + shadow_offset), int(cy - r), int(r * 2), int(r * 2))
-        elif cycle_day > 16.61:
-            shadow_offset = (phase - 0.5) * r * 4
-            painter.setBrush(QColor(15, 18, 30))
-            painter.drawEllipse(int(cx - r - shadow_offset), int(cy - r), int(r * 2), int(r * 2))
+            painter.drawEllipse(
+                int(cx - r + (shadow_dir * shadow_offset)),
+                int(cy - r),
+                int(r * 2),
+                int(r * 2)
+            )
 
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QColor(C_SILVER))
