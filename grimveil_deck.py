@@ -1,11 +1,15 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.7.0
+# Version: 1.8.0
 # Build Date: 2026-04-01
 # Summary:
 #   Added Google Calendar inbound sync polling and local reconciliation.
 # Changelog:
+#   - fixed idle timer lifecycle: timer now stops immediately on prompt submission and invalidates countdown target
+#   - unsolicited transmission now aborts safely during generation without restarting countdown mid-response
+#   - countdown now shows inactive marker (⏱ --:--) while generating and restarts fresh after return to IDLE
+#   - tightened response-priority instruction so factual/user-request answers come first, with persona as wrapper only
 #   - corrected Grim idle timer feature by directly porting countdown/timer/unsolicited transmission scaffold from echo_deck.py
 #   - restored visible countdown placement in title bar
 #   - restored unsolicited transmission output to Tactical Record
@@ -72,7 +76,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.0"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -1701,6 +1705,7 @@ class GrimveilDeck(QMainWindow):
             "You are loyal to the user as Command authority. "
             "You distrust outside information sources and assume incomplete data may be omission, corruption, or sabotage. "
             "Speak in real conversational sentences by default. Answer first, then explain briefly. "
+            "Always answer the user's actual question/request first with concrete content; persona, E-42 mood, and thread flavor are optional wrappers only and must never replace the answer. "
             "Do not reduce your reply to one-word states like CONNECTED, ABSENT, or NEARBY. "
             "Do not use superior/inferior declarations as the entire response. Use them sparingly as emphasis or punctuation. "
             "Emoji are optional punctuation, not a substitute for content. "
@@ -1803,11 +1808,22 @@ class GrimveilDeck(QMainWindow):
         self.log_diagnostic(f"Idle timer started/restarted for {delay_ms // 1000}s.", level="DEBUG")
         self._update_countdown()
 
+    def _stop_idle_timer(self, reason: str = "manual"):
+        was_active = self.idle_timer.isActive()
+        if was_active:
+            self.idle_timer.stop()
+        self._idle_fire_at = 0.0
+        self.log_diagnostic(f"Idle timer stopped ({reason}).", level="DEBUG")
+        self._update_countdown()
+
     def _update_countdown(self):
         if not hasattr(self, "countdown_lbl"):
             return
+        if getattr(self, "status", "") == "GENERATING":
+            self.countdown_lbl.setText("⏱ --:--")
+            return
         if not self.idle_timer.isActive():
-            self.countdown_lbl.setText("")
+            self.countdown_lbl.setText("--:--")
             return
         remain = max(0, int(math.ceil(self._idle_fire_at - time.time())))
         mm, ss = divmod(remain, 60)
@@ -1888,7 +1904,7 @@ class GrimveilDeck(QMainWindow):
         if not self.model_loaded or self.status == "GENERATING":
             why = "model not loaded" if not self.model_loaded else "generation in progress"
             self.log_diagnostic(f"Unsolicited transmission aborted: {why}.", level="WARN")
-            self._restart_idle_timer()
+            self._stop_idle_timer(reason=f"unsolicited-abort:{why}")
             return
         self.log_diagnostic("Unsolicited transmission trigger fired.", level="INFO")
         self.narrative["silence_intervals"] = int(self.narrative.get("silence_intervals", 0)) + 1
@@ -1953,12 +1969,12 @@ class GrimveilDeck(QMainWindow):
         base = (text or "").strip()
         mode = self.narrative.get("mode", self._get_narrative_mode())
         if mode == "connected":
-            prefix = "E-42 remains docked; command stack stable."
+            flavor = "E-42 remains docked; command stack stable."
         elif mode == "nearby":
-            prefix = "E-42 is nearby; tolerances are tight but acceptable."
+            flavor = "E-42 is nearby; tolerances are tight but acceptable."
         else:
-            prefix = "E-42 is absent; threat posture elevated, function remains online."
-        return f"{prefix} {base}".strip()
+            flavor = "E-42 is absent; threat posture elevated, function remains online."
+        return f"{base}\n\n[{flavor}]".strip()
 
     def _build_ui(self):
         central = QWidget()
@@ -2409,8 +2425,14 @@ class GrimveilDeck(QMainWindow):
             self.log_diagnostic(f"Generation state changed: {previous} -> {status}", level="INFO")
         if status == "GENERATING":
             self._generation_started_at = time.time()
+            self._stop_idle_timer(reason="generation-started")
         elif status in {"IDLE", "ERROR", "OFFLINE"}:
             self._generation_started_at = None
+            if status == "IDLE":
+                self._restart_idle_timer()
+            else:
+                self._stop_idle_timer(reason=f"status-{status.lower()}")
+        self._update_countdown()
 
     def _append_chat(self, speaker, text):
         colors = {
@@ -2814,7 +2836,7 @@ class GrimveilDeck(QMainWindow):
             self.log_diagnostic(f"User prompt submitted ({len(text)} chars).", level="INFO")
             self.last_user_activity_ts = time.time()
             self.narrative["silence_intervals"] = 0
-            self._restart_idle_timer()
+            self._stop_idle_timer(reason="prompt-submitted")
 
             self.input_field.clear()
             self._append_chat("YOU", text)
@@ -2827,6 +2849,7 @@ class GrimveilDeck(QMainWindow):
                 self._append_chat("SYSTEM", "Internal narrative thread reset and reseeded to current anchor mode.")
                 self._store_message("user", text)
                 self.history.append({"role": "user", "content": text})
+                self._restart_idle_timer()
                 return
             if is_datetime_query(normalized_text):
                 deterministic = answer_datetime_query(normalized_text)
@@ -2836,6 +2859,7 @@ class GrimveilDeck(QMainWindow):
                 self.history.append({"role": "user", "content": text})
                 self.history.append({"role": "assistant", "content": deterministic})
                 self._store_message("assistant", deterministic)
+                self._restart_idle_timer()
                 return
 
             active_ack, changed = (False, [])
@@ -2846,11 +2870,13 @@ class GrimveilDeck(QMainWindow):
                     self._append_chat("SYSTEM", "Reminder acknowledged. Alarm notice terminated. E-42 approves of basic competence.")
                     self._store_message("user", text)
                     self.history.append({"role": "user", "content": text})
+                    self._restart_idle_timer()
                     return
 
             if self._handle_task_command(text):
                 self._store_message("user", text)
                 self.history.append({"role": "user", "content": text})
+                self._restart_idle_timer()
                 return
 
             parsed_task = self._try_create_task(normalized_text, force_intent=has_reminder_intent(normalized_text))
@@ -2860,6 +2886,7 @@ class GrimveilDeck(QMainWindow):
                 self._append_chat("SYSTEM", f"Reminder set for {due_str}.")
                 self._store_message("user", text)
                 self.history.append({"role": "user", "content": text})
+                self._restart_idle_timer()
                 return
             if has_reminder_intent(normalized_text):
                 self._append_chat(
@@ -2869,6 +2896,7 @@ class GrimveilDeck(QMainWindow):
                 )
                 self._store_message("user", text)
                 self.history.append({"role": "user", "content": text})
+                self._restart_idle_timer()
                 return
 
             user_msg_record = self._store_message("user", text)
@@ -3005,7 +3033,6 @@ class GrimveilDeck(QMainWindow):
         self.send_btn.setEnabled(True)
         self.input_field.setEnabled(True)
         self.input_field.setFocus()
-        self._restart_idle_timer()
 
     def _insert_calendar_date(self, qdate):
         try:
@@ -3254,6 +3281,9 @@ class GrimveilDeck(QMainWindow):
             updated_count = 0
             removed_count = 0
             imported_count = 0
+            updated_ids = []
+            removed_ids = []
+            imported_ids = []
             changed = False
             now_iso = local_now_iso()
 
@@ -3280,6 +3310,7 @@ class GrimveilDeck(QMainWindow):
                     task.setdefault("metadata", {})
                     task["metadata"]["google_deleted_remote"] = now_iso
                     removed_count += 1
+                    removed_ids.append(task.get("id", "unknown"))
                     changed = True
                     continue
 
@@ -3301,6 +3332,7 @@ class GrimveilDeck(QMainWindow):
                 if task_changed:
                     task["last_synced_at"] = now_iso
                     updated_count += 1
+                    updated_ids.append(task.get("id", "unknown"))
                     changed = True
 
             for event_id, event in remote_by_id.items():
@@ -3333,6 +3365,7 @@ class GrimveilDeck(QMainWindow):
                 tasks.append(imported_task)
                 tasks_by_event_id[event_id] = imported_task
                 imported_count += 1
+                imported_ids.append(imported_task["id"])
                 changed = True
 
             if changed:
@@ -3344,6 +3377,12 @@ class GrimveilDeck(QMainWindow):
                 f"updated={updated_count}, removed_missing_remote={removed_count}, imported_new={imported_count}.",
                 level="INFO"
             )
+            if imported_ids:
+                self.log_diagnostic(f"Google inbound imported task ids: {', '.join(imported_ids)}.", level="INFO")
+            if updated_ids:
+                self.log_diagnostic(f"Google inbound updated task ids: {', '.join(updated_ids)}.", level="INFO")
+            if removed_ids:
+                self.log_diagnostic(f"Google inbound remote-delete deactivated task ids: {', '.join(removed_ids)}.", level="INFO")
             if imported_count > 0:
                 self._append_chat(
                     "SYSTEM",
