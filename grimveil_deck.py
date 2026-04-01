@@ -1,14 +1,14 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.4.4
+# Version: 1.5.0
 # Build Date: 2026-04-01
 # Summary:
-#   Anchor-state baseline face correction pass for E-42 behavior.
+#   Phase 1 outbound Google Calendar push for local task creation.
 # Changelog:
-#   - corrected anchor-state baseline face behavior
-#   - absent state now defaults to panicked instead of neutral
-#   - docked/nearby/absent now restore to neutral/concerned/panicked respectively
+#   - added Phase 1 Google Calendar outbound sync helper for local tasks
+#   - local task creation now attempts Google Calendar event creation after local save
+#   - added desktop OAuth token reuse cache at C:\AI\Models\GrimVeil_Memories\google\token.json
 
 import sys
 import time
@@ -24,6 +24,14 @@ from pathlib import Path
 import math
 import wave
 import struct
+try:
+    from google.auth.transport.requests import Request as GoogleAuthRequest
+    from google.oauth2.credentials import Credentials as GoogleCredentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from googleapiclient.discovery import build as google_build
+    GOOGLE_API_OK = True
+except ImportError:
+    GOOGLE_API_OK = False
 try:
     import winsound
     WINSOUND_OK = True
@@ -42,7 +50,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.4.4"
+APP_VERSION = "1.5.0"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -107,6 +115,9 @@ AI_MODELS_DIR = SCRIPT_DIR / "AI" / "Models"
 if SCRIPT_DIR.name.lower() == "models" and SCRIPT_DIR.parent.name.lower() == "ai":
     AI_MODELS_DIR = SCRIPT_DIR
 MEMORY_DIR = AI_MODELS_DIR / "GrimVeil_Memories"
+GOOGLE_CREDENTIALS_PATH = Path(r"C:\AI\config\google_credentials.json")
+GOOGLE_TOKEN_PATH = Path(r"C:\AI\Models\GrimVeil_Memories\google\token.json")
+GOOGLE_SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 FACES_DIR = r"C:\AI\Models\Faces"
 MODEL_PATH = str(AI_MODELS_DIR / "dolphin-2.6-7b")
 FACE_FALLBACK_FILENAME = "GrimVeile Neutral.png"
@@ -924,8 +935,11 @@ class MemoryManager:
             task.setdefault('last_triggered_at', None)
             task.setdefault('next_retry_at', None)
             task.setdefault('pre_announced', False)
-            task.setdefault('source', task.get('created_from', 'user'))
+            task.setdefault('source', task.get('created_from', 'local'))
             task.setdefault('metadata', {})
+            task.setdefault('google_event_id', None)
+            task.setdefault('sync_status', 'pending')
+            task.setdefault('last_synced_at', None)
             due_raw = task.get('due_at') or task.get('due')
             if due_raw and not task.get('pre_trigger'):
                 due = parse_iso(due_raw)
@@ -956,12 +970,41 @@ class MemoryManager:
             "retry_count": 0,
             "last_triggered_at": None,
             "next_retry_at": None,
-            "source": "user_command",
+            "source": "local",
+            "google_event_id": None,
+            "sync_status": "pending",
+            "last_synced_at": None,
             "metadata": {"input": created_from},
         }
         tasks.append(task)
         self.save_all_tasks(tasks)
         return task
+
+    def update_task_google_sync(
+        self,
+        task_id: str,
+        sync_status: str,
+        google_event_id: str = None,
+        last_synced_at: str = None,
+        error_message: str = None,
+    ):
+        tasks = self.load_tasks()
+        updated = None
+        for task in tasks:
+            if task.get("id") != task_id:
+                continue
+            task["sync_status"] = sync_status
+            task["last_synced_at"] = last_synced_at
+            if google_event_id:
+                task["google_event_id"] = google_event_id
+            if error_message:
+                task.setdefault("metadata", {})
+                task["metadata"]["google_sync_error"] = error_message[:240]
+            updated = task
+            break
+        if updated:
+            self.save_all_tasks(tasks)
+        return updated
 
     def acknowledge_due_tasks(self):
         tasks = self.load_tasks()
@@ -1298,6 +1341,63 @@ class GaugeWidget(QWidget):
                 painter.fillRect(7, bar_y + 1, fill_w, bar_h - 2, grad)
         painter.end()
 
+class GoogleCalendarService:
+    def __init__(self, credentials_path: Path, token_path: Path):
+        self.credentials_path = credentials_path
+        self.token_path = token_path
+        self._service = None
+
+    def _persist_token(self, creds):
+        ensure_parent(self.token_path)
+        self.token_path.parent.mkdir(parents=True, exist_ok=True)
+        self.token_path.write_text(creds.to_json(), encoding="utf-8")
+
+    def _build_service(self):
+        if not GOOGLE_API_OK:
+            raise RuntimeError("Google Calendar dependencies are not installed.")
+        if not self.credentials_path.exists():
+            raise FileNotFoundError(f"Google credentials file not found: {self.credentials_path}")
+
+        creds = None
+        link_established = False
+        if self.token_path.exists():
+            creds = GoogleCredentials.from_authorized_user_file(str(self.token_path), GOOGLE_SCOPES)
+
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(GoogleAuthRequest())
+            self._persist_token(creds)
+
+        if not creds or not creds.valid:
+            flow = InstalledAppFlow.from_client_secrets_file(str(self.credentials_path), GOOGLE_SCOPES)
+            creds = flow.run_local_server(port=0)
+            self._persist_token(creds)
+            link_established = True
+
+        self._service = google_build("calendar", "v3", credentials=creds)
+        return link_established
+
+    def create_event_for_task(self, task: dict):
+        due_at = parse_iso(task.get("due_at") or task.get("due"))
+        if not due_at:
+            raise ValueError("Task due time is missing or invalid.")
+
+        link_established = False
+        if self._service is None:
+            link_established = self._build_service()
+
+        start_dt = due_at
+        end_dt = due_at + timedelta(minutes=30)
+        tzinfo = datetime.now().astimezone().tzinfo
+        tz_name = getattr(tzinfo, "key", None) or (tzinfo.tzname(datetime.now()) if tzinfo else "UTC")
+
+        event_payload = {
+            "summary": (task.get("text") or "Reminder").strip(),
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": tz_name},
+            "end": {"dateTime": end_dt.isoformat(), "timeZone": tz_name},
+        }
+        created = self._service.events().insert(calendarId="primary", body=event_payload).execute()
+        return created.get("id"), link_established
+
 
 class FaceWidget(QLabel):
     def __init__(self, faces_dir, parent=None):
@@ -1451,6 +1551,8 @@ class GrimveilDeck(QMainWindow):
         self.state = self.memory.load_state()
         self.active_reminder_ids = set()
         self._tasks_mtime = None
+        self.google_calendar = GoogleCalendarService(GOOGLE_CREDENTIALS_PATH, GOOGLE_TOKEN_PATH)
+        self._google_link_announced = False
 
         self.system_prompt = (
             "You are GRIMVEIL, a machine intelligence strategist. "
@@ -2433,8 +2535,34 @@ class GrimveilDeck(QMainWindow):
         reloaded = self.memory.load_tasks()
         if not any((t.get("id") == task.get("id")) for t in reloaded):
             return None
+        self._push_task_to_google_calendar(task)
         self._refresh_task_registry_panel()
         return task
+
+    def _push_task_to_google_calendar(self, task: dict):
+        task_id = task.get("id")
+        if not task_id:
+            return
+        try:
+            event_id, link_established = self.google_calendar.create_event_for_task(task)
+            self.memory.update_task_google_sync(
+                task_id=task_id,
+                sync_status="synced",
+                google_event_id=event_id,
+                last_synced_at=local_now_iso(),
+            )
+            if link_established and not self._google_link_announced:
+                self._append_chat("SYSTEM", "Google Calendar link established.")
+                self._google_link_announced = True
+            self._append_chat("SYSTEM", "Task pushed to Google Calendar.")
+        except Exception as ex:
+            self.memory.update_task_google_sync(
+                task_id=task_id,
+                sync_status="error",
+                last_synced_at=local_now_iso(),
+                error_message=str(ex),
+            )
+            self._append_chat("SYSTEM", "Google Calendar push failed; local task retained.")
 
     def _parse_reminder_command(self, text: str, force_intent: bool = False):
         t = normalize_persona_prefixed_input(text).strip()
