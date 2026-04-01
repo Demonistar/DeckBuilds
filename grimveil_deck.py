@@ -1,11 +1,13 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.8.3
+# Version: 1.8.4
 # Build Date: 2026-04-01
 # Summary:
 #   Corrected moon illumination rendering math in the status/anchor panel.
 # Changelog:
+#   - fixed generation lockup by explicitly passing attention_mask to all model.generate() calls
+#   - eliminated unstable no-attention-mask generation path
 #   - added Memory Trace view for memory retrieval validation and startup continuity evidence logging
 #   - memory searches now expose retrieval metadata, candidate scoring, and selected-record markers
 #   - corrected moon illumination rendering math so displayed moon matches labeled illumination/phase
@@ -83,7 +85,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.8.3"
+APP_VERSION = "1.8.4"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -1687,6 +1689,7 @@ class FaceWidget(QLabel):
 
 class SentimentWorker(QThread):
     face_ready = pyqtSignal(str)
+    diagnostic = pyqtSignal(str, str)
     def __init__(self, model, tokenizer, response_text):
         super().__init__()
         self.model = model
@@ -1695,6 +1698,7 @@ class SentimentWorker(QThread):
 
     def run(self):
         try:
+            self.diagnostic.emit("Sentiment generation started.", "INFO")
             prompt = (
                 f"<|im_start|>system\nYou are an emotion classifier. Reply with exactly one word only.<|im_end|>\n"
                 f"<|im_start|>user\n"
@@ -1703,15 +1707,28 @@ class SentimentWorker(QThread):
                 f"One word:<|im_end|>\n"
                 f"<|im_start|>assistant\n"
             )
-            input_ids = self.tokenizer(prompt, return_tensors='pt').input_ids.to("cuda")
+            enc = self.tokenizer(prompt, return_tensors='pt', padding=True, truncation=True)
+            input_ids = enc["input_ids"].to("cuda")
+            attention_mask = enc["attention_mask"].to("cuda")
+            self.diagnostic.emit("Sentiment tokenization complete.", "DEBUG")
+            self.diagnostic.emit(f"Sentiment attention_mask present = {attention_mask is not None}", "DEBUG")
             with torch.no_grad():
-                output = self.model.generate(input_ids, max_new_tokens=5, temperature=0.1, do_sample=False, pad_token_id=self.tokenizer.eos_token_id)
+                output = self.model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    max_new_tokens=5,
+                    temperature=0.1,
+                    do_sample=False,
+                    pad_token_id=self.tokenizer.pad_token_id
+                )
             raw = self.tokenizer.decode(output[0][input_ids.shape[-1]:], skip_special_tokens=True).strip().lower()
             result = raw.split()[0] if raw.split() else "neutral"
             if result not in FACE_FILES:
                 result = "neutral"
             self.face_ready.emit(result)
-        except Exception:
+            self.diagnostic.emit("Sentiment generation completed.", "INFO")
+        except Exception as ex:
+            self.diagnostic.emit(f"Sentiment generation failed: {ex}", "ERROR")
             self.face_ready.emit("neutral")
 
 
@@ -1719,6 +1736,7 @@ class DolphinWorker(QThread):
     response_ready = pyqtSignal(str)
     error_occurred = pyqtSignal(str)
     status_changed = pyqtSignal(str)
+    diagnostic = pyqtSignal(str, str)
 
     def __init__(self, model, tokenizer, prompt):
         super().__init__()
@@ -1729,19 +1747,27 @@ class DolphinWorker(QThread):
     def run(self):
         try:
             self.status_changed.emit("GENERATING")
-            input_ids = self.tokenizer(self.prompt, return_tensors='pt').input_ids.to("cuda")
+            self.diagnostic.emit("Normal generation started.", "INFO")
+            enc = self.tokenizer(self.prompt, return_tensors='pt', padding=True, truncation=True)
+            input_ids = enc["input_ids"].to("cuda")
+            attention_mask = enc["attention_mask"].to("cuda")
+            self.diagnostic.emit("Normal generation tokenization complete.", "DEBUG")
+            self.diagnostic.emit(f"Normal generation attention_mask present = {attention_mask is not None}", "DEBUG")
             with torch.no_grad():
                 output = self.model.generate(
-                    input_ids,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
                     max_new_tokens=512,
                     temperature=0.65,
                     do_sample=True,
-                    pad_token_id=self.tokenizer.eos_token_id
+                    pad_token_id=self.tokenizer.pad_token_id
                 )
             response = self.tokenizer.decode(output[0][input_ids.shape[-1]:], skip_special_tokens=True)
             self.response_ready.emit(response)
+            self.diagnostic.emit("Normal generation completed.", "INFO")
             self.status_changed.emit("IDLE")
         except Exception as e:
+            self.diagnostic.emit(f"Normal generation failed: {e}", "ERROR")
             self.error_occurred.emit(str(e))
             self.status_changed.emit("ERROR")
 
@@ -2035,21 +2061,29 @@ class GrimveilDeck(QMainWindow):
             retry=retry,
         )
         try:
-            input_ids = self.tokenizer(prompt, return_tensors='pt').input_ids.to("cuda")
+            self.log_diagnostic("Unsolicited generation started.", level="INFO")
+            enc = self.tokenizer(prompt, return_tensors='pt', padding=True, truncation=True)
+            input_ids = enc["input_ids"].to("cuda")
+            attention_mask = enc["attention_mask"].to("cuda")
+            self.log_diagnostic("Unsolicited tokenization complete.", level="DEBUG")
+            self.log_diagnostic(f"Unsolicited attention_mask present = {attention_mask is not None}", level="DEBUG")
             with torch.no_grad():
                 output = self.model.generate(
-                    input_ids,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
                     max_new_tokens=90,
                     temperature=0.7 if not retry else 0.85,
                     do_sample=True,
                     top_p=0.9,
                     repetition_penalty=1.08 if retry else 1.02,
-                    pad_token_id=self.tokenizer.eos_token_id
+                    pad_token_id=self.tokenizer.pad_token_id
                 )
             raw = self.tokenizer.decode(output[0][input_ids.shape[-1]:], skip_special_tokens=True)
             line = re.sub(r"\s+", " ", raw).strip().split("\n")[0].strip()
+            self.log_diagnostic("Unsolicited generation completed.", level="INFO")
             return line if line else self._compose_unsolicited_line()
         except Exception as ex:
+            self.log_diagnostic(f"Unsolicited generation failed: {ex}", level="ERROR")
             self.log_diagnostic(f"Unsolicited model generation fallback engaged: {ex}", level="WARN")
             return self._compose_unsolicited_line()
 
@@ -2552,12 +2586,21 @@ class GrimveilDeck(QMainWindow):
         self.log_diagnostic(f"Model load started from path: {MODEL_PATH}", level="INFO")
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+            if self.tokenizer.pad_token_id is None:
+                if self.tokenizer.eos_token is not None:
+                    self.tokenizer.pad_token = self.tokenizer.eos_token
+                    self.log_diagnostic("Tokenizer pad_token was missing; set to eos_token for compatibility.", level="WARN")
+                else:
+                    self.tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+                    self.log_diagnostic("Tokenizer pad_token and eos_token were missing; created explicit pad_token.", level="WARN")
             self.model = AutoModelForCausalLM.from_pretrained(
                 MODEL_PATH,
                 torch_dtype=torch.float16,
                 device_map="auto",
                 low_cpu_mem_usage=True
             )
+            if self.model.config.pad_token_id is None and self.tokenizer.pad_token_id is not None:
+                self.model.config.pad_token_id = self.tokenizer.pad_token_id
             self.model_loaded = True
             self.log_diagnostic("Model load succeeded. Tokenizer and model are online.", level="INFO")
             self._qt_append("SYSTEM", "Compute core stable. Sabotage not yet confirmed.")
@@ -3239,6 +3282,7 @@ class GrimveilDeck(QMainWindow):
             self.worker.response_ready.connect(lambda response: self._on_response(response, text, user_msg_record, retrieved))
             self.worker.error_occurred.connect(self._on_error)
             self.worker.status_changed.connect(self._set_status)
+            self.worker.diagnostic.connect(self.log_diagnostic)
             self.log_diagnostic("Generation worker started.", level="INFO")
             self.worker.start()
         except Exception as ex:
@@ -3372,6 +3416,7 @@ class GrimveilDeck(QMainWindow):
         if self.model and self.tokenizer:
             self.sent_worker = SentimentWorker(self.model, self.tokenizer, response)
             self.sent_worker.face_ready.connect(self._on_sentiment)
+            self.sent_worker.diagnostic.connect(self.log_diagnostic)
             self.sent_worker.start()
 
     def _on_sentiment(self, face_name):
