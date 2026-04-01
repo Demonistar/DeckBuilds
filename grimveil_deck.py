@@ -1,11 +1,14 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.6.0
+# Version: 1.6.1
 # Build Date: 2026-04-01
 # Summary:
 #   Phase 1 outbound Google Calendar push for local task creation.
 # Changelog:
+#   - corrected Grim idle timer feature by directly porting countdown/timer/unsolicited transmission scaffold from echo_deck.py
+#   - restored visible countdown placement in title bar
+#   - restored unsolicited transmission output to Tactical Record
 #   - added persistent E-42-driven internal narrative state for unsolicited self-talk threading
 #   - unsolicited transmissions now evolve by mode and escalation level over idle intervals
 #   - active narrative thread now influences subsequent user-facing responses
@@ -63,7 +66,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -1694,10 +1697,15 @@ class GrimveilDeck(QMainWindow):
         self.task_timer.timeout.connect(self._check_due_tasks)
         self.task_timer.start(1000)
 
-        self.unsolicited_timer = QTimer()
-        self.unsolicited_timer.setSingleShot(True)
-        self.unsolicited_timer.timeout.connect(self._emit_unsolicited_transmission)
-        self._restart_unsolicited_timer()
+        self.idle_timer = QTimer()
+        self.idle_timer.setSingleShot(True)
+        self.idle_timer.timeout.connect(self._emit_unsolicited_transmission)
+        self._idle_fire_at = 0.0
+
+        self._countdown_tick = QTimer()
+        self._countdown_tick.timeout.connect(self._update_countdown)
+        self._countdown_tick.start(1000)
+        self._restart_idle_timer()
 
         self._append_chat("SYSTEM", f"{APP_NAME} v{APP_VERSION} INITIALIZING...")
         self._append_chat("SYSTEM", f"▣ {RUNES} ▣")
@@ -1739,9 +1747,21 @@ class GrimveilDeck(QMainWindow):
         self.state["last_active"] = local_now_iso()
         self.memory.save_state(self.state)
 
-    def _restart_unsolicited_timer(self):
+    def _restart_idle_timer(self):
         delay_ms = random.randint(5 * 60 * 1000, 10 * 60 * 1000)
-        self.unsolicited_timer.start(delay_ms)
+        self._idle_fire_at = time.time() + (delay_ms / 1000.0)
+        self.idle_timer.start(delay_ms)
+        self._update_countdown()
+
+    def _update_countdown(self):
+        if not hasattr(self, "countdown_lbl"):
+            return
+        if not self.idle_timer.isActive():
+            self.countdown_lbl.setText("")
+            return
+        remain = max(0, int(math.ceil(self._idle_fire_at - time.time())))
+        mm, ss = divmod(remain, 60)
+        self.countdown_lbl.setText(f"{mm:02d}:{ss:02d}")
 
     def _transition_narrative_mode(self, new_mode):
         old_mode = self.narrative.get("mode", "connected")
@@ -1816,7 +1836,7 @@ class GrimveilDeck(QMainWindow):
 
     def _emit_unsolicited_transmission(self):
         if not self.model_loaded or self.status == "GENERATING":
-            self._restart_unsolicited_timer()
+            self._restart_idle_timer()
             return
         self.narrative["silence_intervals"] = int(self.narrative.get("silence_intervals", 0)) + 1
         current_mode = self._get_narrative_mode()
@@ -1854,10 +1874,12 @@ class GrimveilDeck(QMainWindow):
         )
         self.narrative.setdefault("history", []).append(history_entry)
         self.narrative["history"] = self.narrative["history"][-30:]
+        self._append_chat("SYSTEM", "[ UNSOLICITED TRANSMISSION ]")
         self._append_chat("SYSTEM", line)
+        self.history.append({"role": "assistant", "content": line})
         self._store_message("system", history_entry)
         self._persist_internal_narrative_state()
-        self._restart_unsolicited_timer()
+        self._restart_idle_timer()
 
     def _build_internal_narrative_block(self):
         mode = self.narrative.get("mode", self._get_narrative_mode())
@@ -1908,6 +1930,10 @@ class GrimveilDeck(QMainWindow):
         self.status_label.setStyleSheet(f"color: {C_RED}; font-size: 12px; font-weight: bold; border: none;")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignRight)
 
+        self.countdown_lbl = QLabel("--:--")
+        self.countdown_lbl.setStyleSheet(f"color: {C_GOLD}; font-size: 11px; font-weight: bold; border: none;")
+        self.countdown_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+
         self.fs_btn = QPushButton("FS")
         self.fs_btn.setFixedSize(32, 22)
         self.fs_btn.setStyleSheet(f"background: {C_BG3}; color: {C_CYAN_DIM}; border: 1px solid {C_CYAN_DIM}; font-size: 9px; font-weight: bold; padding: 0px; letter-spacing: 1px;")
@@ -1923,6 +1949,7 @@ class GrimveilDeck(QMainWindow):
         tl.addWidget(title_left)
         tl.addWidget(title_runes, 1)
         tl.addWidget(self.status_label)
+        tl.addWidget(self.countdown_lbl)
         tl.addSpacing(8)
         tl.addWidget(self.fs_btn)
         tl.addWidget(self.bl_btn)
@@ -2637,7 +2664,7 @@ class GrimveilDeck(QMainWindow):
             return
         self.last_user_activity_ts = time.time()
         self.narrative["silence_intervals"] = 0
-        self._restart_unsolicited_timer()
+        self._restart_idle_timer()
 
         self.input_field.clear()
         self._append_chat("YOU", text)
@@ -2820,7 +2847,7 @@ class GrimveilDeck(QMainWindow):
         self.send_btn.setEnabled(True)
         self.input_field.setEnabled(True)
         self.input_field.setFocus()
-        self._restart_unsolicited_timer()
+        self._restart_idle_timer()
 
     def _insert_calendar_date(self, qdate):
         try:
