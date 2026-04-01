@@ -1,7 +1,7 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.8.2
+# Version: 1.8.3
 # Build Date: 2026-04-01
 # Summary:
 #   Corrected moon illumination rendering math in the status/anchor panel.
@@ -33,6 +33,9 @@
 #   - added Google Calendar inbound sync polling
 #   - local tasks now reconcile external Google event changes/deletions
 #   - imported new Google Calendar events into local Task Registry
+#   - fixed unsolicited self-talk thread progression
+#   - autonomous transmissions now advance prior thought instead of repeating identical seed text
+#   - added diagnostics for autonomous thread state and duplicate rejection
 
 import sys
 import time
@@ -49,6 +52,7 @@ from pathlib import Path
 import math
 import wave
 import struct
+import difflib
 GOOGLE_IMPORT_ERROR = None
 try:
     from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -79,7 +83,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.8.2"
+APP_VERSION = "1.8.3"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -1972,6 +1976,94 @@ class GrimveilDeck(QMainWindow):
         idx = min(len(bank) - 1, max(0, turns + max(0, level - 1)))
         return bank[idx]
 
+    def _build_unsolicited_prompt(self, mode: str, turn_number: int, escalation: int, thread_summary: str, last_output: str, retry: bool = False):
+        mode_brief = {
+            "connected": "connected = stable superiority",
+            "nearby": "nearby = uneasy; may speak directly to E-42 while staying controlled",
+            "absent": "absent = panic/paranoia escalation",
+        }.get(mode, "connected = stable superiority")
+        retry_rule = (
+            "CRITICAL: your prior attempt repeated the same line. Produce a distinctly new sentence that advances the thread now."
+            if retry else
+            "Advance naturally from the existing thread state."
+        )
+        return (
+            "<|im_start|>system\n"
+            "You write one autonomous internal transmission line for GRIMVEILE-42.\n"
+            "Rules:\n"
+            "- Continue the prior thought; do not restart or reseed from scratch.\n"
+            "- Do NOT restate the same sentence or near-identical phrasing.\n"
+            "- Add exactly one new layer: conclusion, suspicion, observation, escalation, or guarded dependence.\n"
+            "- Keep it to 1-2 sentences, concise, coherent, and thread-progressive.\n"
+            f"- Mode flavor: {mode_brief}.\n"
+            f"- {retry_rule}\n"
+            "<|im_end|>\n"
+            "<|im_start|>user\n"
+            f"mode={mode}\n"
+            f"turn_number={turn_number}\n"
+            f"escalation_level={escalation}\n"
+            f"thread_summary_before={thread_summary or 'none'}\n"
+            f"last_unsolicited_output={last_output or 'none'}\n"
+            "Write the next autonomous transmission only.\n"
+            "<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+
+    def _normalize_unsolicited_text(self, text: str):
+        compact = re.sub(r"\s+", " ", (text or "").strip()).lower()
+        return re.sub(r"[^a-z0-9 ]", "", compact).strip()
+
+    def _is_unsolicited_duplicate(self, candidate: str, previous: str):
+        c_norm = self._normalize_unsolicited_text(candidate)
+        p_norm = self._normalize_unsolicited_text(previous)
+        if not c_norm or not p_norm:
+            return False
+        if c_norm == p_norm:
+            return True
+        similarity = difflib.SequenceMatcher(None, c_norm, p_norm).ratio()
+        return similarity >= 0.93
+
+    def _generate_unsolicited_line(self, mode: str, turn_number: int, escalation: int, thread_summary: str, last_output: str, retry: bool = False):
+        if not TORCH_OK or not self.model_loaded or self.model is None or self.tokenizer is None:
+            return self._compose_unsolicited_line()
+        prompt = self._build_unsolicited_prompt(
+            mode=mode,
+            turn_number=turn_number,
+            escalation=escalation,
+            thread_summary=thread_summary,
+            last_output=last_output,
+            retry=retry,
+        )
+        try:
+            input_ids = self.tokenizer(prompt, return_tensors='pt').input_ids.to("cuda")
+            with torch.no_grad():
+                output = self.model.generate(
+                    input_ids,
+                    max_new_tokens=90,
+                    temperature=0.7 if not retry else 0.85,
+                    do_sample=True,
+                    top_p=0.9,
+                    repetition_penalty=1.08 if retry else 1.02,
+                    pad_token_id=self.tokenizer.eos_token_id
+                )
+            raw = self.tokenizer.decode(output[0][input_ids.shape[-1]:], skip_special_tokens=True)
+            line = re.sub(r"\s+", " ", raw).strip().split("\n")[0].strip()
+            return line if line else self._compose_unsolicited_line()
+        except Exception as ex:
+            self.log_diagnostic(f"Unsolicited model generation fallback engaged: {ex}", level="WARN")
+            return self._compose_unsolicited_line()
+
+    def _update_unsolicited_thread_summary(self, prior_summary: str, accepted_line: str, mode: str, turn_number: int, escalation: int):
+        prior = (prior_summary or "").strip()
+        line_short = (accepted_line or "").strip()
+        if len(line_short) > 160:
+            line_short = line_short[:157] + "..."
+        update = f"T{turn_number} [{mode}/E{escalation}] {line_short}"
+        if not prior:
+            return update
+        combined = f"{prior} || {update}"
+        return combined[-700:]
+
     def _emit_unsolicited_transmission(self):
         if not self.model_loaded or self.status == "GENERATING":
             why = "model not loaded" if not self.model_loaded else "generation in progress"
@@ -1999,15 +2091,58 @@ class GrimveilDeck(QMainWindow):
         else:
             level = min(2, turns // 3)
         self.narrative["escalation_level"] = level
+        prior_summary = self.narrative.get("thread_summary", "")
+        prior_output = self.narrative.get("last_unsolicited_output", "")
+        self.log_diagnostic(
+            (
+                f"Autonomous thread pre-gen | turn={turns + 1} | mode={current_mode} | "
+                f"summary={prior_summary or 'none'} | last={prior_output or 'none'}"
+            ),
+            level="DEBUG"
+        )
 
-        line = self._compose_unsolicited_line()
+        line = self._generate_unsolicited_line(
+            mode=current_mode,
+            turn_number=turns + 1,
+            escalation=level,
+            thread_summary=prior_summary,
+            last_output=prior_output,
+            retry=False,
+        )
+        duplicate_rejected = False
+        if self._is_unsolicited_duplicate(line, prior_output):
+            duplicate_rejected = True
+            self.log_diagnostic(
+                f"Autonomous duplicate detected on turn {turns + 1}; regenerating with stronger progression instruction.",
+                level="WARN"
+            )
+            line = self._generate_unsolicited_line(
+                mode=current_mode,
+                turn_number=turns + 1,
+                escalation=level,
+                thread_summary=prior_summary,
+                last_output=prior_output,
+                retry=True,
+            )
+            if self._is_unsolicited_duplicate(line, prior_output):
+                line = f"{line} New development: focus shifted to next unresolved signal."
+
         self.narrative["unsolicited_turn_count"] = turns + 1
         self.narrative["last_unsolicited_output"] = line
         self.narrative["last_thread_update_ts"] = local_now_iso()
-        self.narrative["thread_summary"] = (
-            f"Mode={current_mode}; topic={self.narrative.get('thread_topic','')}; "
-            f"turn={self.narrative['unsolicited_turn_count']}; escalation={level}; "
-            f"latest={line[:160]}"
+        self.narrative["thread_summary"] = self._update_unsolicited_thread_summary(
+            prior_summary=prior_summary,
+            accepted_line=line,
+            mode=current_mode,
+            turn_number=self.narrative["unsolicited_turn_count"],
+            escalation=level,
+        )
+        self.log_diagnostic(
+            (
+                f"Autonomous thread post-gen | accepted={'rejected-duplicate-regenerated' if duplicate_rejected else 'accepted-first-pass'} | "
+                f"updated_summary={self.narrative.get('thread_summary', 'none')}"
+            ),
+            level="DEBUG"
         )
         history_entry = (
             f"[Unsolicited thread turn {self.narrative['unsolicited_turn_count']} | "
