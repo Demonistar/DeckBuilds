@@ -1,17 +1,16 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.4.0
+# Version: 1.4.1
 # Build Date: 2026-04-01
 # Summary:
-#   Functional Task Registry upgrade: interactive row-based panel with active/completed filtering,
-#   row actions, and immediate refresh persistence behavior.
+#   Reconciliation patch for task creation pipeline contract with Task Registry:
+#   restore reliable reminder interception/parsing while preserving interactive registry UI.
 # Changelog:
-#   - Replaced text-only Task Registry log with a compact interactive QTableWidget task panel.
-#   - Added selectable task rows with double-click completion and action buttons (complete/cancel/show completed/purge).
-#   - Implemented active-only default task view with explicit completed visibility toggle.
-#   - Separated complete, hide/show completed, and purge completed behaviors.
-#   - Preserved JSONL task persistence and backward compatibility while adding immediate UI refresh after task updates.
+#   - Reconciled reminder intent detection with parser prefixes by accepting both "set/add reminder" and "set/add a reminder" forms.
+#   - Restored natural-duration parsing for compact inputs like "in 15m test system" by extracting trailing task text without requiring "to".
+#   - Added post-write reload verification in task creation path so success responses only occur when persisted tasks can be reloaded.
+#   - Preserved current interactive Task Registry panel, filters, and completion controls without schema redesign.
 
 import sys
 import time
@@ -45,7 +44,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -500,11 +499,11 @@ def has_reminder_intent(text: str) -> bool:
     lowered = normalize_persona_prefixed_input(text).lower()
     patterns = (
         r"\bremind me\b",
-        r"\b(?:please\s+)?set a reminder\b",
-        r"\badd a reminder\b",
-        r"\bi want a reminder\b",
-        r"\bwant a reminder\b",
-        r"\b(?:grim[\s,]+)?(?:please\s+)?(?:set|add)\s+a\s+reminder\b",
+        r"\b(?:please\s+)?set(?:\s+a)?\s+reminder\b",
+        r"\badd(?:\s+a)?\s+reminder\b",
+        r"\bi want(?:\s+a)?\s+reminder\b",
+        r"\bwant(?:\s+a)?\s+reminder\b",
+        r"\b(?:grim[\s,]+)?(?:please\s+)?(?:set|add)(?:\s+a)?\s+reminder\b",
     )
     return any(re.search(p, lowered) for p in patterns)
 
@@ -2379,6 +2378,9 @@ class GrimveilDeck(QMainWindow):
             return None
         task_text, due_dt = parsed
         task = self.memory.add_task(task_text, due_dt, text)
+        reloaded = self.memory.load_tasks()
+        if not any((t.get("id") == task.get("id")) for t in reloaded):
+            return None
         self._refresh_task_registry_panel()
         return task
 
@@ -2388,7 +2390,7 @@ class GrimveilDeck(QMainWindow):
         if not force_intent and not has_reminder_intent(lower):
             return None
 
-        lead_prefix = r"^\s*(?:please\s+)?(?:remind me|set a reminder|add a reminder|(?:i\s+)?want a reminder)\b"
+        lead_prefix = r"^\s*(?:please\s+)?(?:remind me|set(?:\s+a)?\s+reminder|add(?:\s+a)?\s+reminder|(?:i\s+)?want(?:\s+a)?\s+reminder)\b"
         payload = re.sub(lead_prefix, "", t, flags=re.I).strip(" ,.-")
         if not payload:
             return None
@@ -2404,7 +2406,19 @@ class GrimveilDeck(QMainWindow):
             delta_phrase = in_with_task.group(1).strip() if in_with_task else rest
             delta = parse_duration_phrase(delta_phrase)
             if delta:
-                task_text = in_with_task.group(2) if in_with_task and in_with_task.lastindex and in_with_task.group(2) else "Reminder"
+                task_text = in_with_task.group(2) if in_with_task and in_with_task.lastindex and in_with_task.group(2) else None
+                if not task_text:
+                    compact = re.match(
+                        r"^((?:\d+\s*(?:d|day|days|h|hr|hour|hours|m|min|minute|minutes|s|sec|second|seconds)\s*)+)(.*)$",
+                        rest,
+                        re.I,
+                    )
+                    if compact:
+                        compact_delta = parse_duration_phrase(compact.group(1))
+                        if compact_delta:
+                            delta = compact_delta
+                            remainder = (compact.group(2) or "").strip(" ,.-")
+                            task_text = remainder if remainder else "Reminder"
                 return clean_task_text(task_text), datetime.now() + delta
 
         tomorrow_match = re.search(
