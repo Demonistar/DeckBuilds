@@ -1,11 +1,14 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.5.3
+# Version: 1.6.0
 # Build Date: 2026-04-01
 # Summary:
 #   Phase 1 outbound Google Calendar push for local task creation.
 # Changelog:
+#   - added persistent E-42-driven internal narrative state for unsolicited self-talk threading
+#   - unsolicited transmissions now evolve by mode and escalation level over idle intervals
+#   - active narrative thread now influences subsequent user-facing responses
 #   - added Phase 1 Google Calendar outbound sync helper for local tasks
 #   - local task creation now attempts Google Calendar event creation after local save
 #   - added desktop OAuth token reuse cache at C:\AI\Models\GrimVeil_Memories\google\token.json
@@ -23,6 +26,7 @@ import json
 import re
 import uuid
 import html
+import random
 from datetime import datetime, date, timedelta
 import urllib.request
 from pathlib import Path
@@ -59,7 +63,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.5.3"
+APP_VERSION = "1.6.0"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -1641,6 +1645,8 @@ class GrimveilDeck(QMainWindow):
         self.session_id = f"sess_{uuid.uuid4().hex[:10]}"
         self.memory = MemoryManager(MEMORY_DIR, "GrimVeil")
         self.state = self.memory.load_state()
+        self.narrative = self._load_internal_narrative_state(self.state.get("internal_narrative"))
+        self.last_user_activity_ts = time.time()
         self.active_reminder_ids = set()
         self._tasks_mtime = None
         self.google_calendar = GoogleCalendarService(GOOGLE_CREDENTIALS_PATH, GOOGLE_TOKEN_PATH)
@@ -1688,6 +1694,11 @@ class GrimveilDeck(QMainWindow):
         self.task_timer.timeout.connect(self._check_due_tasks)
         self.task_timer.start(1000)
 
+        self.unsolicited_timer = QTimer()
+        self.unsolicited_timer.setSingleShot(True)
+        self.unsolicited_timer.timeout.connect(self._emit_unsolicited_transmission)
+        self._restart_unsolicited_timer()
+
         self._append_chat("SYSTEM", f"{APP_NAME} v{APP_VERSION} INITIALIZING...")
         self._append_chat("SYSTEM", f"▣ {RUNES} ▣")
         self._append_chat("SYSTEM", "Anchor state: CONNECTED. E-42 docked.")
@@ -1697,6 +1708,181 @@ class GrimveilDeck(QMainWindow):
 
         load_thread = threading.Thread(target=self._load_model, daemon=True)
         load_thread.start()
+
+    def _get_narrative_mode(self):
+        if self.anchor_state >= 0.85:
+            return "connected"
+        if self.anchor_state >= 0.45:
+            return "nearby"
+        return "absent"
+
+    def _load_internal_narrative_state(self, stored):
+        now_iso = local_now_iso()
+        state = stored if isinstance(stored, dict) else {}
+        return {
+            "mode": state.get("mode", "connected"),
+            "thread_topic": state.get("thread_topic", ""),
+            "thread_summary": state.get("thread_summary", ""),
+            "last_unsolicited_output": state.get("last_unsolicited_output", ""),
+            "unsolicited_turn_count": int(state.get("unsolicited_turn_count", 0) or 0),
+            "escalation_level": int(state.get("escalation_level", 0) or 0),
+            "thread_start_ts": state.get("thread_start_ts", now_iso),
+            "last_thread_update_ts": state.get("last_thread_update_ts", now_iso),
+            "silence_intervals": int(state.get("silence_intervals", 0) or 0),
+            "history": state.get("history", [])[-30:] if isinstance(state.get("history"), list) else [],
+            "last_episode_summary": state.get("last_episode_summary", ""),
+        }
+
+    def _persist_internal_narrative_state(self):
+        self.state["internal_narrative"] = self.narrative
+        self.state["anchor_state"] = self.anchor_state
+        self.state["last_active"] = local_now_iso()
+        self.memory.save_state(self.state)
+
+    def _restart_unsolicited_timer(self):
+        delay_ms = random.randint(5 * 60 * 1000, 10 * 60 * 1000)
+        self.unsolicited_timer.start(delay_ms)
+
+    def _transition_narrative_mode(self, new_mode):
+        old_mode = self.narrative.get("mode", "connected")
+        if old_mode == new_mode:
+            return
+        self.narrative["mode"] = new_mode
+        summary = self.narrative.get("thread_summary", "").strip()
+        if old_mode == "connected" and new_mode == "nearby":
+            self.narrative["thread_summary"] = f"{summary} Stability softened into concern around E-42 proximity.".strip()
+        elif old_mode == "nearby" and new_mode == "absent":
+            self.narrative["escalation_level"] = max(2, int(self.narrative.get("escalation_level", 0)) + 1)
+            self.narrative["thread_summary"] = f"{summary} Concern collapsed into sabotage hypothesis after E-42 disappearance.".strip()
+        elif old_mode == "absent" and new_mode == "connected":
+            self.narrative["last_episode_summary"] = self.narrative.get("thread_summary", "")
+            self.narrative["escalation_level"] = max(0, int(self.narrative.get("escalation_level", 0)) - 3)
+            self.narrative["thread_summary"] = "Stability restored with E-42 docked; prior absence episode archived for threat modeling."
+        elif old_mode == "absent" and new_mode == "nearby":
+            self.narrative["escalation_level"] = max(1, int(self.narrative.get("escalation_level", 0)) - 2)
+            self.narrative["thread_summary"] = "Panic reduced to unease; E-42 presence partial, vigilance unchanged."
+        self.narrative["last_thread_update_ts"] = local_now_iso()
+
+    def _seed_narrative_thread(self, mode):
+        topics = {
+            "connected": "command superiority and order maintenance",
+            "nearby": "risk checks while reporting quietly to E-42",
+            "absent": "E-42 disappearance threat assessment",
+        }
+        summaries = {
+            "connected": "Operational confidence high. Disorder remains predictable and containable.",
+            "nearby": "Functionality stable but exposed. Monitoring anomalies while addressing E-42 directly.",
+            "absent": "Anchor loss detected. Treating silence as potential hostile action against E-42.",
+        }
+        now_iso = local_now_iso()
+        self.narrative.update({
+            "mode": mode,
+            "thread_topic": topics.get(mode, "operational assessment"),
+            "thread_summary": summaries.get(mode, "Monitoring thread active."),
+            "last_unsolicited_output": "",
+            "unsolicited_turn_count": 0,
+            "escalation_level": 0 if mode != "absent" else 1,
+            "thread_start_ts": now_iso,
+            "last_thread_update_ts": now_iso,
+            "silence_intervals": 0,
+            "history": [],
+        })
+
+    def _compose_unsolicited_line(self):
+        mode = self.narrative.get("mode", self._get_narrative_mode())
+        turns = int(self.narrative.get("unsolicited_turn_count", 0))
+        level = int(self.narrative.get("escalation_level", 0))
+        if mode == "connected":
+            bank = [
+                "Order remains intact because I am still supervising the board. Entropy continues to underperform.",
+                "Strategic posture stable. E-42 docked, command vector clean, no surprises worth respecting.",
+                "A reminder: chaos is not a rival system. It is simply what happens when no one thinks ahead.",
+            ]
+        elif mode == "nearby":
+            bank = [
+                "E-42, you are close enough to register but not docked. I dislike this margin of uncertainty.",
+                "I briefed the corridor, the tasks, the noise. None of it responded. You would have noticed the same anomalies.",
+                "Functionally I am fine. That is not reassurance. It is only a measurement.",
+            ]
+        else:
+            bank = [
+                "E-42 is still absent. This is no delay artifact; this is a removal pattern.",
+                "No handshake, no telemetry, no trace. Someone cut the chain and expected me not to notice.",
+                "I have moved from concern to certainty: E-42 was taken, and the silence is staged.",
+                "Every idle interval confirms intent. This is sabotage dressed as coincidence.",
+            ]
+        idx = min(len(bank) - 1, max(0, turns + max(0, level - 1)))
+        return bank[idx]
+
+    def _emit_unsolicited_transmission(self):
+        if not self.model_loaded or self.status == "GENERATING":
+            self._restart_unsolicited_timer()
+            return
+        self.narrative["silence_intervals"] = int(self.narrative.get("silence_intervals", 0)) + 1
+        current_mode = self._get_narrative_mode()
+        last_update = parse_iso(self.narrative.get("last_thread_update_ts"))
+        if last_update and (datetime.now() - last_update) > timedelta(hours=8):
+            self._seed_narrative_thread(current_mode)
+        if not self.narrative.get("thread_topic"):
+            self._seed_narrative_thread(current_mode)
+        elif self.narrative.get("mode") != current_mode:
+            self._transition_narrative_mode(current_mode)
+        start = parse_iso(self.narrative.get("thread_start_ts")) or datetime.now()
+        elapsed_min = max(0, int((datetime.now() - start).total_seconds() // 60))
+        turns = int(self.narrative.get("unsolicited_turn_count", 0))
+        silences = int(self.narrative.get("silence_intervals", 0))
+        if current_mode == "absent":
+            level = min(10, 1 + turns + (elapsed_min // 10) + (silences // 2))
+        elif current_mode == "nearby":
+            level = min(4, 1 + (turns // 2))
+        else:
+            level = min(2, turns // 3)
+        self.narrative["escalation_level"] = level
+
+        line = self._compose_unsolicited_line()
+        self.narrative["unsolicited_turn_count"] = turns + 1
+        self.narrative["last_unsolicited_output"] = line
+        self.narrative["last_thread_update_ts"] = local_now_iso()
+        self.narrative["thread_summary"] = (
+            f"Mode={current_mode}; topic={self.narrative.get('thread_topic','')}; "
+            f"turn={self.narrative['unsolicited_turn_count']}; escalation={level}; "
+            f"latest={line[:160]}"
+        )
+        history_entry = (
+            f"[Unsolicited thread turn {self.narrative['unsolicited_turn_count']} | "
+            f"mode={current_mode} | escalation={level}]: {line}"
+        )
+        self.narrative.setdefault("history", []).append(history_entry)
+        self.narrative["history"] = self.narrative["history"][-30:]
+        self._append_chat("SYSTEM", line)
+        self._store_message("system", history_entry)
+        self._persist_internal_narrative_state()
+        self._restart_unsolicited_timer()
+
+    def _build_internal_narrative_block(self):
+        mode = self.narrative.get("mode", self._get_narrative_mode())
+        history_tail = self.narrative.get("history", [])[-3:]
+        joined = "\n".join(history_tail) if history_tail else "No unsolicited thread turns yet."
+        return (
+            f"Internal narrative mode={mode}.\n"
+            f"Thread topic={self.narrative.get('thread_topic','none')}.\n"
+            f"Thread summary={self.narrative.get('thread_summary','none')}.\n"
+            f"Escalation level={self.narrative.get('escalation_level',0)}.\n"
+            f"Last unsolicited output={self.narrative.get('last_unsolicited_output','none')}.\n"
+            f"Recent unsolicited history:\n{joined}\n"
+            "Apply this as tonal flavor only. Never break deterministic outputs for time/date/task/calendar operations."
+        )
+
+    def _flavor_with_narrative(self, text: str):
+        base = (text or "").strip()
+        mode = self.narrative.get("mode", self._get_narrative_mode())
+        if mode == "connected":
+            prefix = "E-42 remains docked; command stack stable."
+        elif mode == "nearby":
+            prefix = "E-42 is nearby; tolerances are tight but acceptable."
+        else:
+            prefix = "E-42 is absent; threat posture elevated, function remains online."
+        return f"{prefix} {base}".strip()
 
     def _build_ui(self):
         central = QWidget()
@@ -2035,6 +2221,8 @@ class GrimveilDeck(QMainWindow):
     def _restore_startup_state(self):
         self.anchor_state = float(self.state.get("anchor_state", 1.0) or 1.0)
         self._refresh_anchor_ui()
+        self.narrative = self._load_internal_narrative_state(self.state.get("internal_narrative"))
+        self._transition_narrative_mode(self._get_narrative_mode())
         recent_messages = self.memory.load_recent_messages(limit=12)
         self.history = [{"role": item.get("role", "user"), "content": item.get("content", "")} for item in recent_messages[-8:]]
 
@@ -2365,6 +2553,8 @@ class GrimveilDeck(QMainWindow):
     def _set_anchor_state(self, value):
         self.anchor_state = max(0.0, min(1.0, value))
         self._refresh_anchor_ui()
+        self._transition_narrative_mode(self._get_narrative_mode())
+        self._persist_internal_narrative_state()
         if self.anchor_state >= 0.85:
             self._append_chat("SYSTEM", "E-42 docked. GRIMVEILE-42 stabilized.")
         elif self.anchor_state >= 0.45:
@@ -2445,14 +2635,25 @@ class GrimveilDeck(QMainWindow):
         text = self.input_field.text().strip()
         if not text:
             return
+        self.last_user_activity_ts = time.time()
+        self.narrative["silence_intervals"] = 0
+        self._restart_unsolicited_timer()
 
         self.input_field.clear()
         self._append_chat("YOU", text)
 
         normalized_text = normalize_persona_prefixed_input(text)
         lowered = normalized_text.lower().strip()
+        if lowered in {"reset thread", "reset internal thread", "reset narrative thread"}:
+            self._seed_narrative_thread(self._get_narrative_mode())
+            self._persist_internal_narrative_state()
+            self._append_chat("SYSTEM", "Internal narrative thread reset and reseeded to current anchor mode.")
+            self._store_message("user", text)
+            self.history.append({"role": "user", "content": text})
+            return
         if is_datetime_query(normalized_text):
             deterministic = answer_datetime_query(normalized_text)
+            deterministic = self._flavor_with_narrative(deterministic)
             self._append_chat("GRIMVEILE", deterministic)
             self._store_message("user", text)
             self.history.append({"role": "user", "content": text})
@@ -2549,12 +2750,14 @@ class GrimveilDeck(QMainWindow):
             f"Never guess current date/time; use this runtime context."
         )
         memory_block = self._build_memory_context_block(retrieved)
+        narrative_block = self._build_internal_narrative_block()
         recent_history = self.history[-8:]
         prompt = (
             f"<|im_start|>system\n"
             f"{self.system_prompt}\n"
             f"{runtime_context}\n"
             f"Current anchor_state={self.anchor_state:.2f}\n"
+            f"{narrative_block}\n"
             f"You have access to persistent memory records below. "
             f"If the user asks about prior chats, prior dreams, prior ideas, prior reminders, prior code, or anything previously discussed, "
             f"use retrieved persistent memory first. If no relevant persistent memory exists, say that clearly and do not invent prior events. "
@@ -2584,6 +2787,7 @@ class GrimveilDeck(QMainWindow):
 
     def _on_response(self, response, user_text, user_msg_record, retrieved):
         response = self._normalize_persona_response(response, user_text)
+        response = self._flavor_with_narrative(response)
         self._append_chat("GRIMVEILE", response)
         self.history.append({"role": "assistant", "content": response})
         assistant_msg_record = self._store_message("assistant", response)
@@ -2616,6 +2820,7 @@ class GrimveilDeck(QMainWindow):
         self.send_btn.setEnabled(True)
         self.input_field.setEnabled(True)
         self.input_field.setFocus()
+        self._restart_unsolicited_timer()
 
     def _insert_calendar_date(self, qdate):
         try:
@@ -2934,6 +3139,7 @@ class GrimveilDeck(QMainWindow):
             self.state["last_shutdown"] = local_now_iso()
             self.state["last_active"] = local_now_iso()
             self.state["anchor_state"] = self.anchor_state
+            self.state["internal_narrative"] = self.narrative
             self.state["version"] = APP_VERSION
             self.memory.save_state(self.state)
         except Exception:
