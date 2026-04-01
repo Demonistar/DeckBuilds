@@ -1,10 +1,10 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.6.1
+# Version: 1.6.2
 # Build Date: 2026-04-01
 # Summary:
-#   Phase 1 outbound Google Calendar push for local task creation.
+#   Added a dedicated Diagnostics output view beside Tactical Record.
 # Changelog:
 #   - corrected Grim idle timer feature by directly porting countdown/timer/unsolicited transmission scaffold from echo_deck.py
 #   - restored visible countdown placement in title bar
@@ -20,6 +20,9 @@
 #   - fixed Google Calendar timed event payload timezone formatting
 #   - now sends valid IANA timezone with start/end event objects
 #   - local cancel/complete now removes matching Google Calendar events when google_event_id exists
+#   - added Diagnostics output view beside Tactical Record
+#   - surfaced backend/system/timer/API errors in dedicated log panel
+#   - improved visibility into stalled or failed generation states
 
 import sys
 import time
@@ -57,7 +60,7 @@ except ImportError:
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QFrame, QCalendarWidget,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QStackedWidget
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QDate, QSize
 from PyQt6.QtGui import (
@@ -66,7 +69,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.6.2"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -1654,6 +1657,8 @@ class GrimveilDeck(QMainWindow):
         self._tasks_mtime = None
         self.google_calendar = GoogleCalendarService(GOOGLE_CREDENTIALS_PATH, GOOGLE_TOKEN_PATH)
         self._google_link_announced = False
+        self._last_status_logged = None
+        self._generation_started_at = None
 
         self.system_prompt = (
             "You are GRIMVEIL, a machine intelligence strategist. "
@@ -1705,12 +1710,16 @@ class GrimveilDeck(QMainWindow):
         self._countdown_tick = QTimer()
         self._countdown_tick.timeout.connect(self._update_countdown)
         self._countdown_tick.start(1000)
+        self.generation_watchdog = QTimer()
+        self.generation_watchdog.timeout.connect(self._check_generation_watchdog)
+        self.generation_watchdog.start(15000)
         self._restart_idle_timer()
 
         self._append_chat("SYSTEM", f"{APP_NAME} v{APP_VERSION} INITIALIZING...")
         self._append_chat("SYSTEM", f"▣ {RUNES} ▣")
         self._append_chat("SYSTEM", "Anchor state: CONNECTED. E-42 docked.")
         self._append_chat("SYSTEM", "Persistent memory namespace linked.")
+        self.log_diagnostic("Diagnostics panel active and receiving backend/system events.")
         self.send_btn.setEnabled(False)
         self.input_field.setEnabled(False)
 
@@ -1748,9 +1757,13 @@ class GrimveilDeck(QMainWindow):
         self.memory.save_state(self.state)
 
     def _restart_idle_timer(self):
+        if self.idle_timer.isActive():
+            self.idle_timer.stop()
+            self.log_diagnostic("Idle timer stopped before restart.", level="DEBUG")
         delay_ms = random.randint(5 * 60 * 1000, 10 * 60 * 1000)
         self._idle_fire_at = time.time() + (delay_ms / 1000.0)
         self.idle_timer.start(delay_ms)
+        self.log_diagnostic(f"Idle timer started/restarted for {delay_ms // 1000}s.", level="DEBUG")
         self._update_countdown()
 
     def _update_countdown(self):
@@ -1836,8 +1849,11 @@ class GrimveilDeck(QMainWindow):
 
     def _emit_unsolicited_transmission(self):
         if not self.model_loaded or self.status == "GENERATING":
+            why = "model not loaded" if not self.model_loaded else "generation in progress"
+            self.log_diagnostic(f"Unsolicited transmission aborted: {why}.", level="WARN")
             self._restart_idle_timer()
             return
+        self.log_diagnostic("Unsolicited transmission trigger fired.", level="INFO")
         self.narrative["silence_intervals"] = int(self.narrative.get("silence_intervals", 0)) + 1
         current_mode = self._get_narrative_mode()
         last_update = parse_iso(self.narrative.get("last_thread_update_ts"))
@@ -1879,6 +1895,7 @@ class GrimveilDeck(QMainWindow):
         self.history.append({"role": "assistant", "content": line})
         self._store_message("system", history_entry)
         self._persist_internal_narrative_state()
+        self.log_diagnostic("Unsolicited transmission appended to Tactical Record and persisted.", level="DEBUG")
         self._restart_idle_timer()
 
     def _build_internal_narrative_block(self):
@@ -1961,14 +1978,48 @@ class GrimveilDeck(QMainWindow):
         left_panel = QVBoxLayout()
         left_panel.setSpacing(4)
 
-        mon_label = QLabel("❧ TACTICAL RECORD")
-        mon_label.setStyleSheet(f"color: {C_GOLD}; font-size: 10px; letter-spacing: 2px; font-family: Georgia, serif;")
-        left_panel.addWidget(mon_label)
+        record_header_row = QHBoxLayout()
+        record_header_row.setSpacing(4)
+        record_header_row.setContentsMargins(0, 0, 0, 0)
 
+        self.btn_view_tactical = QPushButton("TACTICAL RECORD")
+        self.btn_view_diagnostics = QPushButton("DIAGNOSTICS")
+        for btn in (self.btn_view_tactical, self.btn_view_diagnostics):
+            btn.setCheckable(True)
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {C_BG3}; color: {C_GOLD}; border: 1px solid {C_CYAN_DIM}; "
+                f"border-radius: 2px; font-size: 9px; letter-spacing: 1px; padding: 3px 8px; }}"
+                f"QPushButton:checked {{ background-color: {C_CYAN_DIM}; color: {C_TEXT}; border-color: {C_CYAN}; }}"
+            )
+        self.btn_view_tactical.clicked.connect(lambda: self._switch_output_view("tactical"))
+        self.btn_view_diagnostics.clicked.connect(lambda: self._switch_output_view("diagnostics"))
+        record_header_row.addWidget(self.btn_view_tactical)
+        record_header_row.addWidget(self.btn_view_diagnostics)
+        record_header_row.addStretch()
+        left_panel.addLayout(record_header_row)
+
+        self.output_stack = QStackedWidget()
         self.chat_display = QTextEdit()
         self.chat_display.setReadOnly(True)
         self.chat_display.setMinimumWidth(580)
-        left_panel.addWidget(self.chat_display, 1)
+        self.output_stack.addWidget(self.chat_display)
+
+        self.diagnostics_display = QTextEdit()
+        self.diagnostics_display.setReadOnly(True)
+        self.diagnostics_display.setMinimumWidth(580)
+        self.diagnostics_display.setStyleSheet(f"""
+            background-color: {C_MONITOR};
+            color: {C_SILVER};
+            border: 1px solid {C_CYAN_DIM};
+            border-radius: 2px;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 11px;
+            padding: 8px;
+            selection-background-color: {C_CYAN_DIM};
+        """)
+        self.output_stack.addWidget(self.diagnostics_display)
+        left_panel.addWidget(self.output_stack, 1)
+        self._switch_output_view("tactical")
 
         face_label = QLabel("❧ VISAGE MATRIX")
         face_label.setStyleSheet(f"color: {C_GOLD}; font-size: 10px; letter-spacing: 2px; font-family: Georgia, serif;")
@@ -2220,6 +2271,7 @@ class GrimveilDeck(QMainWindow):
 
     def _load_model(self):
         self._qt_set_status("LOADING")
+        self.log_diagnostic(f"Model load started from path: {MODEL_PATH}", level="INFO")
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
             self.model = AutoModelForCausalLM.from_pretrained(
@@ -2229,10 +2281,12 @@ class GrimveilDeck(QMainWindow):
                 low_cpu_mem_usage=True
             )
             self.model_loaded = True
+            self.log_diagnostic("Model load succeeded. Tokenizer and model are online.", level="INFO")
             self._qt_append("SYSTEM", "Compute core stable. Sabotage not yet confirmed.")
             self._qt_append("SYSTEM", "GRIMVEILE-42 online. E-42 remains loyal.")
             QTimer.singleShot(0, self._on_model_ready)
         except Exception as e:
+            self.log_exception("Model load", e)
             self._qt_append("ERROR", f"Initialization compromised: {e}")
             self._qt_set_status("ERROR")
             QTimer.singleShot(0, lambda: self.face_widget.set_face("panicked"))
@@ -2297,6 +2351,7 @@ class GrimveilDeck(QMainWindow):
         QTimer.singleShot(0, lambda: self._set_status(status))
 
     def _set_status(self, status):
+        previous = getattr(self, "status", None)
         self.status = status
         colors = {
             "IDLE":       C_GOLD,
@@ -2313,6 +2368,12 @@ class GrimveilDeck(QMainWindow):
         if self.model_loaded:
             self.lbl_model.setText(f"✦ VESSEL: DOLPHIN-2.6-7B / v{APP_VERSION}")
             self.lbl_model.setStyleSheet(f"color: {C_GOLD}; font-size: 10px; border: none;")
+        if previous != status:
+            self.log_diagnostic(f"Generation state changed: {previous} -> {status}", level="INFO")
+        if status == "GENERATING":
+            self._generation_started_at = time.time()
+        elif status in {"IDLE", "ERROR", "OFFLINE"}:
+            self._generation_started_at = None
 
     def _append_chat(self, speaker, text):
         colors = {
@@ -2336,6 +2397,42 @@ class GrimveilDeck(QMainWindow):
             )
         self.chat_display.append("")
         self.chat_display.verticalScrollBar().setValue(self.chat_display.verticalScrollBar().maximum())
+
+    def _switch_output_view(self, view_name: str):
+        tactical = (view_name or "").strip().lower() != "diagnostics"
+        self.btn_view_tactical.setChecked(tactical)
+        self.btn_view_diagnostics.setChecked(not tactical)
+        self.output_stack.setCurrentWidget(self.chat_display if tactical else self.diagnostics_display)
+
+    def log_diagnostic(self, message: str, level: str = "INFO"):
+        if not hasattr(self, "diagnostics_display"):
+            return
+        ts = datetime.now().strftime("%H:%M:%S")
+        lvl = (level or "INFO").upper()
+        color_map = {
+            "INFO": C_TEXT_DIM,
+            "DEBUG": C_CYAN,
+            "WARN": C_GOLD,
+            "ERROR": C_RED,
+        }
+        color = color_map.get(lvl, C_TEXT)
+        safe = html.escape(str(message))
+        self.diagnostics_display.append(
+            f'<span style="color:{C_TEXT_DIM};">[{ts}]</span> '
+            f'<span style="color:{color}; font-weight:bold;">[{lvl}]</span> '
+            f'<span style="color:{C_SILVER};">{safe}</span>'
+        )
+        self.diagnostics_display.verticalScrollBar().setValue(self.diagnostics_display.verticalScrollBar().maximum())
+
+    def log_exception(self, context: str, exception: Exception):
+        detail = f"{exception.__class__.__name__}: {exception}"
+        self.log_diagnostic(f"{context} failed with {detail}", level="ERROR")
+
+    def _check_generation_watchdog(self):
+        if self.status != "GENERATING" or not self._generation_started_at:
+            return
+        elapsed = int(time.time() - self._generation_started_at)
+        self.log_diagnostic(f"Generation still active ({elapsed}s elapsed). Awaiting worker completion.", level="WARN")
 
     def _log_emotion(self, face_name):
         self.current_face = face_name
@@ -2448,9 +2545,17 @@ class GrimveilDeck(QMainWindow):
             f"sync_status={sync_status}, google_event_id={google_event_id}"
         )
         if not self._should_delete_google_event_for_terminal_status(task):
+            self.log_diagnostic(
+                f"Cancel/complete sync skipped for task_id={task_id}; no synced google_event_id present.",
+                level="DEBUG"
+            )
             return
 
         print(f"[GCal][DEBUG] Delete attempt started: task_id={task_id}, google_event_id={google_event_id}")
+        self.log_diagnostic(
+            f"Cancel/complete sync attempt: task_id={task_id}, terminal_status={terminal_status}, event_id={google_event_id}.",
+            level="INFO"
+        )
         try:
             self.google_calendar.delete_event_for_task(google_event_id)
             self.memory.update_task_google_sync(
@@ -2462,12 +2567,17 @@ class GrimveilDeck(QMainWindow):
             )
             print(f"[GCal][DEBUG] Delete success: task_id={task_id}, google_event_id={google_event_id}")
             self._append_chat("SYSTEM", "Google Calendar event removed for terminal local task state.")
+            self.log_diagnostic(
+                f"Cancel/complete sync success for task_id={task_id}, event_id={google_event_id}.",
+                level="INFO"
+            )
         except Exception as ex:
             local_terminal_label = "canceled" if terminal_status == "cancelled" else "completed"
             print(
                 f"[GCal][ERROR] Delete failed: task_id={task_id}, google_event_id={google_event_id}, "
                 f"exception={ex}"
             )
+            self.log_exception(f"Cancel/complete sync task_id={task_id}", ex)
             if terminal_status == "cancelled":
                 self._append_chat(
                     "SYSTEM",
@@ -2657,93 +2767,103 @@ class GrimveilDeck(QMainWindow):
         return response
 
     def _send_message(self):
-        if not self.model_loaded:
-            return
-        text = self.input_field.text().strip()
-        if not text:
-            return
-        self.last_user_activity_ts = time.time()
-        self.narrative["silence_intervals"] = 0
-        self._restart_idle_timer()
+        try:
+            if not self.model_loaded:
+                self.log_diagnostic("User prompt ignored: model not loaded yet.", level="WARN")
+                return
+            text = self.input_field.text().strip()
+            if not text:
+                return
+            self.log_diagnostic(f"User prompt submitted ({len(text)} chars).", level="INFO")
+            self.last_user_activity_ts = time.time()
+            self.narrative["silence_intervals"] = 0
+            self._restart_idle_timer()
 
-        self.input_field.clear()
-        self._append_chat("YOU", text)
+            self.input_field.clear()
+            self._append_chat("YOU", text)
 
-        normalized_text = normalize_persona_prefixed_input(text)
-        lowered = normalized_text.lower().strip()
-        if lowered in {"reset thread", "reset internal thread", "reset narrative thread"}:
-            self._seed_narrative_thread(self._get_narrative_mode())
-            self._persist_internal_narrative_state()
-            self._append_chat("SYSTEM", "Internal narrative thread reset and reseeded to current anchor mode.")
-            self._store_message("user", text)
-            self.history.append({"role": "user", "content": text})
-            return
-        if is_datetime_query(normalized_text):
-            deterministic = answer_datetime_query(normalized_text)
-            deterministic = self._flavor_with_narrative(deterministic)
-            self._append_chat("GRIMVEILE", deterministic)
-            self._store_message("user", text)
-            self.history.append({"role": "user", "content": text})
-            self.history.append({"role": "assistant", "content": deterministic})
-            self._store_message("assistant", deterministic)
-            return
+            normalized_text = normalize_persona_prefixed_input(text)
+            lowered = normalized_text.lower().strip()
+            if lowered in {"reset thread", "reset internal thread", "reset narrative thread"}:
+                self._seed_narrative_thread(self._get_narrative_mode())
+                self._persist_internal_narrative_state()
+                self._append_chat("SYSTEM", "Internal narrative thread reset and reseeded to current anchor mode.")
+                self._store_message("user", text)
+                self.history.append({"role": "user", "content": text})
+                return
+            if is_datetime_query(normalized_text):
+                deterministic = answer_datetime_query(normalized_text)
+                deterministic = self._flavor_with_narrative(deterministic)
+                self._append_chat("GRIMVEILE", deterministic)
+                self._store_message("user", text)
+                self.history.append({"role": "user", "content": text})
+                self.history.append({"role": "assistant", "content": deterministic})
+                self._store_message("assistant", deterministic)
+                return
 
-        active_ack, changed = (False, [])
-        if lowered in ACK_PHRASES:
-            active_ack, changed = self.memory.acknowledge_due_tasks()
-            if active_ack:
-                self._refresh_task_registry_panel()
-                self._append_chat("SYSTEM", "Reminder acknowledged. Alarm notice terminated. E-42 approves of basic competence.")
+            active_ack, changed = (False, [])
+            if lowered in ACK_PHRASES:
+                active_ack, changed = self.memory.acknowledge_due_tasks()
+                if active_ack:
+                    self._refresh_task_registry_panel()
+                    self._append_chat("SYSTEM", "Reminder acknowledged. Alarm notice terminated. E-42 approves of basic competence.")
+                    self._store_message("user", text)
+                    self.history.append({"role": "user", "content": text})
+                    return
+
+            if self._handle_task_command(text):
                 self._store_message("user", text)
                 self.history.append({"role": "user", "content": text})
                 return
 
-        if self._handle_task_command(text):
-            self._store_message("user", text)
+            parsed_task = self._try_create_task(normalized_text, force_intent=has_reminder_intent(normalized_text))
+            if parsed_task:
+                due_obj = parse_iso(parsed_task.get("due_at") or parsed_task.get("due"))
+                due_str = due_obj.strftime("%m/%d/%Y at %I:%M %p") if due_obj else parsed_task.get("due_at", "scheduled time")
+                self._append_chat("SYSTEM", f"Reminder set for {due_str}.")
+                self._store_message("user", text)
+                self.history.append({"role": "user", "content": text})
+                return
+            if has_reminder_intent(normalized_text):
+                self._append_chat(
+                    "SYSTEM",
+                    "Reminder request intercepted, but no valid schedule could be parsed. Try formats like "
+                    "'remind me at 2pm', 'remind me tomorrow at 2pm', or 'remind me in 10m'."
+                )
+                self._store_message("user", text)
+                self.history.append({"role": "user", "content": text})
+                return
+
+            user_msg_record = self._store_message("user", text)
             self.history.append({"role": "user", "content": text})
-            return
 
-        parsed_task = self._try_create_task(normalized_text, force_intent=has_reminder_intent(normalized_text))
-        if parsed_task:
-            due_obj = parse_iso(parsed_task.get("due_at") or parsed_task.get("due"))
-            due_str = due_obj.strftime("%m/%d/%Y at %I:%M %p") if due_obj else parsed_task.get("due_at", "scheduled time")
-            self._append_chat("SYSTEM", f"Reminder set for {due_str}.")
-            self._store_message("user", text)
-            self.history.append({"role": "user", "content": text})
-            return
-        if has_reminder_intent(normalized_text):
-            self._append_chat(
-                "SYSTEM",
-                "Reminder request intercepted, but no valid schedule could be parsed. Try formats like "
-                "'remind me at 2pm', 'remind me tomorrow at 2pm', or 'remind me in 10m'."
-            )
-            self._store_message("user", text)
-            self.history.append({"role": "user", "content": text})
-            return
+            if self.anchor_state < 0.45:
+                self.face_widget.set_face("isolated")
+                self._log_emotion("isolated")
+            else:
+                self.face_widget.set_face("alert")
+                self._log_emotion("alert")
+            self.face_locked = False
 
-        user_msg_record = self._store_message("user", text)
-        self.history.append({"role": "user", "content": text})
+            retrieved = self.memory.search_memories(text, limit=6)
+            prompt = self._build_final_prompt(normalized_text, retrieved)
 
-        if self.anchor_state < 0.45:
-            self.face_widget.set_face("isolated")
-            self._log_emotion("isolated")
-        else:
-            self.face_widget.set_face("alert")
-            self._log_emotion("alert")
-        self.face_locked = False
+            self.send_btn.setEnabled(False)
+            self.input_field.setEnabled(False)
+            self._set_status("GENERATING")
 
-        retrieved = self.memory.search_memories(text, limit=6)
-        prompt = self._build_final_prompt(normalized_text, retrieved)
-
-        self.send_btn.setEnabled(False)
-        self.input_field.setEnabled(False)
-        self._set_status("GENERATING")
-
-        self.worker = DolphinWorker(self.model, self.tokenizer, prompt)
-        self.worker.response_ready.connect(lambda response: self._on_response(response, text, user_msg_record, retrieved))
-        self.worker.error_occurred.connect(self._on_error)
-        self.worker.status_changed.connect(self._set_status)
-        self.worker.start()
+            self.worker = DolphinWorker(self.model, self.tokenizer, prompt)
+            self.worker.response_ready.connect(lambda response: self._on_response(response, text, user_msg_record, retrieved))
+            self.worker.error_occurred.connect(self._on_error)
+            self.worker.status_changed.connect(self._set_status)
+            self.log_diagnostic("Generation worker started.", level="INFO")
+            self.worker.start()
+        except Exception as ex:
+            self.log_exception("Send handler", ex)
+            self._append_chat("ERROR", f"Message handler exception: {ex}")
+            self._set_status("ERROR")
+            self.send_btn.setEnabled(True)
+            self.input_field.setEnabled(True)
 
     def _store_message(self, role: str, content: str):
         self.state["last_active"] = local_now_iso()
@@ -2813,6 +2933,7 @@ class GrimveilDeck(QMainWindow):
         return any(s in t for s in strong) or len(user_text.split()) > 20
 
     def _on_response(self, response, user_text, user_msg_record, retrieved):
+        self.log_diagnostic("Generation worker finished and response received.", level="INFO")
         response = self._normalize_persona_response(response, user_text)
         response = self._flavor_with_narrative(response)
         self._append_chat("GRIMVEILE", response)
@@ -2885,6 +3006,7 @@ class GrimveilDeck(QMainWindow):
         self.face_widget.set_face(self._anchor_baseline_face())
 
     def _on_error(self, error):
+        self.log_diagnostic(f"Generation worker error: {error}", level="ERROR")
         self._append_chat("ERROR", error)
         self.face_widget.set_face("panicked")
         self._log_emotion("panicked")
@@ -2909,6 +3031,7 @@ class GrimveilDeck(QMainWindow):
         task_id = task.get("id")
         if not task_id:
             return
+        self.log_diagnostic(f"Google Calendar push attempt for task_id={task_id}.", level="INFO")
         try:
             event_id, link_established = self.google_calendar.create_event_for_task(task)
             self.memory.update_task_google_sync(
@@ -2920,7 +3043,9 @@ class GrimveilDeck(QMainWindow):
             if link_established and not self._google_link_announced:
                 self._append_chat("SYSTEM", "Google Calendar link established.")
                 self._google_link_announced = True
+                self.log_diagnostic("Google Calendar auth/link established.", level="INFO")
             self._append_chat("SYSTEM", "Task pushed to Google Calendar.")
+            self.log_diagnostic(f"Google Calendar push success for task_id={task_id}, event_id={event_id}.", level="INFO")
         except Exception as ex:
             raw_error = str(ex).strip() or ex.__class__.__name__
             lower_error = raw_error.lower()
@@ -2939,6 +3064,7 @@ class GrimveilDeck(QMainWindow):
                 user_error = raw_error
 
             print(f"[GCal][ERROR] Google Calendar push failed for task_id={task_id}: {raw_error}")
+            self.log_exception(f"Google Calendar push task_id={task_id}", ex)
             self.memory.update_task_google_sync(
                 task_id=task_id,
                 sync_status="error",
@@ -3051,19 +3177,22 @@ class GrimveilDeck(QMainWindow):
         return None
 
     def _check_due_tasks(self):
-        events = self.memory.get_due_events()
-        for kind, task in events:
-            if kind == "pre":
-                self._append_chat("SYSTEM", f"Reminder pre-trigger armed for: {task['text']}")
-            elif kind == "retry_scheduled":
-                self._append_chat("SYSTEM", f"Reminder unacknowledged. Retry scheduled in 12 minutes: {task['text']}")
-            elif kind == "due":
-                play_grimveil_alert(MEMORY_DIR)
-                due_dt = parse_iso(task.get("due_at") or task.get("due"))
-                due_str = due_dt.strftime("%m/%d/%Y %I:%M %p") if due_dt else "scheduled time"
-                self._append_chat("SYSTEM", f"[Reminder] You wanted an alarm for {due_str}: {task['text']}")
-                self.active_reminder_ids.add(task["id"])
-        self._refresh_task_registry_panel()
+        try:
+            events = self.memory.get_due_events()
+            for kind, task in events:
+                if kind == "pre":
+                    self._append_chat("SYSTEM", f"Reminder pre-trigger armed for: {task['text']}")
+                elif kind == "retry_scheduled":
+                    self._append_chat("SYSTEM", f"Reminder unacknowledged. Retry scheduled in 12 minutes: {task['text']}")
+                elif kind == "due":
+                    play_grimveil_alert(MEMORY_DIR)
+                    due_dt = parse_iso(task.get("due_at") or task.get("due"))
+                    due_str = due_dt.strftime("%m/%d/%Y %I:%M %p") if due_dt else "scheduled time"
+                    self._append_chat("SYSTEM", f"[Reminder] You wanted an alarm for {due_str}: {task['text']}")
+                    self.active_reminder_ids.add(task["id"])
+            self._refresh_task_registry_panel()
+        except Exception as ex:
+            self.log_exception("Due task timer handler", ex)
 
     def _update_stats(self):
         elapsed = int(time.time() - self.session_start)
