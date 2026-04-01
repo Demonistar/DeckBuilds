@@ -1,7 +1,7 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.5.0
+# Version: 1.5.1
 # Build Date: 2026-04-01
 # Summary:
 #   Phase 1 outbound Google Calendar push for local task creation.
@@ -9,6 +9,8 @@
 #   - added Phase 1 Google Calendar outbound sync helper for local tasks
 #   - local task creation now attempts Google Calendar event creation after local save
 #   - added desktop OAuth token reuse cache at C:\AI\Models\GrimVeil_Memories\google\token.json
+#   - improved Google Calendar outbound sync diagnostics
+#   - now surfaces actual push failure reason
 
 import sys
 import time
@@ -24,14 +26,18 @@ from pathlib import Path
 import math
 import wave
 import struct
+GOOGLE_IMPORT_ERROR = None
 try:
     from google.auth.transport.requests import Request as GoogleAuthRequest
     from google.oauth2.credentials import Credentials as GoogleCredentials
     from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build as google_build
+    from googleapiclient.errors import HttpError as GoogleHttpError
     GOOGLE_API_OK = True
-except ImportError:
+except ImportError as import_ex:
     GOOGLE_API_OK = False
+    GOOGLE_IMPORT_ERROR = str(import_ex)
+    GoogleHttpError = Exception
 try:
     import winsound
     WINSOUND_OK = True
@@ -50,7 +56,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -1353,10 +1359,18 @@ class GoogleCalendarService:
         self.token_path.write_text(creds.to_json(), encoding="utf-8")
 
     def _build_service(self):
+        print(f"[GCal][DEBUG] Credentials path: {self.credentials_path}")
+        print(f"[GCal][DEBUG] Token path: {self.token_path}")
+        print(f"[GCal][DEBUG] Credentials file exists: {self.credentials_path.exists()}")
+        print(f"[GCal][DEBUG] Token file exists: {self.token_path.exists()}")
+
         if not GOOGLE_API_OK:
-            raise RuntimeError("Google Calendar dependencies are not installed.")
+            detail = GOOGLE_IMPORT_ERROR or "unknown ImportError"
+            raise RuntimeError(f"Missing Google Calendar Python dependency: {detail}")
         if not self.credentials_path.exists():
-            raise FileNotFoundError(f"Google credentials file not found: {self.credentials_path}")
+            raise FileNotFoundError(
+                f"Google credentials/auth configuration not found: {self.credentials_path}"
+            )
 
         creds = None
         link_established = False
@@ -1364,16 +1378,19 @@ class GoogleCalendarService:
             creds = GoogleCredentials.from_authorized_user_file(str(self.token_path), GOOGLE_SCOPES)
 
         if creds and creds.expired and creds.refresh_token:
+            print("[GCal][DEBUG] Refreshing expired Google token.")
             creds.refresh(GoogleAuthRequest())
             self._persist_token(creds)
 
         if not creds or not creds.valid:
+            print("[GCal][DEBUG] Starting OAuth flow for Google Calendar.")
             flow = InstalledAppFlow.from_client_secrets_file(str(self.credentials_path), GOOGLE_SCOPES)
             creds = flow.run_local_server(port=0)
             self._persist_token(creds)
             link_established = True
 
         self._service = google_build("calendar", "v3", credentials=creds)
+        print("[GCal][DEBUG] Authenticated Google Calendar service created successfully.")
         return link_established
 
     def create_event_for_task(self, task: dict):
@@ -1395,8 +1412,33 @@ class GoogleCalendarService:
             "start": {"dateTime": start_dt.isoformat(), "timeZone": tz_name},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": tz_name},
         }
-        created = self._service.events().insert(calendarId="primary", body=event_payload).execute()
-        return created.get("id"), link_established
+        target_calendar_id = "primary"
+        print(f"[GCal][DEBUG] Target calendar ID: {target_calendar_id}")
+        print(
+            "[GCal][DEBUG] Event payload before insert: "
+            f"title='{event_payload.get('summary')}', "
+            f"start='{event_payload.get('start', {}).get('dateTime')}', "
+            f"end='{event_payload.get('end', {}).get('dateTime')}'"
+        )
+        try:
+            created = self._service.events().insert(calendarId=target_calendar_id, body=event_payload).execute()
+            print("[GCal][DEBUG] Event insert call succeeded.")
+            return created.get("id"), link_established
+        except GoogleHttpError as api_ex:
+            api_detail = ""
+            if hasattr(api_ex, "content") and api_ex.content:
+                try:
+                    api_detail = api_ex.content.decode("utf-8", errors="replace")
+                except Exception:
+                    api_detail = str(api_ex.content)
+            detail_msg = f"Google API error: {api_ex}"
+            if api_detail:
+                detail_msg = f"{detail_msg} | API body: {api_detail}"
+            print(f"[GCal][ERROR] Event insert failed: {detail_msg}")
+            raise RuntimeError(detail_msg) from api_ex
+        except Exception as ex:
+            print(f"[GCal][ERROR] Event insert failed with unexpected error: {ex}")
+            raise
 
 
 class FaceWidget(QLabel):
@@ -2556,13 +2598,30 @@ class GrimveilDeck(QMainWindow):
                 self._google_link_announced = True
             self._append_chat("SYSTEM", "Task pushed to Google Calendar.")
         except Exception as ex:
+            raw_error = str(ex).strip() or ex.__class__.__name__
+            lower_error = raw_error.lower()
+            if ("missing google calendar python dependency" in lower_error
+                    or "no module named" in lower_error
+                    or "importerror" in lower_error):
+                user_error = f"Missing dependency: {raw_error}"
+            elif ("credential" in lower_error
+                  or "oauth" in lower_error
+                  or "auth" in lower_error
+                  or "token" in lower_error):
+                user_error = f"Auth/credentials failure: {raw_error}"
+            elif "google api error" in lower_error:
+                user_error = raw_error
+            else:
+                user_error = raw_error
+
+            print(f"[GCal][ERROR] Google Calendar push failed for task_id={task_id}: {raw_error}")
             self.memory.update_task_google_sync(
                 task_id=task_id,
                 sync_status="error",
                 last_synced_at=local_now_iso(),
-                error_message=str(ex),
+                error_message=user_error,
             )
-            self._append_chat("SYSTEM", "Google Calendar push failed; local task retained.")
+            self._append_chat("SYSTEM", f"Google Calendar push failed: {user_error}; local task retained.")
 
     def _parse_reminder_command(self, text: str, force_intent: bool = False):
         t = normalize_persona_prefixed_input(text).strip()
