@@ -1,18 +1,18 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.3.1
-# Build Date: 2026-03-31
+# Version: 1.3.2
+# Build Date: 2026-04-01
 # Summary:
-#   Stable alpha refactor for deterministic date/time handling, memory-first prompting,
-#   authoritative Python task/reminder workflows, persistent registry UI, and wake continuity.
+#   Deterministic hardening pass for persona-prefix normalization, Python-authoritative date/time,
+#   expanded reminder parser reliability, and MM/DD/YYYY presentation consistency.
 # Changelog:
-#   - Fixed PyQt6 DayOfWeek enum comparisons in MiniCalendarWidget to use .value and prevent launch-time TypeError.
-#   - Expanded Task Registry panel into a compact, scrollable due/task/status board sourced from tasks.jsonl with urgency colors.
-#   - Added registry auto-refresh hooks (task file mtime watch + explicit lifecycle refreshes) across add/trigger/ack/retry/complete/clear.
-#   - Broadened reminder interception/parser coverage for natural phrasing and preserved strict Python-side scheduling bypass.
-#   - Hardened deterministic date/time responses to always format from live datetime.now() response-time values.
-#   - Restored weekend day-cell distinction while preserving clear "today" highlighting in the tactical calendar.
+#   - Added persona-prefix preprocessing to normalize Grim/Grimveil/Grimveile callouts before intent detection.
+#   - Enforced Python-authoritative date/time responses and deterministic system-formatted confirmations.
+#   - Expanded datetime query matching to capture common natural phrasing variants after normalization.
+#   - Hardened reminder interception so only Python-confirmed task writes can produce reminder success messages.
+#   - Broadened reminder parsing for at/on/tomorrow/in patterns with optional task text fallback to "Reminder".
+#   - Switched calendar click insertion and runtime prompt date display formatting to MM/DD/YYYY.
 
 import sys
 import time
@@ -45,8 +45,8 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.3.1"
-VERSION_DATE = "2026-03-31"
+APP_VERSION = "1.3.2"
+VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
 
@@ -476,10 +476,11 @@ def infer_title(record_type: str, user_text: str, keywords):
 
 
 def is_datetime_query(text: str) -> bool:
-    t = text.lower().strip()
+    t = normalize_persona_prefixed_input(text).lower().strip()
     patterns = (
-        "what is today's date", "what is todays date", "what's today's date", "what day is it",
-        "what date is it", "current date", "current time", "what time is it",
+        "what is today's date", "what is todays date", "what's today's date", "what's todays date",
+        "what date is it", "what day is it", "what time is it",
+        "current date", "current time",
         "today's date", "todays date"
     )
     return any(p in t for p in patterns)
@@ -487,16 +488,16 @@ def is_datetime_query(text: str) -> bool:
 
 def answer_datetime_query(text: str) -> str:
     now = datetime.now()
-    t = text.lower()
+    t = normalize_persona_prefixed_input(text).lower()
     if "time" in t:
-        return f"It is {now.strftime('%I:%M:%S %p')} local time on {now.strftime('%Y-%m-%d')}."
+        return f"Current system time: {now.strftime('%I:%M:%S %p')}."
     if "day" in t:
-        return f"Today is {now.strftime('%A, %Y-%m-%d')}."
-    return f"Today's date is {now.strftime('%Y-%m-%d')} ({now.strftime('%A')})."
+        return f"Current system date: {now.strftime('%m/%d/%Y')} ({now.strftime('%A')})."
+    return f"Current system date: {now.strftime('%m/%d/%Y')}."
 
 
 def has_reminder_intent(text: str) -> bool:
-    lowered = text.lower()
+    lowered = normalize_persona_prefixed_input(text).lower()
     patterns = (
         r"\bremind me\b",
         r"\b(?:please\s+)?set a reminder\b",
@@ -506,6 +507,15 @@ def has_reminder_intent(text: str) -> bool:
         r"\b(?:grim[\s,]+)?(?:please\s+)?(?:set|add)\s+a\s+reminder\b",
     )
     return any(re.search(p, lowered) for p in patterns)
+
+
+def normalize_persona_prefixed_input(text: str) -> str:
+    t = (text or "").strip()
+    if not t:
+        return ""
+    persona_prefix = r"^\s*(?:grim|grimveil|grimveile|grimveile-42)\s*,?\s*[:\-]?\s*"
+    normalized = re.sub(persona_prefix, "", t, flags=re.I)
+    return normalized.strip() or t
 
 
 def parse_duration_phrase(phrase: str):
@@ -1868,7 +1878,7 @@ class GrimveilDeck(QMainWindow):
                     color = C_GOLD
                 else:
                     color = C_TEXT
-                due_str = due.strftime('%Y-%m-%d %I:%M%p')
+                due_str = due.strftime('%m/%d/%Y %I:%M %p')
             else:
                 color = "#8b95a1" if is_completed else C_TEXT_DIM
                 due_str = "unscheduled"
@@ -1930,7 +1940,7 @@ class GrimveilDeck(QMainWindow):
                 lines = ["GRIMVEILE-42 task registry follows. Entropy has resolved nothing. 😑"]
                 for idx, task in enumerate(sorted(active, key=lambda x: x.get('due_at', x.get('due',''))), start=1):
                     due = parse_iso(task.get('due_at') or task.get('due'))
-                    due_str = due.strftime('%Y-%m-%d %I:%M %p') if due else task.get('due_at', task.get('due','unknown'))
+                    due_str = due.strftime('%m/%d/%Y %I:%M %p') if due else task.get('due_at', task.get('due','unknown'))
                     lines.append(f"{idx}. {due_str} — {task.get('text','')} [{task.get('status','pending')}]")
                 self._append_chat("SYSTEM", "\n".join(lines))
             return True
@@ -1987,9 +1997,10 @@ class GrimveilDeck(QMainWindow):
         self.input_field.clear()
         self._append_chat("YOU", text)
 
-        lowered = text.lower().strip()
-        if is_datetime_query(lowered):
-            deterministic = answer_datetime_query(lowered)
+        normalized_text = normalize_persona_prefixed_input(text)
+        lowered = normalized_text.lower().strip()
+        if is_datetime_query(normalized_text):
+            deterministic = answer_datetime_query(normalized_text)
             self._append_chat("GRIMVEILE", deterministic)
             self._store_message("user", text)
             self.history.append({"role": "user", "content": text})
@@ -2012,19 +2023,19 @@ class GrimveilDeck(QMainWindow):
             self.history.append({"role": "user", "content": text})
             return
 
-        parsed_task = self._try_create_task(text, force_intent=has_reminder_intent(lowered))
+        parsed_task = self._try_create_task(normalized_text, force_intent=has_reminder_intent(normalized_text))
         if parsed_task:
             due_obj = parse_iso(parsed_task.get("due_at") or parsed_task.get("due"))
-            due_str = due_obj.strftime("%Y-%m-%d %I:%M %p") if due_obj else parsed_task.get("due_at", "scheduled time")
-            self._append_chat("SYSTEM", f"Reminder scheduled for {due_str}: {parsed_task['text']}")
+            due_str = due_obj.strftime("%m/%d/%Y at %I:%M %p") if due_obj else parsed_task.get("due_at", "scheduled time")
+            self._append_chat("SYSTEM", f"Reminder set for {due_str}.")
             self._store_message("user", text)
             self.history.append({"role": "user", "content": text})
             return
-        if has_reminder_intent(lowered):
+        if has_reminder_intent(normalized_text):
             self._append_chat(
                 "SYSTEM",
-                "Reminder intent detected, but I could not parse a schedule. Use formats like "
-                "'remind me in 10m to ...' or 'set a reminder for 2026-04-01 at 11am to ...'."
+                "Reminder request intercepted, but no valid schedule could be parsed. Try formats like "
+                "'remind me at 2pm', 'remind me tomorrow at 2pm', or 'remind me in 10m'."
             )
             self._store_message("user", text)
             self.history.append({"role": "user", "content": text})
@@ -2042,7 +2053,7 @@ class GrimveilDeck(QMainWindow):
         self.face_locked = False
 
         retrieved = self.memory.search_memories(text, limit=6)
-        prompt = self._build_final_prompt(text, retrieved)
+        prompt = self._build_final_prompt(normalized_text, retrieved)
 
         self.send_btn.setEnabled(False)
         self.input_field.setEnabled(False)
@@ -2081,7 +2092,7 @@ class GrimveilDeck(QMainWindow):
     def _build_final_prompt(self, current_text: str, retrieved):
         now = datetime.now()
         runtime_context = (
-            f"Runtime local datetime: {now.strftime('%Y-%m-%d %H:%M:%S')}.\n"
+            f"Runtime local datetime: {now.strftime('%m/%d/%Y %I:%M:%S %p')}.\n"
             f"Runtime weekday: {now.strftime('%A')}.\n"
             f"Never guess current date/time; use this runtime context."
         )
@@ -2156,7 +2167,7 @@ class GrimveilDeck(QMainWindow):
 
     def _insert_calendar_date(self, qdate):
         try:
-            date_str = qdate.toString("yyyy-MM-dd")
+            date_str = qdate.toString("MM/dd/yyyy")
         except Exception:
             try:
                 date_str = str(qdate)
@@ -2212,33 +2223,64 @@ class GrimveilDeck(QMainWindow):
         return task
 
     def _parse_reminder_command(self, text: str, force_intent: bool = False):
-        t = text.strip()
+        t = normalize_persona_prefixed_input(text).strip()
         lower = t.lower()
         if not force_intent and not has_reminder_intent(lower):
             return None
 
-        lead_prefix = (
-            r"^\s*(?:grim[\s,]+)?(?:please\s+)?"
-            r"(?:remind me|set a reminder|add a reminder|(?:i\s+)?want a reminder)"
-            r"\s*(?:for\s+)?"
-        )
-        payload = re.sub(lead_prefix, "", t, flags=re.I).strip()
+        lead_prefix = r"^\s*(?:please\s+)?(?:remind me|set a reminder|add a reminder|(?:i\s+)?want a reminder)\b"
+        payload = re.sub(lead_prefix, "", t, flags=re.I).strip(" ,.-")
         if not payload:
             return None
 
-        in_match = re.search(r"^in\s+(.+?)\s+to\s+(.+)$", payload, re.I)
-        if in_match:
-            delta = parse_duration_phrase(in_match.group(1))
+        def clean_task_text(task_text: str):
+            cleaned = (task_text or "").strip().rstrip(".!?")
+            return cleaned if cleaned else "Reminder"
+
+        in_only_match = re.search(r"^in\s+(.+)$", payload, re.I)
+        if in_only_match:
+            rest = in_only_match.group(1).strip()
+            in_with_task = re.search(r"^(.+?)(?:\s+(?:to|,)\s+(.+))?$", rest, re.I)
+            delta_phrase = in_with_task.group(1).strip() if in_with_task else rest
+            delta = parse_duration_phrase(delta_phrase)
             if delta:
-                return in_match.group(2).strip().rstrip(".!?"), datetime.now() + delta
+                task_text = in_with_task.group(2) if in_with_task and in_with_task.lastindex and in_with_task.group(2) else "Reminder"
+                return clean_task_text(task_text), datetime.now() + delta
+
+        tomorrow_match = re.search(
+            r"^tomorrow\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s+(.*))?$",
+            payload,
+            re.I,
+        )
+        if tomorrow_match:
+            hour = int(tomorrow_match.group(1))
+            minute = int(tomorrow_match.group(2) or 0)
+            meridiem = (tomorrow_match.group(3) or "").lower()
+            if meridiem:
+                if hour == 12:
+                    hour = 0
+                if meridiem == "pm":
+                    hour += 12
+            due_date = datetime.now() + timedelta(days=1)
+            due = due_date.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
+            return clean_task_text(tomorrow_match.group(4) or "Reminder"), due
 
         dt_match = re.search(
-            r"^(?:on\s+|for\s+)?(\d{4}-\d{2}-\d{2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s+to\s+|,\s*|\s+)(.+)$",
+            r"^(?:on\s+|for\s+)?(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s+(.*))?$",
             payload,
             re.I,
         )
         if dt_match:
-            d = datetime.strptime(dt_match.group(1), "%Y-%m-%d")
+            date_token = dt_match.group(1)
+            try:
+                if "/" in date_token:
+                    d = datetime.strptime(date_token, "%m/%d/%Y")
+                else:
+                    d = datetime.strptime(date_token, "%Y-%m-%d")
+            except ValueError:
+                d = None
+            if d is None:
+                return None
             hour = int(dt_match.group(2))
             minute = int(dt_match.group(3) or 0)
             meridiem = (dt_match.group(4) or "").lower()
@@ -2247,29 +2289,28 @@ class GrimveilDeck(QMainWindow):
                     hour = 0
                 if meridiem == "pm":
                     hour += 12
-            return dt_match.group(5).strip().rstrip(".!?"), d.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
+            return clean_task_text(dt_match.group(5) or "Reminder"), d.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
 
-        at_match = re.search(r"^(?:for\s+|at\s+)(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+to\s+(.+)$", payload, re.I)
+        at_match = re.search(r"^(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b(?:\s+(.*))?$", payload, re.I)
         if at_match:
             hour = int(at_match.group(1))
             minute = int(at_match.group(2) or 0)
             meridiem = (at_match.group(3) or "").lower()
-            if meridiem:
-                if hour == 12:
-                    hour = 0
-                if meridiem == "pm":
-                    hour += 12
+            if hour == 12:
+                hour = 0
+            if meridiem == "pm":
+                hour += 12
             now = datetime.now()
             due = now.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
             if due <= now:
                 due += timedelta(days=1)
-            return at_match.group(4).strip().rstrip(".!?"), due
+            return clean_task_text(at_match.group(4) or "Reminder"), due
 
         fallback_match = re.search(r"^(.+?)\s+to\s+(.+)$", payload, re.I)
         if fallback_match:
             maybe_duration = parse_duration_phrase(fallback_match.group(1))
             if maybe_duration:
-                return fallback_match.group(2).strip().rstrip(".!?"), datetime.now() + maybe_duration
+                return clean_task_text(fallback_match.group(2)), datetime.now() + maybe_duration
         return None
 
     def _check_due_tasks(self):
@@ -2282,7 +2323,7 @@ class GrimveilDeck(QMainWindow):
             elif kind == "due":
                 play_grimveil_alert(MEMORY_DIR)
                 due_dt = parse_iso(task.get("due_at") or task.get("due"))
-                due_str = due_dt.strftime("%Y-%m-%d %I:%M %p") if due_dt else "scheduled time"
+                due_str = due_dt.strftime("%m/%d/%Y %I:%M %p") if due_dt else "scheduled time"
                 self._append_chat("SYSTEM", f"[Reminder] You wanted an alarm for {due_str}: {task['text']}")
                 self.active_reminder_ids.add(task["id"])
         self._refresh_task_registry_panel()
