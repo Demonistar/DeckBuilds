@@ -1,16 +1,13 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.4.1
+# Version: 1.4.2
 # Build Date: 2026-04-01
 # Summary:
-#   Reconciliation patch for task creation pipeline contract with Task Registry:
-#   restore reliable reminder interception/parsing while preserving interactive registry UI.
+#   Asset filename mapping patch for GrimVeile face images:
+#   align disk filename resolution with real face image names while preserving internal Grimveil logic.
 # Changelog:
-#   - Reconciled reminder intent detection with parser prefixes by accepting both "set/add reminder" and "set/add a reminder" forms.
-#   - Restored natural-duration parsing for compact inputs like "in 15m test system" by extracting trailing task text without requiring "to".
-#   - Added post-write reload verification in task creation path so success responses only occur when persisted tasks can be reloaded.
-#   - Preserved current interactive Task Registry panel, filters, and completion controls without schema redesign.
+#   - fixed face asset filename mapping to use real GrimVeile image names on disk
 
 import sys
 import time
@@ -44,7 +41,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -111,7 +108,7 @@ if SCRIPT_DIR.name.lower() == "models" and SCRIPT_DIR.parent.name.lower() == "ai
 MEMORY_DIR = AI_MODELS_DIR / "GrimVeil_Memories"
 FACES_DIR = r"C:\AI\Models\Faces"
 MODEL_PATH = str(AI_MODELS_DIR / "dolphin-2.6-7b")
-FACE_FALLBACK_FILENAME = "GrimVeile_Neutral.png"
+FACE_FALLBACK_FILENAME = "GrimVeile Neutral.png"
 E42_ICON_FILES = {
     "connected": "E42_Docked.png",
     "nearby": "E42_Nearby.png",
@@ -131,9 +128,9 @@ def load_faces_pixmap(filename: str, use_fallback: bool = True) -> QPixmap:
         _PIXMAP_CACHE[path] = pixmap
         return pixmap
 
-    if filename not in _MISSING_ASSET_WARNED:
-        print(f"[WARN] Missing face asset: {filename}")
-        _MISSING_ASSET_WARNED.add(filename)
+    if path not in _MISSING_ASSET_WARNED:
+        print(f"[WARN] Missing face asset at path: {path}")
+        _MISSING_ASSET_WARNED.add(path)
 
     if use_fallback and filename != FACE_FALLBACK_FILENAME:
         return load_faces_pixmap(FACE_FALLBACK_FILENAME, use_fallback=False)
@@ -142,28 +139,28 @@ def load_faces_pixmap(filename: str, use_fallback: bool = True) -> QPixmap:
     return _PIXMAP_CACHE[path]
 
 FACE_FILES = {
-    "neutral":     "Grimveil_Neutral",
-    "alert":       "Grimveil_Alert",
-    "focused":     "Grimveil_Focused",
-    "smug":        "Grimveil_Smug",
-    "concerned":   "Grimveil_Concerned",
-    "sad":         "Grimveil_Sad",
-    "relieved":    "Grimveil_Relieved",
-    "impressed":   "Grimveil_Impressed",
-    "victory":     "Grimveil_Victory",
-    "humiliated":  "Grimveil_Humiliated",
-    "suspicious":  "Grimveil_Suspicious",
-    "panicked":    "Grimveil_Panicked",
-    "angry":       "Grimveil_Angry",
-    "plotting":    "Grimveil_Plotting",
-    "shocked":     "Grimveil_Shocked",
-    "happy":       "Grimveil_Happy",
-    "flirty":      "Grimveil_Flirty",
-    "flustered":   "Grimveil_Flustered",
-    "envious":     "Grimveil_Envious",
-    "isolated":    "Grimveil_Isolated",
-    "reassured":   "Grimveil_Reassured",
-    "glitch":      "Grimveil_Glitch",
+    "neutral":     "GrimVeile Neutral.png",
+    "alert":       "GrimVeile Alert.png",
+    "focused":     "GrimVeile Focused.png",
+    "smug":        "GrimVeile Smug.png",
+    "concerned":   "GrimVeile Concerned.png",
+    "sad":         "GrimVeile Sad Crying.png",
+    "relieved":    "GrimVeile Relieved.png",
+    "impressed":   "GrimVeile Impressed.png",
+    "victory":     "GrimVeile Victory.png",
+    "humiliated":  "GrimVeile Humiliated.png",
+    "suspicious":  "GrimVeile Suspicious.png",
+    "panicked":    "GrimVeile Panicked.png",
+    "angry":       "GrimVeile Angry.png",
+    "plotting":    "GrimVeile Plotting.png",
+    "shocked":     "GrimVeile Shocked.png",
+    "happy":       "GrimVeile Happy.png",
+    "flirty":      "GrimVeile Flirty.png",
+    "flustered":   "GrimVeile Flustered.png",
+    "envious":     "GrimVeile Envious.png",
+    "isolated":    "GrimVeile Neutral.png",
+    "reassured":   "GrimVeile Relieved.png",
+    "glitch":      "GrimVeile Cheat Mode.png",
 }
 
 SENTIMENT_LIST = (
@@ -1314,7 +1311,7 @@ class FaceWidget(QLabel):
 
     def _load_faces(self):
         for face_key, filename in FACE_FILES.items():
-            px = load_faces_pixmap(f"{filename}.png")
+            px = load_faces_pixmap(filename)
             if not px.isNull():
                 self.pixmap_cache[face_key] = px
         self._render("neutral")
