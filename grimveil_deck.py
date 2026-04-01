@@ -1,10 +1,10 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.6.2
+# Version: 1.7.0
 # Build Date: 2026-04-01
 # Summary:
-#   Added a dedicated Diagnostics output view beside Tactical Record.
+#   Added Google Calendar inbound sync polling and local reconciliation.
 # Changelog:
 #   - corrected Grim idle timer feature by directly porting countdown/timer/unsolicited transmission scaffold from echo_deck.py
 #   - restored visible countdown placement in title bar
@@ -23,6 +23,9 @@
 #   - added Diagnostics output view beside Tactical Record
 #   - surfaced backend/system/timer/API errors in dedicated log panel
 #   - improved visibility into stalled or failed generation states
+#   - added Google Calendar inbound sync polling
+#   - local tasks now reconcile external Google event changes/deletions
+#   - imported new Google Calendar events into local Task Registry
 
 import sys
 import time
@@ -69,7 +72,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.6.2"
+APP_VERSION = "1.7.0"
 VERSION_DATE = "2026-04-01"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -138,6 +141,8 @@ GOOGLE_CREDENTIALS_PATH = Path(r"C:\AI\config\google_credentials.json")
 GOOGLE_TOKEN_PATH = Path(r"C:\AI\Models\GrimVeil_Memories\google\token.json")
 GOOGLE_SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 DEFAULT_GOOGLE_IANA_TIMEZONE = "America/Chicago"
+GOOGLE_INBOUND_SYNC_INTERVAL_MS = 5 * 60 * 1000
+GOOGLE_INBOUND_LOOKBACK_DAYS = 30
 WINDOWS_TZ_TO_IANA = {
     "Central Standard Time": "America/Chicago",
     "Eastern Standard Time": "America/New_York",
@@ -1490,6 +1495,34 @@ class GoogleCalendarService:
             print(f"[GCal][ERROR] Event insert failed with unexpected error: {ex}")
             raise
 
+    def list_primary_events(self, time_min: str = None, max_results: int = 2500):
+        if self._service is None:
+            self._build_service()
+        query = {
+            "calendarId": "primary",
+            "singleEvents": True,
+            "showDeleted": False,
+            "maxResults": max(1, int(max_results or 2500)),
+            "orderBy": "updated",
+        }
+        if time_min:
+            query["timeMin"] = time_min
+        response = self._service.events().list(**query).execute()
+        return response.get("items", [])
+
+    def get_event(self, google_event_id: str):
+        if not google_event_id:
+            return None
+        if self._service is None:
+            self._build_service()
+        try:
+            return self._service.events().get(calendarId="primary", eventId=google_event_id).execute()
+        except GoogleHttpError as api_ex:
+            code = getattr(getattr(api_ex, "resp", None), "status", None)
+            if code in (404, 410):
+                return None
+            raise
+
     def delete_event_for_task(self, google_event_id: str):
         if not google_event_id:
             raise ValueError("Google event id is missing; cannot delete event.")
@@ -1701,6 +1734,10 @@ class GrimveilDeck(QMainWindow):
         self.task_timer = QTimer()
         self.task_timer.timeout.connect(self._check_due_tasks)
         self.task_timer.start(1000)
+        self.google_inbound_timer = QTimer()
+        self.google_inbound_timer.timeout.connect(self._poll_google_calendar_inbound_sync)
+        self.google_inbound_timer.start(GOOGLE_INBOUND_SYNC_INTERVAL_MS)
+        QTimer.singleShot(15000, self._poll_google_calendar_inbound_sync)
 
         self.idle_timer = QTimer()
         self.idle_timer.setSingleShot(True)
@@ -3175,6 +3212,146 @@ class GrimveilDeck(QMainWindow):
             if maybe_duration:
                 return clean_task_text(fallback_match.group(2)), datetime.now() + maybe_duration
         return None
+
+    def _google_event_due_datetime(self, event: dict):
+        start = (event or {}).get("start") or {}
+        date_time = start.get("dateTime")
+        if date_time:
+            parsed = parse_iso(date_time)
+            if parsed:
+                return parsed
+        date_only = start.get("date")
+        if date_only:
+            parsed = parse_iso(f"{date_only}T09:00:00")
+            if parsed:
+                return parsed
+        return None
+
+    def _poll_google_calendar_inbound_sync(self):
+        self.log_diagnostic("Google inbound sync poll started.", level="INFO")
+        try:
+            now_utc = datetime.utcnow().replace(microsecond=0)
+            time_min = (now_utc - timedelta(days=GOOGLE_INBOUND_LOOKBACK_DAYS)).isoformat() + "Z"
+            remote_events = self.google_calendar.list_primary_events(time_min=time_min, max_results=2500)
+            self.log_diagnostic(
+                f"Google inbound sync fetched {len(remote_events)} event(s) from primary calendar.",
+                level="INFO"
+            )
+
+            tasks = self.memory.load_tasks()
+            tasks_by_event_id = {}
+            for task in tasks:
+                event_id = (task.get("google_event_id") or "").strip()
+                if event_id:
+                    tasks_by_event_id[event_id] = task
+
+            remote_by_id = {}
+            for event in remote_events:
+                event_id = (event.get("id") or "").strip()
+                if event_id:
+                    remote_by_id[event_id] = event
+
+            updated_count = 0
+            removed_count = 0
+            imported_count = 0
+            changed = False
+            now_iso = local_now_iso()
+
+            for task in tasks:
+                event_id = (task.get("google_event_id") or "").strip()
+                if not event_id:
+                    continue
+                status = (task.get("status") or "pending").lower()
+                if status in {"completed", "cancelled"}:
+                    continue
+
+                remote_event = remote_by_id.get(event_id)
+                if remote_event is None:
+                    remote_event = self.google_calendar.get_event(event_id)
+                    if remote_event is not None:
+                        remote_by_id[event_id] = remote_event
+
+                if remote_event is None:
+                    task["status"] = "cancelled"
+                    task["acknowledged_at"] = task.get("acknowledged_at") or now_iso
+                    task["cancelled_at"] = now_iso
+                    task["sync_status"] = "deleted_remote"
+                    task["last_synced_at"] = now_iso
+                    task.setdefault("metadata", {})
+                    task["metadata"]["google_deleted_remote"] = now_iso
+                    removed_count += 1
+                    changed = True
+                    continue
+
+                remote_summary = (remote_event.get("summary") or "Reminder").strip() or "Reminder"
+                remote_due = self._google_event_due_datetime(remote_event)
+                remote_due_iso = remote_due.isoformat(timespec="seconds") if remote_due else None
+                current_due = task.get("due_at") or task.get("due")
+                task_changed = False
+                if (task.get("text") or "").strip() != remote_summary:
+                    task["text"] = remote_summary
+                    task_changed = True
+                if remote_due_iso and current_due != remote_due_iso:
+                    task["due_at"] = remote_due_iso
+                    task["pre_trigger"] = (remote_due - timedelta(minutes=1)).isoformat(timespec="seconds")
+                    task_changed = True
+                if task.get("sync_status") != "synced":
+                    task["sync_status"] = "synced"
+                    task_changed = True
+                if task_changed:
+                    task["last_synced_at"] = now_iso
+                    updated_count += 1
+                    changed = True
+
+            for event_id, event in remote_by_id.items():
+                if event_id in tasks_by_event_id:
+                    continue
+                due_at = self._google_event_due_datetime(event)
+                if not due_at:
+                    continue
+                summary = (event.get("summary") or "Google Calendar Event").strip() or "Google Calendar Event"
+                imported_task = {
+                    "id": f"task_{uuid.uuid4().hex[:10]}",
+                    "created_at": now_iso,
+                    "due_at": due_at.isoformat(timespec="seconds"),
+                    "pre_trigger": (due_at - timedelta(minutes=1)).isoformat(timespec="seconds"),
+                    "text": summary,
+                    "status": "pending",
+                    "acknowledged_at": None,
+                    "retry_count": 0,
+                    "last_triggered_at": None,
+                    "next_retry_at": None,
+                    "source": "google",
+                    "google_event_id": event_id,
+                    "sync_status": "synced",
+                    "last_synced_at": now_iso,
+                    "metadata": {
+                        "google_imported_at": now_iso,
+                        "google_updated": event.get("updated"),
+                    },
+                }
+                tasks.append(imported_task)
+                tasks_by_event_id[event_id] = imported_task
+                imported_count += 1
+                changed = True
+
+            if changed:
+                self.memory.save_all_tasks(tasks)
+                self._refresh_task_registry_panel()
+
+            self.log_diagnostic(
+                "Google inbound sync reconciliation complete: "
+                f"updated={updated_count}, removed_missing_remote={removed_count}, imported_new={imported_count}.",
+                level="INFO"
+            )
+            if imported_count > 0:
+                self._append_chat(
+                    "SYSTEM",
+                    f"Google Calendar update detected. Importing {imported_count} new external event"
+                    f"{'' if imported_count == 1 else 's'}."
+                )
+        except Exception as ex:
+            self.log_exception("Google inbound sync poll", ex)
 
     def _check_due_tasks(self):
         try:
