@@ -1,12 +1,14 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.12.7
-# Build Date: 2026-04-02-r7
+# Version: 1.12.8
+# Build Date: 2026-04-02-r8
 # Summary:
 #   Restored clean final task acknowledgement rendering with diagnostics-safe extraction cleanup.
 # Changelog:
 #   - fixed malformed task acknowledgement rendering caused by broken response extraction/cleanup
+#   - improved GrimVeile task acknowledgements to concise 1–2 sentence in-character responses while preserving fast bounded generation
+#   - fixed clipped idle and due-alert outputs so visible commentary completes cleanly
 #   - preserved working task parsing and Google sync while restoring clean visible AI acknowledgements
 #   - improved natural reminder parsing for common phrasing
 #   - fixed malformed parse-failure acknowledgements leaking raw payload text into Tactical Record
@@ -122,8 +124,8 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.12.7"
-VERSION_DATE = "2026-04-02-r7"
+APP_VERSION = "1.12.8"
+VERSION_DATE = "2026-04-02-r8"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
 
@@ -2356,9 +2358,10 @@ class GrimveilDeck(QMainWindow):
             f"{self.system_prompt}\n"
             "This turn is autonomous idle output for Tactical Record.\n"
             f"Autonomous mode={idle_mode}. Persona fact: {mode_brief}.\n"
-            "Write concise in-character autonomous speech (1-3 sentences).\n"
+            "Write concise in-character autonomous speech (1-2 sentences, one complete thought).\n"
             f"{seed_rule}\n"
             f"{retry_rule}\n"
+            "Output a single authored statement only; do not write multi-speaker dialogue or role labels.\n"
             "Do not output metadata, labels, mode tags, or debug scaffolding.\n"
             "<|im_end|>\n"
             "<|im_start|>user\n"
@@ -2389,8 +2392,10 @@ class GrimveilDeck(QMainWindow):
         raw = (text or "").strip()
         if not raw:
             return ""
-        first_line = raw.splitlines()[0].strip()
-        cleaned = re.sub(r"\s+", " ", first_line).strip()
+        cleaned = re.sub(r"\s+", " ", raw).strip()
+        cleaned = re.sub(r"^(?:GRIMVEIL(?:-42)?|E-42|ASSISTANT)\s*:\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        if re.search(r"\b(?:GRIMVEIL(?:-42)?|E-42)\s*:", cleaned, flags=re.IGNORECASE):
+            return ""
         disallowed_patterns = [
             r"\bmode\s*=",
             r"\bturn_number\s*=",
@@ -2411,9 +2416,44 @@ class GrimveilDeck(QMainWindow):
             if re.search(pattern, cleaned, flags=re.IGNORECASE):
                 return ""
         cleaned = re.sub(r"^[\-\*\•]\s*", "", cleaned).strip()
+        cleaned = self._trim_to_complete_sentence(cleaned, max_sentences=2)
         if not cleaned or len(cleaned) < 3:
             return ""
         return cleaned
+
+    def _trim_to_complete_sentence(self, text: str, max_sentences: int = 2):
+        cleaned = re.sub(r"\s+", " ", (text or "").strip()).strip()
+        if not cleaned:
+            return ""
+        sentence_matches = re.findall(r'[^.!?]+[.!?]', cleaned)
+        if sentence_matches:
+            candidate = " ".join(sentence_matches[:max(1, max_sentences)]).strip()
+            return candidate
+        return cleaned
+
+    def _looks_incomplete_fragment(self, text: str):
+        t = re.sub(r"\s+", " ", (text or "").strip())
+        if not t:
+            return True
+        low = t.lower()
+        dangling_phrases = (
+            "task due in",
+            "due in",
+            "due at",
+            "due on",
+            "reminder due in",
+        )
+        if any(low.endswith(phrase) for phrase in dangling_phrases):
+            return True
+        if re.search(r"[,:;\-–—]$", t):
+            return True
+        if t[-1] not in ".!?":
+            last = re.findall(r"[A-Za-z']+", t)
+            if last and len(last[-1]) <= 4:
+                return True
+        if re.search(r"\b(?:and|or|but|to|for|in|on|at|with|because|that|which|if|when)\.?$", low):
+            return True
+        return False
 
     def _normalize_autonomous_thread_state(self):
         now = now_for_compare()
@@ -2481,7 +2521,7 @@ class GrimveilDeck(QMainWindow):
                 output = self.model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
-                    max_new_tokens=110,
+                    max_new_tokens=128,
                     temperature=0.7 if not retry else 0.85,
                     do_sample=True,
                     top_p=0.9,
@@ -2489,12 +2529,19 @@ class GrimveilDeck(QMainWindow):
                     pad_token_id=self.tokenizer.pad_token_id
                 )
             raw = self.tokenizer.decode(output[0][input_ids.shape[-1]:], skip_special_tokens=True)
-            line = re.sub(r"\s+", " ", raw).strip().split("\n")[0].strip()
             self.log_diagnostic("Unsolicited generation completed.", level="INFO")
-            sanitized = self._sanitize_unsolicited_output(line)
+            self.log_diagnostic(
+                f"Idle output raw decoded text: {self._preview_text(raw, max_chars=240) or '[empty]'}",
+                level="DEBUG",
+            )
+            sanitized = self._sanitize_unsolicited_output(raw)
+            self.log_diagnostic(
+                f"Idle output cleaned text: {self._preview_text(sanitized, max_chars=240) or '[empty]'}",
+                level="DEBUG",
+            )
             if not sanitized:
                 self.log_diagnostic("Unsolicited generation produced invalid/scaffold text; candidate rejected.", level="WARN")
-                self.log_memory_trace(f"Rejected unsolicited candidate due to scaffold/empty output: {self._preview_text(line, max_chars=160)}", phase="PHASE")
+                self.log_memory_trace(f"Rejected unsolicited candidate due to scaffold/empty output: {self._preview_text(raw, max_chars=160)}", phase="PHASE")
             return sanitized
         except Exception as ex:
             self.log_diagnostic(f"Unsolicited generation failed: {ex}", level="ERROR")
@@ -2557,6 +2604,28 @@ class GrimveilDeck(QMainWindow):
             last_output=prior_output,
             retry=False,
         )
+        if self._looks_incomplete_fragment(line):
+            self.log_diagnostic(
+                "Idle output looked incomplete/fractured; retrying once with bounded generation.",
+                level="WARN",
+            )
+            retry_line = self._generate_unsolicited_line(
+                mode=current_mode,
+                idle_mode=idle_mode,
+                turn_number=turns + 1,
+                thread_summary=prior_summary,
+                last_output=prior_output,
+                retry=True,
+            )
+            if retry_line and not self._looks_incomplete_fragment(retry_line):
+                line = retry_line
+            else:
+                trimmed = self._trim_to_complete_sentence(line, max_sentences=2)
+                if trimmed and not self._looks_incomplete_fragment(trimmed):
+                    line = trimmed
+                    self.log_diagnostic("Idle output safe-cleaned to prior complete sentence.", level="INFO")
+                else:
+                    self.log_diagnostic("Idle output remained incomplete after retry.", level="WARN")
         duplicate_rejected = False
         if self._is_unsolicited_duplicate(line, prior_output):
             duplicate_rejected = True
@@ -4439,15 +4508,18 @@ class GrimveilDeck(QMainWindow):
         prompt = (
             "<|im_start|>system\n"
             "You are GrimVeile acknowledging a task/reminder action.\n"
-            "Write one authored acknowledgement line (usually 1 sentence; use 2 short sentences only when necessary).\n"
-            "Stay concise, readable, and in-character: dry superiority, restrained sarcasm, quiet command tone, mild contempt for disorder.\n"
-            "Never sound like a generic assistant or status console. Avoid clipped fragments unless clearly intentional and still readable.\n"
-            "Use anchor mode lightly: connected=stable/controlled, nearby=guarded/uneasy, absent=frayed/paranoid. Mention E-42 only when it naturally strengthens the line.\n"
             "Preserve factual correctness from payload: added/canceled/completed/acknowledged/synced/failed as applicable.\n"
+            "Stay concise and in-character: dry superiority, restrained sarcasm, command presence, contempt for disorder.\n"
+            "Use anchor mode lightly; mention E-42 only when it strengthens the line.\n"
             "No internal IDs, no JSON, no metadata labels, no 'Explanation', no 'Tactical Record'.\n"
             "<|im_end|>\n"
             "<|im_start|>user\n"
             f"{payload}\n"
+            "Output contract (critical): 1-2 sentences max.\n"
+            "Sentence 1 must be factual confirmation/result using payload facts.\n"
+            "Sentence 2 is optional GrimVeile flavor.\n"
+            "Forbidden weak outputs: 'Ah, I see.', 'Task: ...', label fragments, raw technical phrasing, generic assistant filler.\n"
+            "Never output clipped or unfinished phrases.\n"
             "<|im_end|>\n"
             "<|im_start|>assistant\n"
         )
@@ -4461,12 +4533,13 @@ class GrimveilDeck(QMainWindow):
         if is_task_final_ack:
             self.log_diagnostic("Task final AI acknowledgement handoff started.", level="INFO")
             self.log_diagnostic(f"Task final AI acknowledgement prompt character length: {len(prompt)}", level="DEBUG")
+        diagnostics_prefix = "Due-alert AI commentary" if event_name == "task_due" else "Task final AI acknowledgement"
         generated = self._generate_ai_text(
             prompt,
             max_new_tokens=48,
             temperature=0.55,
             max_input_length=256,
-            diagnostics_prefix="Task final AI acknowledgement",
+            diagnostics_prefix=diagnostics_prefix,
         )
         if is_task_final_ack and not generated:
             self.log_diagnostic("Task final AI acknowledgement failed / timed out.", level="WARN")
@@ -4475,7 +4548,44 @@ class GrimveilDeck(QMainWindow):
                 f"Task final AI acknowledgement raw decoded output: {self._preview_text(generated, max_chars=240) or '[empty]'}",
                 level="DEBUG",
             )
+        if event_name == "task_due":
+            self.log_diagnostic(
+                f"Due-alert raw decoded text: {self._preview_text(generated, max_chars=240) or '[empty]'}",
+                level="DEBUG",
+            )
         line = self._sanitize_task_commentary_output(generated)
+        retry_used = False
+        needs_retry = self._is_weak_task_ack_output(line) or self._looks_incomplete_fragment(line)
+        if needs_retry:
+            retry_used = True
+            self.log_diagnostic("Task commentary output weak/incomplete; retrying once with stronger guardrails.", level="WARN")
+            retry_prompt = (
+                prompt
+                + "<|im_start|>system\n"
+                  "Retry now. Produce a complete 1-2 sentence acknowledgement only.\n"
+                  "Sentence 1 = factual result. Optional sentence 2 = terse GrimVeile sting.\n"
+                  "Do not output fragments, labels, or generic filler.\n"
+                  "<|im_end|>\n"
+                  "<|im_start|>assistant\n"
+            )
+            retry_generated = self._generate_ai_text(
+                retry_prompt,
+                max_new_tokens=52,
+                temperature=0.5,
+                max_input_length=272,
+                diagnostics_prefix=f"{diagnostics_prefix} retry",
+            )
+            self.log_diagnostic(
+                f"{'Due-alert' if event_name == 'task_due' else 'Task final AI acknowledgement'} raw decoded text (retry): {self._preview_text(retry_generated, max_chars=240) or '[empty]'}",
+                level="DEBUG",
+            )
+            retry_line = self._sanitize_task_commentary_output(retry_generated)
+            if retry_line and not self._is_weak_task_ack_output(retry_line) and not self._looks_incomplete_fragment(retry_line):
+                line = retry_line
+            else:
+                safe_line = self._trim_to_complete_sentence(line, max_sentences=2)
+                if safe_line and not self._looks_incomplete_fragment(safe_line):
+                    line = safe_line
         if is_task_final_ack:
             transformed = bool((generated or "").strip() != (line or "").strip())
             self.log_diagnostic(
@@ -4484,6 +4594,19 @@ class GrimveilDeck(QMainWindow):
             )
             self.log_diagnostic(
                 f"Task final AI acknowledgement cleanup/transformation applied: {'yes' if transformed else 'no'}",
+                level="DEBUG",
+            )
+            self.log_diagnostic(
+                f"Task final AI acknowledgement retry used due to weak/incomplete ending: {'yes' if retry_used else 'no'}",
+                level="DEBUG",
+            )
+        if event_name == "task_due":
+            self.log_diagnostic(
+                f"Due-alert cleaned text: {self._preview_text(line, max_chars=240) or '[empty]'}",
+                level="DEBUG",
+            )
+            self.log_diagnostic(
+                f"Due-alert cleanup/retry applied due to incomplete ending: {'yes' if retry_used else 'no'}",
                 level="DEBUG",
             )
         if not line:
@@ -4519,10 +4642,11 @@ class GrimveilDeck(QMainWindow):
         cleaned = cleaned.strip("\"'").strip()
         if "\n" in cleaned:
             lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
-            cleaned = lines[0] if lines else cleaned
+            cleaned = " ".join(lines[:2]) if lines else cleaned
         cleaned = re.sub(r"^[\-\*\•]\s*", "", cleaned).strip()
         cleaned = re.sub(r"^(?:tactical\s*record\s*:|explanation\s*:)\s*", "", cleaned, flags=re.IGNORECASE).strip()
         cleaned = re.sub(r'^[^A-Za-z0-9"\']*(?=[A-Za-z0-9"\'])', "", cleaned).strip()
+        cleaned = self._trim_to_complete_sentence(cleaned, max_sentences=2)
         disallowed_patterns = [
             r"<\|im_start\|>",
             r"<\|im_end\|>",
@@ -4553,6 +4677,7 @@ class GrimveilDeck(QMainWindow):
             r'^task\s+"[^"]+"\.?$',
             r'^task\s+(?:canceled|cancelled|completed)\s*:\s*.+$',
             r'^reminder\s+(?:set|saved|acknowledged)\s*[:.]?.*$',
+            r'^task\s*:\s*.+$',
         )
         if any(re.match(p, cleaned, flags=re.IGNORECASE) for p in clipped_patterns):
             return ""
@@ -4564,6 +4689,27 @@ class GrimveilDeck(QMainWindow):
         if alpha_count < 4:
             return ""
         return cleaned
+
+    def _is_weak_task_ack_output(self, text: str):
+        cleaned = re.sub(r"\s+", " ", (text or "").strip()).strip().lower()
+        if not cleaned:
+            return True
+        weak_exact = {
+            "ah, i see.",
+            "i see.",
+            "noted.",
+            "understood.",
+            "done.",
+        }
+        if cleaned in weak_exact:
+            return True
+        weak_patterns = (
+            r"^task\s*:\s*.+$",
+            r"^task\s+[^.?!]+[.?!]?$",
+            r"^reminder\s*:\s*.+$",
+            r"^(okay|ok|sure)[.?!]?$",
+        )
+        return any(re.match(p, cleaned, flags=re.IGNORECASE) for p in weak_patterns)
 
     def _task_commentary_fallback_line(self, event_name: str, facts: dict, fallback: str):
         facts = facts if isinstance(facts, dict) else {}
