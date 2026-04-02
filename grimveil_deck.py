@@ -1,11 +1,14 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.12.0
-# Build Date: 2026-04-02
+# Version: 1.12.1
+# Build Date: 2026-04-02-r1
 # Summary:
 #   Records tab converted to Drive-first workspace with folder navigation and creation.
 # Changelog:
+#   - fixed task acknowledgement duplication
+#   - task actions now emit one final visible AI response instead of multiple layered outputs
+#   - moved raw task/sync internals out of Tactical Record and into Diagnostics
 #   - fixed Google OAuth scope list causing invalid_scope failures
 #   - added diagnostics logging for requested Google scopes
 #   - converted Records tab from Docs-first to Drive-first workspace
@@ -106,8 +109,8 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.12.0"
-VERSION_DATE = "2026-04-02"
+APP_VERSION = "1.12.1"
+VERSION_DATE = "2026-04-02-r1"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
 
@@ -4093,18 +4096,36 @@ class GrimveilDeck(QMainWindow):
                 self._restart_idle_timer()
                 return
 
-            parsed_task = self._try_create_task(normalized_text, force_intent=has_reminder_intent(normalized_text))
-            if parsed_task:
+            task_action_result = self._try_create_task(normalized_text, force_intent=has_reminder_intent(normalized_text))
+            if task_action_result:
+                parsed_task = task_action_result.get("task") or {}
                 due_obj = parse_iso(parsed_task.get("due_at") or parsed_task.get("due"))
                 due_str = due_obj.strftime("%m/%d/%Y at %I:%M %p") if due_obj else parsed_task.get("due_at", "scheduled time")
+                sync_packet = task_action_result.get("google_sync") or {}
+                sync_status = (sync_packet.get("status") or "not_attempted").strip().lower()
+                local_ok = bool(task_action_result.get("local_created"))
+                google_ok = sync_status == "synced"
+                if sync_status == "failed":
+                    status_line = "Local reminder saved; Google Calendar sync failed."
+                elif sync_status == "synced":
+                    status_line = "Local reminder saved and Google Calendar synced."
+                else:
+                    status_line = "Local reminder saved."
+                self.log_diagnostic("Task final AI acknowledgement handoff started.", level="INFO")
                 self._emit_ai_task_commentary(
-                    event_name="task_created",
+                    event_name="task_created_final",
                     facts={
                         "task_text": parsed_task.get("text", ""),
                         "due": due_str,
+                        "local_create_success": local_ok,
+                        "google_sync_success": google_ok,
+                        "google_sync_status": sync_status,
+                        "status": status_line,
                     },
-                    fallback=f"Reminder set for {due_str}."
+                    fallback=f"Reminder set for {due_str}. {status_line}"
                 )
+                self.log_diagnostic("Task final AI acknowledgement handoff completed.", level="INFO")
+                self.log_diagnostic("Task interaction cycle complete.", level="INFO")
                 self._store_message("user", text)
                 self.history.append({"role": "user", "content": text})
                 self._restart_idle_timer()
@@ -4276,10 +4297,35 @@ class GrimveilDeck(QMainWindow):
             "<|im_end|>\n"
             "<|im_start|>assistant\n"
         )
-        line = self._sanitize_unsolicited_output(self._generate_ai_text(prompt, max_new_tokens=90, temperature=0.65))
+        generated = self._generate_ai_text(prompt, max_new_tokens=90, temperature=0.65)
+        line = self._sanitize_task_commentary_output(generated)
         if not line:
             line = fallback
         self._append_chat("GRIMVEILE", line)
+
+    def _sanitize_task_commentary_output(self, text: str):
+        raw = (text or "").strip()
+        if not raw:
+            return ""
+        first_line = raw.splitlines()[0].strip()
+        cleaned = re.sub(r"\s+", " ", first_line).strip()
+        cleaned = re.sub(r"^[\-\*\•]\s*", "", cleaned).strip()
+        cleaned = re.sub(r"^(?:tactical\s*record\s*:|explanation\s*:)\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        disallowed_patterns = [
+            r"<\|im_start\|>",
+            r"<\|im_end\|>",
+            r"\bevent_name\s*=",
+            r"\bevent_facts\s*=",
+            r"\btask_id\s*[:=]",
+            r"\bevent_id\s*[:=]",
+            r"\bgoogle_event_id\s*[:=]",
+        ]
+        for pattern in disallowed_patterns:
+            if re.search(pattern, cleaned, flags=re.IGNORECASE):
+                return ""
+        if not cleaned or len(cleaned) < 3:
+            return ""
+        return cleaned
 
     def _should_distill_memory(self, user_text: str, response: str):
         t = (user_text + "\n" + response).lower()
@@ -4373,23 +4419,35 @@ class GrimveilDeck(QMainWindow):
         self.input_field.setEnabled(True)
 
     def _try_create_task(self, text: str, force_intent: bool = False):
+        self.log_diagnostic("Task action started.", level="INFO")
         parsed = self._parse_reminder_command(text, force_intent=force_intent)
         if not parsed:
+            self.log_diagnostic("Task action aborted: schedule parse failed.", level="WARN")
+            self.log_diagnostic("Task interaction cycle complete.", level="INFO")
             return None
         task_text, due_dt = parsed
         task = self.memory.add_task(task_text, due_dt, text)
         reloaded = self.memory.load_tasks()
         if not any((t.get("id") == task.get("id")) for t in reloaded):
+            self.log_diagnostic("Local task create failed verification check.", level="ERROR")
+            self.log_diagnostic("Task interaction cycle complete.", level="INFO")
             return None
-        self._push_task_to_google_calendar(task)
+        self.log_diagnostic("Local task create succeeded.", level="INFO")
+        google_sync_result = self._push_task_to_google_calendar(task)
         self._refresh_task_registry_panel()
-        return task
+        return {
+            "task": task,
+            "local_created": True,
+            "google_sync": google_sync_result,
+        }
 
     def _push_task_to_google_calendar(self, task: dict):
         task_id = task.get("id")
         if not task_id:
-            return
-        self.log_diagnostic(f"Google Calendar push attempt for task_id={task_id}.", level="INFO")
+            self.log_diagnostic("Google sync skipped: task missing local id.", level="WARN")
+            return {"status": "not_attempted", "error": "missing_task_id"}
+        self.log_diagnostic("Google sync started for task action.", level="INFO")
+        self.log_diagnostic(f"Google Calendar push attempt for task_id={task_id}.", level="DEBUG")
         try:
             event_id, link_established = self.google_calendar.create_event_for_task(task)
             self.memory.update_task_google_sync(
@@ -4402,12 +4460,12 @@ class GrimveilDeck(QMainWindow):
                 self._append_chat("SYSTEM", "Google Calendar link established.")
                 self._google_link_announced = True
                 self.log_diagnostic("Google Calendar auth/link established.", level="INFO")
-            self._emit_ai_task_commentary(
-                event_name="task_google_push_success",
-                facts={"task_id": task_id, "event_id": event_id},
-                fallback="Task pushed to Google Calendar."
+            self.log_diagnostic("Google sync succeeded for task action.", level="INFO")
+            self.log_diagnostic(
+                f"Google Calendar push success for task_id={task_id}, event_id={event_id}.",
+                level="DEBUG"
             )
-            self.log_diagnostic(f"Google Calendar push success for task_id={task_id}, event_id={event_id}.", level="INFO")
+            return {"status": "synced", "event_linked": bool(event_id)}
         except Exception as ex:
             raw_error = str(ex).strip() or ex.__class__.__name__
             lower_error = raw_error.lower()
@@ -4433,11 +4491,8 @@ class GrimveilDeck(QMainWindow):
                 last_synced_at=local_now_iso(),
                 error_message=user_error,
             )
-            self._emit_ai_task_commentary(
-                event_name="task_google_push_failed",
-                facts={"task_id": task_id, "error": user_error},
-                fallback=f"Google Calendar push failed: {user_error}; local task retained."
-            )
+            self.log_diagnostic("Google sync failed for task action.", level="WARN")
+            return {"status": "failed", "error": user_error}
 
     def _parse_reminder_command(self, text: str, force_intent: bool = False):
         t = normalize_persona_prefixed_input(text).strip()
