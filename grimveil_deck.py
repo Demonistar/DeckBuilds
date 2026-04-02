@@ -1,11 +1,13 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.10.0
+# Version: 1.10.1
 # Build Date: 2026-04-02
 # Summary:
-#   Records tab now includes Google Docs/Drive action controls for create/open/delete/export workflows.
+#   Records tab now defaults Open to local export + local app launch, with separate Open Web action.
 # Changelog:
+#   - changed Records default open behavior to local export + local app launch
+#   - added separate Open Web action for browser access
 #   - expanded Records tab with document actions
 #   - added create/open/delete/export support for Google Docs/Drive records
 #   - made Records tab functional with Google Drive/Docs integration
@@ -95,7 +97,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.10.0"
+APP_VERSION = "1.10.1"
 VERSION_DATE = "2026-04-02"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -2776,12 +2778,14 @@ class GrimveilDeck(QMainWindow):
         self.btn_records_refresh = QPushButton("REFRESH")
         self.btn_records_new = QPushButton("NEW DOC")
         self.btn_records_open = QPushButton("OPEN")
+        self.btn_records_open_web = QPushButton("OPEN WEB")
         self.btn_records_delete = QPushButton("DELETE")
         self.btn_records_export = QPushButton("EXPORT")
         for btn in (
             self.btn_records_refresh,
             self.btn_records_new,
             self.btn_records_open,
+            self.btn_records_open_web,
             self.btn_records_delete,
             self.btn_records_export,
         ):
@@ -2797,6 +2801,7 @@ class GrimveilDeck(QMainWindow):
         self.btn_records_refresh.clicked.connect(self._refresh_records_docs)
         self.btn_records_new.clicked.connect(self._records_create_new_doc)
         self.btn_records_open.clicked.connect(self._records_open_selected_doc)
+        self.btn_records_open_web.clicked.connect(self._records_open_selected_doc_web)
         self.btn_records_delete.clicked.connect(self._records_delete_selected_doc)
         self.btn_records_export.clicked.connect(self._records_export_selected_doc)
         records_layout.addLayout(records_actions)
@@ -3034,6 +3039,24 @@ class GrimveilDeck(QMainWindow):
             return
         self.log_diagnostic(f"Open selected doc target id={doc_id} title={title}", level="INFO")
         try:
+            export_path = self._records_export_doc_to_local(doc_id=doc_id, title=title, action_label="Open selected doc")
+            self.log_diagnostic(f"Open selected doc local open started. path={export_path}", level="INFO")
+            os.startfile(str(export_path))
+            self.log_diagnostic(f"Open selected doc local open succeeded. path={export_path}", level="INFO")
+        except Exception as ex:
+            self.log_diagnostic(f"Open selected doc failed: {ex}", level="ERROR")
+
+    def _records_open_selected_doc_web(self):
+        self.log_diagnostic("Open web selected doc requested.", level="INFO")
+        _, file_info = self._get_selected_record_info()
+        doc_id = (file_info.get("id") or "").strip()
+        title = (file_info.get("name") or "Untitled").strip() or "Untitled"
+        if not doc_id:
+            self.log_diagnostic("Open web selected doc failed: no document selected.", level="WARN")
+            return
+        self.log_diagnostic(f"Open web selected doc target id={doc_id} title={title}", level="INFO")
+        try:
+            self.log_diagnostic(f"Open web selected doc started. id={doc_id} title={title}", level="INFO")
             web_link = (file_info.get("webViewLink") or "").strip()
             if not web_link:
                 meta = self.google_records.get_doc_metadata(doc_id)
@@ -3041,9 +3064,9 @@ class GrimveilDeck(QMainWindow):
             if not web_link:
                 raise RuntimeError("No webViewLink returned for selected document.")
             webbrowser.open(web_link, new=2)
-            self.log_diagnostic(f"Open selected doc succeeded. link={web_link}", level="INFO")
+            self.log_diagnostic(f"Open web selected doc succeeded. link={web_link}", level="INFO")
         except Exception as ex:
-            self.log_diagnostic(f"Open selected doc failed: {ex}", level="ERROR")
+            self.log_diagnostic(f"Open web selected doc failed. id={doc_id} title={title} error={ex}", level="ERROR")
 
     def _records_delete_selected_doc(self):
         item, file_info = self._get_selected_record_info()
@@ -3071,14 +3094,20 @@ class GrimveilDeck(QMainWindow):
             return
         self.log_diagnostic(f"Export selected doc target id={doc_id} title={title}", level="INFO")
         try:
-            payload = self.google_records.export_doc_text(doc_id)
-            GOOGLE_EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
-            safe_name = self._safe_records_filename(title)
-            export_path = GOOGLE_EXPORTS_DIR / f"{safe_name}.txt"
-            export_path.write_text(payload, encoding="utf-8")
+            export_path = self._records_export_doc_to_local(doc_id=doc_id, title=title, action_label="Export selected doc")
             self.log_diagnostic(f"Export selected doc succeeded. path={export_path}", level="INFO")
         except Exception as ex:
             self.log_diagnostic(f"Export selected doc failed. id={doc_id} title={title} error={ex}", level="ERROR")
+
+    def _records_export_doc_to_local(self, doc_id: str, title: str, action_label: str = "Records export") -> Path:
+        self.log_diagnostic(f"{action_label} local export started. id={doc_id} title={title}", level="INFO")
+        payload = self.google_records.export_doc_text(doc_id)
+        GOOGLE_EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        safe_name = self._safe_records_filename(title)
+        export_path = GOOGLE_EXPORTS_DIR / f"{safe_name}.txt"
+        export_path.write_text(payload, encoding="utf-8")
+        self.log_diagnostic(f"{action_label} local export path={export_path}", level="INFO")
+        return export_path
 
     def _on_records_doc_selected(self, item: QListWidgetItem):
         if item is None:
