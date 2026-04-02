@@ -1,11 +1,14 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.8.5
-# Build Date: 2026-04-01
+# Version: 1.9.0
+# Build Date: 2026-04-02
 # Summary:
-#   Hardened autonomous unsolicited output handling and normalized thread state before generation.
+#   Records tab now performs live Google Drive/Docs listing and preview retrieval.
 # Changelog:
+#   - made Records tab functional with Google Drive/Docs integration
+#   - added recent Google Docs listing and preview support
+#   - added diagnostics for Docs/Drive auth and document fetch activity
 #   - fixed generation lockup by explicitly passing attention_mask to all model.generate() calls
 #   - eliminated unstable no-attention-mask generation path
 #   - added Memory Trace view for memory retrieval validation and startup continuity evidence logging
@@ -79,7 +82,8 @@ except ImportError:
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QFrame, QCalendarWidget,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QStackedWidget, QTabWidget
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QStackedWidget, QTabWidget,
+    QListWidget, QListWidgetItem
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QDate, QSize
 from PyQt6.QtGui import (
@@ -88,8 +92,8 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.8.5"
-VERSION_DATE = "2026-04-01"
+APP_VERSION = "1.9.0"
+VERSION_DATE = "2026-04-02"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
 
@@ -155,7 +159,11 @@ if SCRIPT_DIR.name.lower() == "models" and SCRIPT_DIR.parent.name.lower() == "ai
 MEMORY_DIR = AI_MODELS_DIR / "GrimVeil_Memories"
 GOOGLE_CREDENTIALS_PATH = Path(r"C:\AI\config\google_credentials.json")
 GOOGLE_TOKEN_PATH = Path(r"C:\AI\Models\GrimVeil_Memories\google\token.json")
-GOOGLE_SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
+GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/documents.readonly",
+]
 DEFAULT_GOOGLE_IANA_TIMEZONE = "America/Chicago"
 GOOGLE_INBOUND_SYNC_INTERVAL_MS = 5 * 60 * 1000
 GOOGLE_INBOUND_LOOKBACK_DAYS = 30
@@ -1619,6 +1627,118 @@ class GoogleCalendarService:
         self._service.events().delete(calendarId=target_calendar_id, eventId=google_event_id).execute()
 
 
+class GoogleDocsDriveService:
+    def __init__(self, credentials_path: Path, token_path: Path, logger=None):
+        self.credentials_path = credentials_path
+        self.token_path = token_path
+        self._drive_service = None
+        self._docs_service = None
+        self._logger = logger
+
+    def _log(self, message: str, level: str = "INFO"):
+        if callable(self._logger):
+            self._logger(message, level=level)
+
+    def _persist_token(self, creds):
+        ensure_parent(self.token_path)
+        self.token_path.parent.mkdir(parents=True, exist_ok=True)
+        self.token_path.write_text(creds.to_json(), encoding="utf-8")
+
+    def _authenticate(self):
+        self._log("Drive auth start.", level="INFO")
+        self._log("Docs auth start.", level="INFO")
+
+        if not GOOGLE_API_OK:
+            detail = GOOGLE_IMPORT_ERROR or "unknown ImportError"
+            raise RuntimeError(f"Missing Google Python dependency: {detail}")
+        if not self.credentials_path.exists():
+            raise FileNotFoundError(
+                f"Google credentials/auth configuration not found: {self.credentials_path}"
+            )
+
+        creds = None
+        if self.token_path.exists():
+            creds = GoogleCredentials.from_authorized_user_file(str(self.token_path), GOOGLE_SCOPES)
+
+        if creds and creds.valid and not creds.has_scopes(GOOGLE_SCOPES):
+            raise RuntimeError(
+                "Google token missing required Drive/Docs scopes. Remove token and re-authenticate."
+            )
+
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(GoogleAuthRequest())
+                self._persist_token(creds)
+            except Exception as ex:
+                raise RuntimeError(
+                    f"Google token refresh failed after scope expansion: {ex}"
+                ) from ex
+
+        if not creds or not creds.valid:
+            flow = InstalledAppFlow.from_client_secrets_file(str(self.credentials_path), GOOGLE_SCOPES)
+            creds = flow.run_local_server(port=0)
+            self._persist_token(creds)
+
+        return creds
+
+    def ensure_services(self):
+        if self._drive_service is not None and self._docs_service is not None:
+            return
+        try:
+            creds = self._authenticate()
+            self._drive_service = google_build("drive", "v3", credentials=creds)
+            self._docs_service = google_build("docs", "v1", credentials=creds)
+            self._log("Drive auth success.", level="INFO")
+            self._log("Docs auth success.", level="INFO")
+        except Exception as ex:
+            self._log(f"Drive auth failure: {ex}", level="ERROR")
+            self._log(f"Docs auth failure: {ex}", level="ERROR")
+            raise
+
+    def list_recent_docs(self, page_size: int = 25):
+        self.ensure_services()
+        self._log("Drive file list fetch started.", level="INFO")
+        response = self._drive_service.files().list(
+            q="mimeType='application/vnd.google-apps.document' and trashed=false",
+            pageSize=max(1, min(int(page_size or 25), 100)),
+            orderBy="modifiedTime desc",
+            fields="files(id,name,modifiedTime,webViewLink,lastModifyingUser(displayName,emailAddress))",
+        ).execute()
+        files = response.get("files", [])
+        self._log(f"Drive docs returned: {len(files)}", level="INFO")
+        return files
+
+    def get_doc_preview(self, doc_id: str, max_chars: int = 1800):
+        if not doc_id:
+            raise ValueError("Document id is required.")
+        self.ensure_services()
+        doc = self._docs_service.documents().get(documentId=doc_id).execute()
+        title = doc.get("title") or "Untitled"
+        body = doc.get("body", {}).get("content", [])
+        chunks = []
+        for block in body:
+            paragraph = block.get("paragraph")
+            if not paragraph:
+                continue
+            elements = paragraph.get("elements", [])
+            for el in elements:
+                run = el.get("textRun")
+                if not run:
+                    continue
+                text = (run.get("content") or "").replace("\x0b", "\n")
+                if text:
+                    chunks.append(text)
+        parsed = "".join(chunks).strip()
+        if len(parsed) > max_chars:
+            parsed = parsed[:max_chars].rstrip() + "…"
+        return {
+            "title": title,
+            "document_id": doc_id,
+            "revision_id": doc.get("revisionId"),
+            "preview_text": parsed or "[No text content returned from Docs API.]",
+        }
+
+
 class FaceWidget(QLabel):
     def __init__(self, faces_dir, parent=None):
         super().__init__(parent)
@@ -1798,6 +1918,13 @@ class GrimveilDeck(QMainWindow):
         self.active_reminder_ids = set()
         self._tasks_mtime = None
         self.google_calendar = GoogleCalendarService(GOOGLE_CREDENTIALS_PATH, GOOGLE_TOKEN_PATH)
+        self.google_records = GoogleDocsDriveService(
+            GOOGLE_CREDENTIALS_PATH,
+            GOOGLE_TOKEN_PATH,
+            logger=self.log_diagnostic
+        )
+        self.records_cache = []
+        self.records_initialized = False
         self._google_link_announced = False
         self._last_status_logged = None
         self._generation_started_at = None
@@ -2501,8 +2628,8 @@ class GrimveilDeck(QMainWindow):
         inst_label.setStyleSheet(f"color: {C_GOLD}; font-size: 10px; letter-spacing: 2px; font-family: Georgia, serif;")
         right_panel.addWidget(inst_label)
 
-        instruments_tabs = QTabWidget()
-        instruments_tabs.setStyleSheet(
+        self.instruments_tabs = QTabWidget()
+        self.instruments_tabs.setStyleSheet(
             f"QTabWidget::pane {{ border: 1px solid {C_BORDER}; background: {C_BG2}; }}"
             f"QTabBar::tab {{ background: {C_PANEL}; color: {C_TEXT_DIM}; border: 1px solid {C_BORDER}; "
             f"padding: 4px 8px; font-family: Georgia, serif; font-size: 9px; letter-spacing: 1px; }}"
@@ -2591,28 +2718,61 @@ class GrimveilDeck(QMainWindow):
         records_layout = QVBoxLayout(records_tab)
         records_layout.setContentsMargins(8, 8, 8, 8)
         records_layout.setSpacing(6)
+        records_header = QHBoxLayout()
+        records_header.setContentsMargins(0, 0, 0, 0)
+        records_header.setSpacing(4)
         records_title = QLabel("Records Interface")
         records_title.setStyleSheet(f"color: {C_GOLD}; font-size: 10px; letter-spacing: 1px; font-family: Georgia, serif;")
-        records_layout.addWidget(records_title)
-        records_placeholder = QLabel("Google Docs integration loading...")
-        records_placeholder.setStyleSheet(
+        records_header.addWidget(records_title)
+        records_header.addStretch(1)
+        self.btn_records_refresh = QPushButton("REFRESH")
+        self.btn_records_refresh.setFixedHeight(22)
+        self.btn_records_refresh.setStyleSheet(
+            f"QPushButton {{ background-color: {C_BG3}; color: {C_CYAN}; border: 1px solid {C_CYAN_DIM}; "
+            f"font-family: Georgia, serif; font-size: 9px; padding: 2px 8px; }}"
+            f"QPushButton:hover {{ border-color: {C_CYAN}; color: {C_TEXT}; }}"
+        )
+        self.btn_records_refresh.clicked.connect(self._refresh_records_docs)
+        records_header.addWidget(self.btn_records_refresh)
+        records_layout.addLayout(records_header)
+
+        self.records_status_label = QLabel("Google Docs integration loading...")
+        self.records_status_label.setStyleSheet(
             f"background: {C_PANEL}; color: {C_TEXT_DIM}; border: 1px solid {C_BORDER}; "
             f"font-family: Georgia, serif; font-size: 10px; padding: 8px;"
         )
-        records_layout.addWidget(records_placeholder)
-        records_list_placeholder = QFrame()
-        records_list_placeholder.setMinimumHeight(90)
-        records_list_placeholder.setStyleSheet(f"background: {C_BG3}; border: 1px solid {C_BORDER};")
-        records_layout.addWidget(records_list_placeholder)
-        records_preview_placeholder = QFrame()
-        records_preview_placeholder.setMinimumHeight(120)
-        records_preview_placeholder.setStyleSheet(f"background: {C_BG3}; border: 1px solid {C_BORDER};")
-        records_layout.addWidget(records_preview_placeholder)
-        records_layout.addStretch()
+        records_layout.addWidget(self.records_status_label)
 
-        instruments_tabs.addTab(instruments_tab, "System Instruments")
-        instruments_tabs.addTab(records_tab, "Records")
-        right_panel.addWidget(instruments_tabs)
+        self.records_list_widget = QListWidget()
+        self.records_list_widget.setMinimumHeight(110)
+        self.records_list_widget.setStyleSheet(
+            f"background: {C_BG3}; color: {C_TEXT}; border: 1px solid {C_BORDER}; "
+            f"font-family: Georgia, serif; font-size: 10px;"
+        )
+        self.records_list_widget.itemClicked.connect(self._on_records_doc_selected)
+        records_layout.addWidget(self.records_list_widget)
+
+        self.records_preview_meta = QLabel("Select a document to load metadata and preview.")
+        self.records_preview_meta.setWordWrap(True)
+        self.records_preview_meta.setStyleSheet(
+            f"background: {C_PANEL}; color: {C_TEXT_DIM}; border: 1px solid {C_BORDER}; "
+            f"font-family: Georgia, serif; font-size: 10px; padding: 6px;"
+        )
+        records_layout.addWidget(self.records_preview_meta)
+
+        self.records_preview_text = QTextEdit()
+        self.records_preview_text.setReadOnly(True)
+        self.records_preview_text.setMinimumHeight(130)
+        self.records_preview_text.setStyleSheet(
+            f"background: {C_BG3}; color: {C_TEXT}; border: 1px solid {C_BORDER}; "
+            f"font-family: Georgia, serif; font-size: 10px; padding: 4px;"
+        )
+        records_layout.addWidget(self.records_preview_text)
+
+        self.instruments_tabs.addTab(instruments_tab, "System Instruments")
+        self.instruments_tabs.addTab(records_tab, "Records")
+        self.instruments_tabs.currentChanged.connect(self._on_instruments_tab_changed)
+        right_panel.addWidget(self.instruments_tabs)
 
         task_content = QWidget()
         task_layout = QVBoxLayout(task_content)
@@ -2709,6 +2869,71 @@ class GrimveilDeck(QMainWindow):
         root.addWidget(footer)
 
         self._refresh_anchor_ui()
+
+    def _on_instruments_tab_changed(self, index: int):
+        label = self.instruments_tabs.tabText(index) if hasattr(self, "instruments_tabs") else ""
+        if label == "Records" and not self.records_initialized:
+            self._refresh_records_docs()
+
+    def _refresh_records_docs(self):
+        if not hasattr(self, "records_status_label"):
+            return
+        self.records_status_label.setText("Loading recent Google Docs records...")
+        self.log_diagnostic("Drive file list fetch started.", level="INFO")
+        try:
+            files = self.google_records.list_recent_docs(page_size=30)
+            self.records_cache = files
+            self.records_initialized = True
+            self.records_list_widget.clear()
+            for file_info in files:
+                title = (file_info.get("name") or "Untitled").strip() or "Untitled"
+                modified = file_info.get("modifiedTime") or "unknown-time"
+                pretty_modified = modified.replace("T", " ").replace("Z", " UTC")
+                row_text = f"{title}    [{pretty_modified}]"
+                item = QListWidgetItem(row_text)
+                item.setData(Qt.ItemDataRole.UserRole, file_info)
+                tooltip = (
+                    f"id: {file_info.get('id', 'n/a')}\n"
+                    f"modified: {modified}\n"
+                    f"link: {file_info.get('webViewLink', 'n/a')}"
+                )
+                item.setToolTip(tooltip)
+                self.records_list_widget.addItem(item)
+            doc_count = len(files)
+            if doc_count:
+                self.records_status_label.setText(f"Loaded {doc_count} recent Google Docs record(s).")
+            else:
+                self.records_status_label.setText("No Google Docs records returned.")
+        except Exception as ex:
+            self.records_initialized = False
+            self.records_list_widget.clear()
+            self.records_status_label.setText("Records unavailable. See Diagnostics for details.")
+            self.log_diagnostic(f"Drive auth/docs fetch failure: {ex}", level="ERROR")
+
+    def _on_records_doc_selected(self, item: QListWidgetItem):
+        if item is None:
+            return
+        file_info = item.data(Qt.ItemDataRole.UserRole) or {}
+        doc_id = (file_info.get("id") or "").strip()
+        title = (file_info.get("name") or "Untitled").strip() or "Untitled"
+        modified = file_info.get("modifiedTime") or "unknown-time"
+        self.log_diagnostic(f"Records selected doc id={doc_id} title={title}", level="INFO")
+        try:
+            preview = self.google_records.get_doc_preview(doc_id)
+            self.records_preview_meta.setText(
+                f"Title: {preview.get('title', title)}\n"
+                f"Document ID: {preview.get('document_id', doc_id)}\n"
+                f"Revision: {preview.get('revision_id', 'n/a')}\n"
+                f"Modified: {modified}"
+            )
+            self.records_preview_text.setPlainText(preview.get("preview_text") or "")
+            self.log_diagnostic("Records preview fetch success.", level="INFO")
+        except Exception as ex:
+            self.records_preview_meta.setText(
+                f"Title: {title}\nDocument ID: {doc_id or 'n/a'}\nModified: {modified}\nPreview: unavailable"
+            )
+            self.records_preview_text.setPlainText("")
+            self.log_diagnostic(f"Records preview fetch failure: {ex}", level="ERROR")
 
     def _load_model(self):
         self._qt_set_status("LOADING")
