@@ -1,11 +1,14 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.12.4
-# Build Date: 2026-04-02-r4
+# Version: 1.12.5
+# Build Date: 2026-04-02-r5
 # Summary:
-#   Records tab converted to Drive-first workspace with folder navigation and creation.
+#   Persona acknowledgement polish + right-side collapse compaction pass.
 # Changelog:
+#   - improved GrimVeile persona quality in task/reminder acknowledgements while preserving bounded fast generation
+#   - fixed System Instruments collapsed layout to compact upward without leaving large vertical gaps
+#   - fixed Task Registry collapse behavior so it stacks directly above Calendar without dead space
 #   - fixed task registry datetime normalization bug
 #   - prevented naive/aware datetime comparison crash in task/event refresh logic
 #   - fixed task acknowledgement duplication
@@ -106,7 +109,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QFrame, QCalendarWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QStackedWidget, QTabWidget,
-    QListWidget, QListWidgetItem
+    QListWidget, QListWidgetItem, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QDate, QSize
 from PyQt6.QtGui import (
@@ -115,8 +118,8 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.12.4"
-VERSION_DATE = "2026-04-02-r4"
+APP_VERSION = "1.12.5"
+VERSION_DATE = "2026-04-02-r5"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
 
@@ -867,12 +870,15 @@ class CollapsibleSection(QWidget):
     def __init__(self, title: str, content: QWidget, expanded: bool = True, parent=None):
         super().__init__(parent)
         self.content = content
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self.content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
         self.header_btn = QPushButton()
         self.header_btn.setCheckable(True)
         self.header_btn.setChecked(expanded)
+        self.header_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.header_btn.setStyleSheet(f"background: {C_BG3}; color: {C_GOLD}; border: 1px solid {C_CYAN_DIM}; font-size: 10px; font-weight: bold; padding: 4px 8px; text-align: left;")
         self.header_btn.clicked.connect(self._toggle)
         layout.addWidget(self.header_btn)
@@ -882,8 +888,16 @@ class CollapsibleSection(QWidget):
 
     def _toggle(self, checked: bool):
         self.content.setVisible(checked)
+        self.content.setMaximumHeight(16777215 if checked else 0)
         glyph = '▼' if checked else '▶'
         self.header_btn.setText(f"{glyph} {self.title}")
+        self.updateGeometry()
+        parent = self.parentWidget()
+        if parent and parent.layout():
+            parent.layout().activate()
+        window = self.window()
+        if window and window.layout():
+            window.layout().activate()
 
 
 class MemoryManager:
@@ -2845,6 +2859,7 @@ class GrimveilDeck(QMainWindow):
         instruments_layout = QVBoxLayout(instruments_tab)
         instruments_layout.setContentsMargins(0, 0, 0, 0)
         instruments_layout.setSpacing(4)
+        instruments_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         status_frame = QFrame()
         status_frame.setStyleSheet(f"background: {C_PANEL}; border: 1px solid {C_BORDER}; border-radius: 2px;")
@@ -3014,7 +3029,7 @@ class GrimveilDeck(QMainWindow):
         self.instruments_tabs.addTab(instruments_tab, "System Instruments")
         self.instruments_tabs.addTab(records_tab, "Records")
         self.instruments_tabs.currentChanged.connect(self._on_instruments_tab_changed)
-        right_panel.addWidget(self.instruments_tabs)
+        right_panel.addWidget(self.instruments_tabs, 1)
 
         task_content = QWidget()
         task_layout = QVBoxLayout(task_content)
@@ -3082,8 +3097,6 @@ class GrimveilDeck(QMainWindow):
         task_layout.addLayout(task_actions)
         self.task_section = CollapsibleSection("TASK REGISTRY", task_content, expanded=True)
         right_panel.addWidget(self.task_section)
-
-        right_panel.addStretch()
 
         cal_label = QLabel("❧ CALENDAR")
         cal_label.setStyleSheet(f"color: {C_GOLD}; font-size: 10px; letter-spacing: 2px; font-family: Georgia, serif;")
@@ -4353,12 +4366,29 @@ class GrimveilDeck(QMainWindow):
         include_keys = ["task_text", "due", "status", "google_sync_status", "google_sync_success"]
         compact = {k: facts.get(k) for k in include_keys if facts.get(k) not in (None, "", [])}
         mode = self._get_narrative_mode()
+        action_map = {
+            "task_created_final": "added",
+            "task_completed": "completed",
+            "task_cancelled": "canceled",
+            "task_acknowledged": "acknowledged",
+            "task_parse_failed": "failed",
+            "task_complete_not_found": "failed",
+            "task_google_terminal_sync_deleted": "synced",
+            "task_google_cancel_sync_failed": "sync_failed",
+            "task_google_terminal_sync_failed": "sync_failed",
+        }
         compact["anchor_mode"] = mode
         compact["anchor_hint"] = {
             "connected": "stable/confident",
             "nearby": "uneasy/guarded",
             "absent": "unstable/paranoid",
         }.get(mode, "stable/confident")
+        compact["tone_anchor"] = {
+            "connected": "controlled superiority",
+            "nearby": "guarded restraint",
+            "absent": "frayed suspicion",
+        }.get(mode, "controlled superiority")
+        compact["action"] = action_map.get(event_name, "updated")
         if event_name in {"task_completed", "task_cancelled"} and facts.get("task_text"):
             compact["task_text"] = facts.get("task_text")
         if event_name in {"task_parse_failed", "task_complete_not_found"}:
@@ -4375,10 +4405,13 @@ class GrimveilDeck(QMainWindow):
         payload = json.dumps(compact_facts, ensure_ascii=False)
         prompt = (
             "<|im_start|>system\n"
-            "You are GrimVeile. Voice is dark, precise, and in-character; never generic assistant phrasing.\n"
-            "Use E-42 anchor context lightly: connected=stable/confident, nearby=guarded/uneasy, absent=paranoid/unstable.\n"
-            "Return one polished complete acknowledgement line (usually 1 short sentence; 2 only if needed).\n"
-            "Stay concise and factual to payload (task title, due time, sync result if present). No IDs, no JSON, no metadata, no role labels.\n"
+            "You are GrimVeile acknowledging a task/reminder action.\n"
+            "Write one authored acknowledgement line (usually 1 sentence; use 2 short sentences only when necessary).\n"
+            "Stay concise, readable, and in-character: dry superiority, restrained sarcasm, quiet command tone, mild contempt for disorder.\n"
+            "Never sound like a generic assistant or status console. Avoid clipped fragments unless clearly intentional and still readable.\n"
+            "Use anchor mode lightly: connected=stable/controlled, nearby=guarded/uneasy, absent=frayed/paranoid. Mention E-42 only when it naturally strengthens the line.\n"
+            "Preserve factual correctness from payload: added/canceled/completed/acknowledged/synced/failed as applicable.\n"
+            "No internal IDs, no JSON, no metadata labels, no 'Explanation', no 'Tactical Record'.\n"
             "<|im_end|>\n"
             "<|im_start|>user\n"
             f"{payload}\n"
@@ -4406,7 +4439,7 @@ class GrimveilDeck(QMainWindow):
             self.log_diagnostic("Task final AI acknowledgement failed / timed out.", level="WARN")
         line = self._sanitize_task_commentary_output(generated)
         if not line:
-            line = fallback
+            line = self._task_commentary_fallback_line(event_name, compact_facts, fallback)
             if is_task_final_ack:
                 self._append_chat("SYSTEM", "Task action confirmed.")
         self._append_chat("GRIMVEILE", line)
@@ -4436,6 +4469,7 @@ class GrimveilDeck(QMainWindow):
         generic_prefixes = (
             "task completed",
             "task cancelled",
+            "task canceled",
             "task acknowledged",
             "reminder acknowledged",
             "status:",
@@ -4444,11 +4478,52 @@ class GrimveilDeck(QMainWindow):
         low = cleaned.lower()
         if low in generic_prefixes or any(low.startswith(f"{p}.") for p in generic_prefixes):
             return ""
+        clipped_patterns = (
+            r'^task\s+"[^"]+"\.?$',
+            r'^task\s+(?:canceled|cancelled|completed)\s*:\s*.+$',
+            r'^reminder\s+(?:set|saved|acknowledged)\s*[:.]?.*$',
+        )
+        if any(re.match(p, cleaned, flags=re.IGNORECASE) for p in clipped_patterns):
+            return ""
         if cleaned and cleaned[-1] not in ".!?":
             cleaned = f"{cleaned}."
         if not cleaned or len(cleaned) < 3:
             return ""
         return cleaned
+
+    def _task_commentary_fallback_line(self, event_name: str, facts: dict, fallback: str):
+        facts = facts if isinstance(facts, dict) else {}
+        task_text = (facts.get("task_text") or "that item").strip()
+        due = (facts.get("due") or "").strip()
+        sync_status = (facts.get("google_sync_status") or "").strip().lower()
+        mode = (facts.get("anchor_mode") or self._get_narrative_mode() or "connected").strip().lower()
+        opener = {
+            "connected": "Order restored.",
+            "nearby": "Containment holds.",
+            "absent": "Control is fragile, but intact.",
+        }.get(mode, "Order restored.")
+        if event_name == "task_created_final":
+            due_clause = f" for {due}" if due else ""
+            if sync_status == "synced":
+                return f"{opener} I logged '{task_text}'{due_clause} and synced it to Calendar."
+            if sync_status == "failed":
+                return f"{opener} I logged '{task_text}'{due_clause}; Google sync failed, local reminder stands."
+            return f"{opener} I logged '{task_text}'{due_clause}."
+        if event_name == "task_completed":
+            return f"{opener} '{task_text}' is completed."
+        if event_name == "task_cancelled":
+            return f"{opener} '{task_text}' is canceled."
+        if event_name == "task_acknowledged":
+            return f"{opener} Reminder acknowledged."
+        if event_name == "task_parse_failed":
+            return "Your request lacked a usable schedule; give me a clear time and I will lock it in."
+        if event_name == "task_complete_not_found":
+            return "No matching task survived inspection; specify the exact item and I will finish it."
+        if event_name == "task_purge_completed":
+            removed = facts.get("removed")
+            if isinstance(removed, int):
+                return f"{opener} Completed-task purge executed: {removed} removed."
+        return fallback if (fallback or "").strip() else f"{opener} Task action confirmed."
 
     def _should_distill_memory(self, user_text: str, response: str):
         t = (user_text + "\n" + response).lower()
