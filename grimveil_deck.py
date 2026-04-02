@@ -1,8 +1,8 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.12.3
-# Build Date: 2026-04-02-r3
+# Version: 1.12.4
+# Build Date: 2026-04-02-r4
 # Summary:
 #   Records tab converted to Drive-first workspace with folder navigation and creation.
 # Changelog:
@@ -64,6 +64,8 @@
 #   - added optional user delay commentary support
 #   - fixed slow task final AI acknowledgement path by routing it through bounded generation
 #   - reduced task acknowledgement context size and added diagnostics for acknowledgement token length/timing
+#   - improved task acknowledgement persona quality while preserving fast bounded generation
+#   - task status responses now use GrimVeile-style in-character phrasing
 
 import sys
 import time
@@ -113,8 +115,8 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.12.3"
-VERSION_DATE = "2026-04-02-r3"
+APP_VERSION = "1.12.4"
+VERSION_DATE = "2026-04-02-r4"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
 
@@ -4350,6 +4352,13 @@ class GrimveilDeck(QMainWindow):
         facts = facts if isinstance(facts, dict) else {}
         include_keys = ["task_text", "due", "status", "google_sync_status", "google_sync_success"]
         compact = {k: facts.get(k) for k in include_keys if facts.get(k) not in (None, "", [])}
+        mode = self._get_narrative_mode()
+        compact["anchor_mode"] = mode
+        compact["anchor_hint"] = {
+            "connected": "stable/confident",
+            "nearby": "uneasy/guarded",
+            "absent": "unstable/paranoid",
+        }.get(mode, "stable/confident")
         if event_name in {"task_completed", "task_cancelled"} and facts.get("task_text"):
             compact["task_text"] = facts.get("task_text")
         if event_name in {"task_parse_failed", "task_complete_not_found"}:
@@ -4366,8 +4375,10 @@ class GrimveilDeck(QMainWindow):
         payload = json.dumps(compact_facts, ensure_ascii=False)
         prompt = (
             "<|im_start|>system\n"
-            "Write one concise in-character acknowledgement for a task event.\n"
-            "Rules: one short sentence, no JSON, no metadata, no role labels.\n"
+            "You are GrimVeile. Voice is dark, precise, and in-character; never generic assistant phrasing.\n"
+            "Use E-42 anchor context lightly: connected=stable/confident, nearby=guarded/uneasy, absent=paranoid/unstable.\n"
+            "Return one polished complete acknowledgement line (usually 1 short sentence; 2 only if needed).\n"
+            "Stay concise and factual to payload (task title, due time, sync result if present). No IDs, no JSON, no metadata, no role labels.\n"
             "<|im_end|>\n"
             "<|im_start|>user\n"
             f"{payload}\n"
@@ -4422,6 +4433,19 @@ class GrimveilDeck(QMainWindow):
         for pattern in disallowed_patterns:
             if re.search(pattern, cleaned, flags=re.IGNORECASE):
                 return ""
+        generic_prefixes = (
+            "task completed",
+            "task cancelled",
+            "task acknowledged",
+            "reminder acknowledged",
+            "status:",
+            "assistant:",
+        )
+        low = cleaned.lower()
+        if low in generic_prefixes or any(low.startswith(f"{p}.") for p in generic_prefixes):
+            return ""
+        if cleaned and cleaned[-1] not in ".!?":
+            cleaned = f"{cleaned}."
         if not cleaned or len(cleaned) < 3:
             return ""
         return cleaned
