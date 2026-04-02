@@ -1,11 +1,13 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.12.5
-# Build Date: 2026-04-02-r5
+# Version: 1.12.6
+# Build Date: 2026-04-02-r6
 # Summary:
-#   Persona acknowledgement polish + right-side collapse compaction pass.
+#   Natural reminder parsing expansion + clean parse-failure acknowledgement handoff.
 # Changelog:
+#   - improved natural reminder parsing for common phrasing
+#   - fixed malformed parse-failure acknowledgements leaking raw payload text into Tactical Record
 #   - improved GrimVeile persona quality in task/reminder acknowledgements while preserving bounded fast generation
 #   - fixed System Instruments collapsed layout to compact upward without leaving large vertical gaps
 #   - fixed Task Registry collapse behavior so it stacks directly above Calendar without dead space
@@ -118,8 +120,8 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.12.5"
-VERSION_DATE = "2026-04-02-r5"
+APP_VERSION = "1.12.6"
+VERSION_DATE = "2026-04-02-r6"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
 
@@ -4192,14 +4194,19 @@ class GrimveilDeck(QMainWindow):
                 self._restart_idle_timer()
                 return
             if has_reminder_intent(normalized_text):
+                self.log_diagnostic("Task parse-failure acknowledgement handoff started.", level="INFO")
                 self._emit_ai_task_commentary(
                     event_name="task_parse_failed",
-                    facts={"user_text": normalized_text},
+                    facts={
+                        "parse_reason": "could not confidently determine schedule",
+                        "intent": "reminder_create",
+                    },
                     fallback=(
                         "Reminder request intercepted, but no valid schedule could be parsed. Try formats like "
                         "'remind me at 2pm', 'remind me tomorrow at 2pm', or 'remind me in 10m'."
                     )
                 )
+                self.log_diagnostic("Task parse-failure acknowledgement handoff completed.", level="INFO")
                 self._store_message("user", text)
                 self.history.append({"role": "user", "content": text})
                 self._restart_idle_timer()
@@ -4399,10 +4406,30 @@ class GrimveilDeck(QMainWindow):
         compact["event_name"] = event_name
         return compact
 
+    def _build_task_ack_handoff_payload(self, event_name: str, compact_facts: dict):
+        compact_facts = compact_facts if isinstance(compact_facts, dict) else {}
+        if event_name == "task_parse_failed":
+            lines = [
+                "task action: reminder creation request",
+                "result: failed",
+                "task created: no",
+            ]
+            reason = (compact_facts.get("parse_reason") or "could not confidently determine schedule").strip()
+            if reason:
+                lines.append(f"reason: {reason}")
+            mode = (compact_facts.get("anchor_mode") or "").strip()
+            if mode:
+                lines.append(f"anchor mode: {mode}")
+            delay_minutes = compact_facts.get("user_delay_minutes")
+            if isinstance(delay_minutes, int):
+                lines.append(f"user delay minutes: {delay_minutes}")
+            return "\n".join(lines)
+        return json.dumps(compact_facts, ensure_ascii=False)
+
     def _emit_ai_task_commentary(self, event_name: str, facts: dict, fallback: str):
         facts = facts if isinstance(facts, dict) else {}
         compact_facts = self._task_acknowledgement_facts(event_name, facts)
-        payload = json.dumps(compact_facts, ensure_ascii=False)
+        payload = self._build_task_ack_handoff_payload(event_name, compact_facts)
         prompt = (
             "<|im_start|>system\n"
             "You are GrimVeile acknowledging a task/reminder action.\n"
@@ -4457,6 +4484,8 @@ class GrimveilDeck(QMainWindow):
         disallowed_patterns = [
             r"<\|im_start\|>",
             r"<\|im_end\|>",
+            r"^\s*[\{\[]",
+            r"payload\"\s*:",
             r"\bevent_name\s*=",
             r"\bevent_facts\s*=",
             r"\btask_id\s*[:=]",
@@ -4618,9 +4647,17 @@ class GrimveilDeck(QMainWindow):
 
     def _try_create_task(self, text: str, force_intent: bool = False):
         self.log_diagnostic("Task action started.", level="INFO")
+        self.log_diagnostic(
+            f"Task parse attempt started: \"{self._preview_text(text, max_chars=140)}\"",
+            level="DEBUG"
+        )
         parsed = self._parse_reminder_command(text, force_intent=force_intent)
         if not parsed:
             self.log_diagnostic("Task action aborted: schedule parse failed.", level="WARN")
+            self.log_diagnostic(
+                "Task parse failure reason: could not confidently determine schedule.",
+                level="DEBUG"
+            )
             self.log_diagnostic("Task interaction cycle complete.", level="INFO")
             return None
         task_text, due_dt = parsed
@@ -4631,6 +4668,7 @@ class GrimveilDeck(QMainWindow):
             self.log_diagnostic("Task interaction cycle complete.", level="INFO")
             return None
         self.log_diagnostic("Local task create succeeded.", level="INFO")
+        self.log_diagnostic("Task parse attempt succeeded.", level="INFO")
         google_sync_result = self._push_task_to_google_calendar(task)
         self._refresh_task_registry_panel()
         return {
@@ -4698,14 +4736,58 @@ class GrimveilDeck(QMainWindow):
         if not force_intent and not has_reminder_intent(lower):
             return None
 
-        lead_prefix = r"^\s*(?:please\s+)?(?:remind me|set(?:\s+a)?\s+reminder|add(?:\s+a)?\s+reminder|(?:i\s+)?want(?:\s+a)?\s+reminder)\b"
-        payload = re.sub(lead_prefix, "", t, flags=re.I).strip(" ,.-")
+        normalized = t
+        normalized = re.sub(r"^\s*(?:do\s+me\s+a\s+favor(?:\s+and)?|can\s+you|could\s+you)\s+", "", normalized, flags=re.I)
+        normalized = re.sub(r"^\s*(?:please\s+)+", "", normalized, flags=re.I)
+        normalized = re.sub(r"\s+", " ", normalized).strip(" ,.-")
+
+        lead_noise = r"^\s*(?:please\s+|just\s+|kindly\s+|would\s+you\s+|can\s+you\s+|could\s+you\s+|do\s+me\s+a\s+favor(?:\s+and)?\s+)*"
+        lead_prefix = (
+            lead_noise
+            + r"(?:"
+              r"remind me"
+              r"|set(?:\s+a)?\s+reminder"
+              r"|set a reminder"
+              r"|add(?:\s+a)?\s+reminder"
+              r"|add reminder"
+              r"|(?:i\s+)?want(?:\s+a)?\s+reminder"
+            r")\b"
+        )
+        payload = re.sub(lead_prefix, "", normalized, flags=re.I).strip(" ,.-")
+        if not payload:
+            anywhere_match = re.search(
+                r"\b(remind me|set(?:\s+a)?\s+reminder|add(?:\s+a)?\s+reminder|set reminder|add reminder)\b",
+                normalized,
+                re.I
+            )
+            if anywhere_match:
+                payload = normalized[anywhere_match.end():].strip(" ,.-")
         if not payload:
             return None
 
         def clean_task_text(task_text: str):
             cleaned = (task_text or "").strip().rstrip(".!?")
             return cleaned if cleaned else "Reminder"
+
+        def normalize_task_tail(task_tail: str):
+            tail = (task_tail or "").strip(" ,.-")
+            tail = re.sub(r"^(?:to|that)\s+", "", tail, flags=re.I)
+            return clean_task_text(tail)
+
+        def split_time_and_task(raw_tail: str):
+            tail = (raw_tail or "").strip(" ,.-")
+            if not tail:
+                return "", "Reminder"
+            m = re.match(
+                r"^(?P<time>\d{1,2}(?::\d{2})?\s*(?:am|pm)?)(?:\s*(?:to|,)\s+|\s+)(?P<task>.+)$",
+                tail,
+                flags=re.I,
+            )
+            if m:
+                return m.group("time").strip(), normalize_task_tail(m.group("task"))
+            if re.match(r"^\d{1,2}(?::\d{2})?\s*(?:am|pm)?$", tail, flags=re.I):
+                return tail, "Reminder"
+            return "", normalize_task_tail(tail)
 
         in_only_match = re.search(r"^in\s+(.+)$", payload, re.I)
         if in_only_match:
@@ -4730,7 +4812,7 @@ class GrimveilDeck(QMainWindow):
                 return clean_task_text(task_text), datetime.now() + delta
 
         tomorrow_match = re.search(
-            r"^tomorrow\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s+(.*))?$",
+            r"^(?:for\s+)?tomorrow(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*(?:to|,)?\s*(.*))?$",
             payload,
             re.I,
         )
@@ -4745,10 +4827,10 @@ class GrimveilDeck(QMainWindow):
                     hour += 12
             due_date = datetime.now() + timedelta(days=1)
             due = due_date.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
-            return clean_task_text(tomorrow_match.group(4) or "Reminder"), due
+            return normalize_task_tail(tomorrow_match.group(4) or "Reminder"), due
 
         dt_match = re.search(
-            r"^(?:on\s+|for\s+)?(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s+(.*))?$",
+            r"^(?:on\s+|for\s+)?(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*(?:to|,)?\s*(.*))?$",
             payload,
             re.I,
         )
@@ -4771,9 +4853,13 @@ class GrimveilDeck(QMainWindow):
                     hour = 0
                 if meridiem == "pm":
                     hour += 12
-            return clean_task_text(dt_match.group(5) or "Reminder"), d.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
+            return normalize_task_tail(dt_match.group(5) or "Reminder"), d.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
 
-        at_match = re.search(r"^(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b(?:\s+(.*))?$", payload, re.I)
+        at_match = re.search(
+            r"^(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b(?:\s*(?:to|,)?\s*(.*))?$",
+            payload,
+            re.I
+        )
         if at_match:
             hour = int(at_match.group(1))
             minute = int(at_match.group(2) or 0)
@@ -4786,7 +4872,42 @@ class GrimveilDeck(QMainWindow):
             due = now.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
             if due <= now:
                 due += timedelta(days=1)
-            return clean_task_text(at_match.group(4) or "Reminder"), due
+            return normalize_task_tail(at_match.group(4) or "Reminder"), due
+
+        no_meridiem_match = re.search(
+            r"^(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))\b(?:\s*(?:to|,)?\s*(.*))?$",
+            payload,
+            re.I
+        )
+        if no_meridiem_match:
+            hour = int(no_meridiem_match.group(1))
+            minute = int(no_meridiem_match.group(2) or 0)
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                now = datetime.now()
+                due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if due <= now:
+                    due += timedelta(days=1)
+                return normalize_task_tail(no_meridiem_match.group(3) or "Reminder"), due
+
+        for_time_tail, for_task_tail = split_time_and_task(payload)
+        if for_time_tail:
+            compact_time_match = re.match(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$", for_time_tail, flags=re.I)
+            if compact_time_match:
+                hour = int(compact_time_match.group(1))
+                minute = int(compact_time_match.group(2) or 0)
+                meridiem = (compact_time_match.group(3) or "").lower()
+                if meridiem:
+                    if hour == 12:
+                        hour = 0
+                    if meridiem == "pm":
+                        hour += 12
+                elif hour > 23:
+                    return None
+                now = datetime.now()
+                due = now.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
+                if due <= now:
+                    due += timedelta(days=1)
+                return for_task_tail, due
 
         fallback_match = re.search(r"^(.+?)\s+to\s+(.+)$", payload, re.I)
         if fallback_match:
