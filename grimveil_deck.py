@@ -1,11 +1,13 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.12.1
-# Build Date: 2026-04-02-r1
+# Version: 1.12.2
+# Build Date: 2026-04-02-r2
 # Summary:
 #   Records tab converted to Drive-first workspace with folder navigation and creation.
 # Changelog:
+#   - fixed task registry datetime normalization bug
+#   - prevented naive/aware datetime comparison crash in task/event refresh logic
 #   - fixed task acknowledgement duplication
 #   - task actions now emit one final visible AI response instead of multiple layered outputs
 #   - moved raw task/sync internals out of Tactical Record and into Diagnostics
@@ -71,7 +73,7 @@ import uuid
 import html
 import random
 import webbrowser
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 import urllib.request
 from pathlib import Path
 import math
@@ -109,8 +111,8 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.12.1"
-VERSION_DATE = "2026-04-02-r1"
+APP_VERSION = "1.12.2"
+VERSION_DATE = "2026-04-02-r2"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
 
@@ -393,10 +395,54 @@ def parse_iso(value):
     value = value.strip()
     try:
         if value.endswith("Z"):
-            return datetime.fromisoformat(value[:-1])
+            return datetime.fromisoformat(value[:-1]).replace(tzinfo=timezone.utc)
         return datetime.fromisoformat(value)
     except Exception:
         return None
+
+
+_DATETIME_NORMALIZATION_LOGGED = set()
+
+
+def _local_tzinfo():
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
+def now_for_compare():
+    return datetime.now(_local_tzinfo())
+
+
+def normalize_datetime_for_compare(dt_value, context: str = ""):
+    if dt_value is None:
+        return None
+    if not isinstance(dt_value, datetime):
+        return None
+    local_tz = _local_tzinfo()
+    if dt_value.tzinfo is None:
+        normalized = dt_value.replace(tzinfo=local_tz)
+        key = ("naive", context)
+        if key not in _DATETIME_NORMALIZATION_LOGGED:
+            print(f"[DATETIME][INFO] Normalized naive datetime to local timezone for {context or 'general'} comparisons.")
+            _DATETIME_NORMALIZATION_LOGGED.add(key)
+        return normalized
+    normalized = dt_value.astimezone(local_tz)
+    dt_tz_name = str(dt_value.tzinfo)
+    key = ("aware", context, dt_tz_name)
+    if key not in _DATETIME_NORMALIZATION_LOGGED and dt_tz_name not in {"UTC", str(local_tz)}:
+        print(f"[DATETIME][INFO] Normalized timezone-aware datetime from {dt_tz_name} to local timezone for {context or 'general'} comparisons.")
+        _DATETIME_NORMALIZATION_LOGGED.add(key)
+    return normalized
+
+
+def parse_iso_for_compare(value, context: str = ""):
+    return normalize_datetime_for_compare(parse_iso(value), context=context)
+
+
+def _task_due_sort_key(task: dict):
+    due = parse_iso_for_compare((task or {}).get("due_at") or (task or {}).get("due"), context="task_sort")
+    if due is None:
+        return (1, datetime.max.replace(tzinfo=timezone.utc))
+    return (0, due.astimezone(timezone.utc))
 
 
 def ensure_parent(path: Path):
@@ -1021,7 +1067,7 @@ class MemoryManager:
             task.setdefault('last_synced_at', None)
             due_raw = task.get('due_at') or task.get('due')
             if due_raw and not task.get('pre_trigger'):
-                due = parse_iso(due_raw)
+                due = parse_iso_for_compare(due_raw, context="load_tasks_pre_trigger")
                 if due:
                     task['pre_trigger'] = (due - timedelta(minutes=1)).isoformat(timespec='seconds')
                     changed = True
@@ -1110,16 +1156,16 @@ class MemoryManager:
         return removed
 
     def get_due_events(self):
-        now = datetime.now()
+        now = now_for_compare()
         tasks = self.load_tasks()
         events = []
         changed = False
         for task in tasks:
             status = task.get("status", "pending")
-            due = parse_iso(task.get("due_at") or task.get("due"))
-            pre = parse_iso(task.get("pre_trigger"))
-            last_triggered = parse_iso(task.get("last_triggered_at"))
-            next_retry = parse_iso(task.get("next_retry_at"))
+            due = parse_iso_for_compare(task.get("due_at") or task.get("due"), context="task_due_events_due")
+            pre = parse_iso_for_compare(task.get("pre_trigger"), context="task_due_events_pre")
+            last_triggered = parse_iso_for_compare(task.get("last_triggered_at"), context="task_due_events_last_triggered")
+            next_retry = parse_iso_for_compare(task.get("next_retry_at"), context="task_due_events_next_retry")
 
             if task.get("acknowledged_at"):
                 continue
@@ -1138,7 +1184,7 @@ class MemoryManager:
                 continue
 
             if status == "triggered":
-                deadline = parse_iso(task.get("alert_deadline"))
+                deadline = parse_iso_for_compare(task.get("alert_deadline"), context="task_due_events_alert_deadline")
                 if deadline and now >= deadline:
                     task["status"] = "snoozed"
                     task["next_retry_at"] = (now + timedelta(minutes=12)).isoformat(timespec="seconds")
@@ -1572,7 +1618,7 @@ class GoogleCalendarService:
         return DEFAULT_GOOGLE_IANA_TIMEZONE
 
     def create_event_for_task(self, task: dict):
-        due_at = parse_iso(task.get("due_at") or task.get("due"))
+        due_at = parse_iso_for_compare(task.get("due_at") or task.get("due"), context="google_create_event_due")
         if not due_at:
             raise ValueError("Task due time is missing or invalid.")
 
@@ -1580,7 +1626,7 @@ class GoogleCalendarService:
         if self._service is None:
             link_established = self._build_service()
 
-        due_local = due_at.astimezone() if due_at.tzinfo else due_at
+        due_local = normalize_datetime_for_compare(due_at, context="google_create_event_due_local")
         start_dt = due_local.replace(microsecond=0, tzinfo=None)
         end_dt = start_dt + timedelta(minutes=30)
         tz_name = self._get_google_event_timezone()
@@ -2348,7 +2394,7 @@ class GrimveilDeck(QMainWindow):
         return cleaned
 
     def _normalize_autonomous_thread_state(self):
-        now = datetime.now()
+        now = now_for_compare()
         current_mode = self._get_narrative_mode()
         prior_mode = self.narrative.get("mode", current_mode)
         prior_summary = (self.narrative.get("thread_summary", "") or "").strip()
@@ -2357,7 +2403,7 @@ class GrimveilDeck(QMainWindow):
         self.narrative["mode"] = current_mode
         turns = int(self.narrative.get("unsolicited_turn_count", 0) or 0)
         silences = int(self.narrative.get("silence_intervals", 0) or 0)
-        start = parse_iso(self.narrative.get("thread_start_ts")) or now
+        start = parse_iso_for_compare(self.narrative.get("thread_start_ts"), context="narrative_thread_start") or now
         elapsed_min = max(0, int((now - start).total_seconds() // 60))
         escalation_before = int(self.narrative.get("escalation_level", 0) or 0)
 
@@ -2452,8 +2498,8 @@ class GrimveilDeck(QMainWindow):
             return
         self.log_diagnostic("Unsolicited transmission trigger fired.", level="INFO")
         self.narrative["silence_intervals"] = int(self.narrative.get("silence_intervals", 0)) + 1
-        last_update = parse_iso(self.narrative.get("last_thread_update_ts"))
-        if last_update and (datetime.now() - last_update) > timedelta(hours=8):
+        last_update = parse_iso_for_compare(self.narrative.get("last_thread_update_ts"), context="narrative_last_thread_update")
+        if last_update and (now_for_compare() - last_update) > timedelta(hours=8):
             self._seed_narrative_thread(self._get_narrative_mode())
         norm = self._normalize_autonomous_thread_state()
         current_mode = norm["mode"]
@@ -3437,7 +3483,7 @@ class GrimveilDeck(QMainWindow):
         self.memory.save_state(self.state)
 
     def _emit_wake_mode(self):
-        last_shutdown = parse_iso(self.state.get("last_shutdown"))
+        last_shutdown = parse_iso_for_compare(self.state.get("last_shutdown"), context="startup_last_shutdown")
         pending = [t for t in self.memory.load_tasks() if not t.get("acknowledged_at") and t.get("status") not in {"completed", "cancelled"}]
         self.log_memory_trace("Startup continuity check initiated.", phase="BOOT")
 
@@ -3448,7 +3494,7 @@ class GrimveilDeck(QMainWindow):
             return
 
         if last_shutdown:
-            downtime = datetime.now() - last_shutdown
+            downtime = now_for_compare() - last_shutdown
             duration = format_duration(downtime.total_seconds())
             if downtime.total_seconds() < 3600:
                 line = f"GRIMVEILE-42 restored after {duration} offline. Entropy attempted unsupervised operation. Predictable degradation suspected. 😑"
@@ -3675,7 +3721,7 @@ class GrimveilDeck(QMainWindow):
                 active_tasks.append(task)
 
         visible_tasks = active_tasks + completed_tasks if self.task_show_completed else active_tasks
-        visible_tasks = sorted(visible_tasks, key=lambda x: x.get('due_at', x.get('due', '')))
+        visible_tasks = sorted(visible_tasks, key=_task_due_sort_key)
         self.task_row_ids = [task.get("id", "") for task in visible_tasks]
 
         self.task_table.setRowCount(0)
@@ -3692,10 +3738,10 @@ class GrimveilDeck(QMainWindow):
             self._on_task_selection_changed()
             return
 
-        now = datetime.now()
+        now = now_for_compare()
         self.task_table.setRowCount(len(visible_tasks))
         for row, task in enumerate(visible_tasks):
-            due = parse_iso(task.get('due_at') or task.get('due'))
+            due = parse_iso_for_compare(task.get('due_at') or task.get('due'), context="task_registry_panel_due")
             status = (task.get('status', 'pending') or "pending").lower()
             is_completed = status == "completed" or bool(task.get("acknowledged_at"))
             if due:
@@ -3947,8 +3993,8 @@ class GrimveilDeck(QMainWindow):
                 )
             else:
                 lines = ["Task registry:"]
-                for idx, task in enumerate(sorted(active, key=lambda x: x.get('due_at', x.get('due',''))), start=1):
-                    due = parse_iso(task.get('due_at') or task.get('due'))
+                for idx, task in enumerate(sorted(active, key=_task_due_sort_key), start=1):
+                    due = parse_iso_for_compare(task.get('due_at') or task.get('due'), context="task_list_due")
                     due_str = due.strftime('%m/%d/%Y %I:%M %p') if due else task.get('due_at', task.get('due','unknown'))
                     lines.append(f"{idx}. {due_str} — {task.get('text','')} [{task.get('status','pending')}]")
                 self._append_chat("SYSTEM", "\n".join(lines))
@@ -4022,8 +4068,8 @@ class GrimveilDeck(QMainWindow):
             self.log_diagnostic(f"User prompt submitted ({len(text)} chars).", level="INFO")
             self.last_user_activity_ts = time.time()
             self.narrative["silence_intervals"] = 0
-            now_dt = datetime.now()
-            previous_user_ts = parse_iso(self.narrative.get("last_user_message_timestamp"))
+            now_dt = now_for_compare()
+            previous_user_ts = parse_iso_for_compare(self.narrative.get("last_user_message_timestamp"), context="last_user_message_timestamp")
             was_idle_thread_active = bool(self.narrative.get("idle_thread_active"))
             self.narrative["idle_thread_was_active_before_user_return"] = was_idle_thread_active
             self.narrative["user_interrupted_idle_thread"] = True
@@ -4601,12 +4647,12 @@ class GrimveilDeck(QMainWindow):
         start = (event or {}).get("start") or {}
         date_time = start.get("dateTime")
         if date_time:
-            parsed = parse_iso(date_time)
+            parsed = parse_iso_for_compare(date_time, context="google_event_dateTime")
             if parsed:
                 return parsed
         date_only = start.get("date")
         if date_only:
-            parsed = parse_iso(f"{date_only}T09:00:00")
+            parsed = parse_iso_for_compare(f"{date_only}T09:00:00", context="google_event_date")
             if parsed:
                 return parsed
         return None
@@ -4675,11 +4721,12 @@ class GrimveilDeck(QMainWindow):
                 remote_due = self._google_event_due_datetime(remote_event)
                 remote_due_iso = remote_due.isoformat(timespec="seconds") if remote_due else None
                 current_due = task.get("due_at") or task.get("due")
+                current_due_dt = parse_iso_for_compare(current_due, context="google_inbound_current_due")
                 task_changed = False
                 if (task.get("text") or "").strip() != remote_summary:
                     task["text"] = remote_summary
                     task_changed = True
-                if remote_due_iso and current_due != remote_due_iso:
+                if remote_due_iso and (current_due_dt is None or current_due_dt != remote_due):
                     task["due_at"] = remote_due_iso
                     task["pre_trigger"] = (remote_due - timedelta(minutes=1)).isoformat(timespec="seconds")
                     task_changed = True
