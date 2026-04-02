@@ -1,8 +1,8 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.12.2
-# Build Date: 2026-04-02-r2
+# Version: 1.12.3
+# Build Date: 2026-04-02-r3
 # Summary:
 #   Records tab converted to Drive-first workspace with folder navigation and creation.
 # Changelog:
@@ -62,6 +62,8 @@
 #   - moved visible autonomous/task commentary to AI-authored handoff flow
 #   - added starter/continuation idle prompt model with reset-on-user-input behavior
 #   - added optional user delay commentary support
+#   - fixed slow task final AI acknowledgement path by routing it through bounded generation
+#   - reduced task acknowledgement context size and added diagnostics for acknowledgement token length/timing
 
 import sys
 import time
@@ -111,8 +113,8 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.12.2"
-VERSION_DATE = "2026-04-02-r2"
+APP_VERSION = "1.12.3"
+VERSION_DATE = "2026-04-02-r3"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
 
@@ -4157,7 +4159,6 @@ class GrimveilDeck(QMainWindow):
                     status_line = "Local reminder saved and Google Calendar synced."
                 else:
                     status_line = "Local reminder saved."
-                self.log_diagnostic("Task final AI acknowledgement handoff started.", level="INFO")
                 self._emit_ai_task_commentary(
                     event_name="task_created_final",
                     facts={
@@ -4170,7 +4171,6 @@ class GrimveilDeck(QMainWindow):
                     },
                     fallback=f"Reminder set for {due_str}. {status_line}"
                 )
-                self.log_diagnostic("Task final AI acknowledgement handoff completed.", level="INFO")
                 self.log_diagnostic("Task interaction cycle complete.", level="INFO")
                 self._store_message("user", text)
                 self.history.append({"role": "user", "content": text})
@@ -4302,52 +4302,105 @@ class GrimveilDeck(QMainWindow):
         prompt += f"<|im_start|>user\n{current_text}<|im_end|>\n<|im_start|>assistant\n"
         return prompt
 
-    def _generate_ai_text(self, prompt: str, max_new_tokens: int = 120, temperature: float = 0.7):
+    def _generate_ai_text(
+        self,
+        prompt: str,
+        max_new_tokens: int = 120,
+        temperature: float = 0.7,
+        max_input_length: int = 1024,
+        diagnostics_prefix: str = "Inline AI text generation",
+    ):
         if not TORCH_OK or not self.model_loaded or self.model is None or self.tokenizer is None:
             return ""
         try:
-            enc = self.tokenizer(prompt, return_tensors='pt', padding=True, truncation=True)
+            bounded_input_len = max(64, int(max_input_length))
+            enc = self.tokenizer(
+                prompt,
+                return_tensors='pt',
+                padding=True,
+                truncation=True,
+                max_length=bounded_input_len,
+            )
             input_ids = enc["input_ids"].to("cuda")
             attention_mask = enc["attention_mask"].to("cuda")
+            tokenized_input_len = int(input_ids.shape[-1])
+            effective_max_length = tokenized_input_len + max(1, int(max_new_tokens))
+            self.log_diagnostic(f"{diagnostics_prefix} tokenized input length: {tokenized_input_len}", level="DEBUG")
+            self.log_diagnostic(f"{diagnostics_prefix} max_length: {effective_max_length}", level="DEBUG")
             with torch.no_grad():
                 output = self.model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
+                    max_length=effective_max_length,
                     max_new_tokens=max_new_tokens,
                     temperature=temperature,
                     do_sample=True,
                     top_p=0.9,
                     repetition_penalty=1.04,
+                    max_time=5.0,
                     pad_token_id=self.tokenizer.pad_token_id
                 )
             raw = self.tokenizer.decode(output[0][input_ids.shape[-1]:], skip_special_tokens=True)
             return re.sub(r"\s+", " ", (raw or "").strip()).strip()
         except Exception as ex:
-            self.log_diagnostic(f"Inline AI text generation failed: {ex}", level="WARN")
+            self.log_diagnostic(f"{diagnostics_prefix} failed: {ex}", level="WARN")
             return ""
+
+    def _task_acknowledgement_facts(self, event_name: str, facts: dict):
+        facts = facts if isinstance(facts, dict) else {}
+        include_keys = ["task_text", "due", "status", "google_sync_status", "google_sync_success"]
+        compact = {k: facts.get(k) for k in include_keys if facts.get(k) not in (None, "", [])}
+        if event_name in {"task_completed", "task_cancelled"} and facts.get("task_text"):
+            compact["task_text"] = facts.get("task_text")
+        if event_name in {"task_parse_failed", "task_complete_not_found"}:
+            compact["status"] = "failed"
+        delay_minutes = self._pending_user_delay_commentary_minutes
+        if self.user_delay_commentary_enabled and delay_minutes is not None:
+            compact["user_delay_minutes"] = int(delay_minutes)
+        compact["event_name"] = event_name
+        return compact
 
     def _emit_ai_task_commentary(self, event_name: str, facts: dict, fallback: str):
         facts = facts if isinstance(facts, dict) else {}
-        payload = json.dumps(facts, ensure_ascii=False)
+        compact_facts = self._task_acknowledgement_facts(event_name, facts)
+        payload = json.dumps(compact_facts, ensure_ascii=False)
         prompt = (
             "<|im_start|>system\n"
-            f"{self.system_prompt}\n"
-            "Write one short Tactical Record line acknowledging a task/reminder event in character.\n"
-            "Rules: one or two sentences, no debug metadata, no JSON, no role labels.\n"
-            "You must clearly reflect the event outcome while staying concise.\n"
+            "Write one concise in-character acknowledgement for a task event.\n"
+            "Rules: one short sentence, no JSON, no metadata, no role labels.\n"
             "<|im_end|>\n"
             "<|im_start|>user\n"
-            f"event_name={event_name}\n"
-            f"event_facts={payload}\n"
-            "Output only the final Tactical Record line.\n"
+            f"{payload}\n"
             "<|im_end|>\n"
             "<|im_start|>assistant\n"
         )
-        generated = self._generate_ai_text(prompt, max_new_tokens=90, temperature=0.65)
+        is_task_final_ack = event_name in {
+            "task_created_final",
+            "task_parse_failed",
+            "task_completed",
+            "task_cancelled",
+            "task_complete_not_found",
+        }
+        if is_task_final_ack:
+            self.log_diagnostic("Task final AI acknowledgement handoff started.", level="INFO")
+            self.log_diagnostic(f"Task final AI acknowledgement prompt character length: {len(prompt)}", level="DEBUG")
+        generated = self._generate_ai_text(
+            prompt,
+            max_new_tokens=48,
+            temperature=0.55,
+            max_input_length=256,
+            diagnostics_prefix="Task final AI acknowledgement",
+        )
+        if is_task_final_ack and not generated:
+            self.log_diagnostic("Task final AI acknowledgement failed / timed out.", level="WARN")
         line = self._sanitize_task_commentary_output(generated)
         if not line:
             line = fallback
+            if is_task_final_ack:
+                self._append_chat("SYSTEM", "Task action confirmed.")
         self._append_chat("GRIMVEILE", line)
+        if is_task_final_ack:
+            self.log_diagnostic("Task final AI acknowledgement completed.", level="INFO")
 
     def _sanitize_task_commentary_output(self, text: str):
         raw = (text or "").strip()
