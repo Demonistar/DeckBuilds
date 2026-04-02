@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import stat
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -220,6 +219,21 @@ def safe_slug(value: str) -> str:
     return cleaned.strip("-") or "deck"
 
 
+def safe_name_token(value: str) -> str:
+    token = "".join(ch if ch.isalnum() else "_" for ch in value.strip())
+    while "__" in token:
+        token = token.replace("__", "_")
+    token = token.strip("_")
+    return token or "Deck"
+
+
+def default_backup_root(deck_name: str) -> Path:
+    deck_token = safe_name_token(deck_name)
+    if os.name == "nt":
+        return Path(r"C:\AI\Backups") / deck_token
+    return (Path.home() / "AI" / "Backups" / deck_token).resolve()
+
+
 # ---------------------------------------------------------------------------
 # Paths + configuration
 # ---------------------------------------------------------------------------
@@ -231,29 +245,31 @@ class DeckPaths:
     runtime: Path
     config: Path
     integrations: Path
+    integrations_dir: Path
     memory: Path
     projects: Path
-    artifacts: Path
+    assets: Path
     backups: Path
     logs: Path
 
     @classmethod
-    def from_root(cls, root: Path) -> "DeckPaths":
+    def from_root(cls, root: Path, backups: Optional[Path] = None) -> "DeckPaths":
         runtime = root / "runtime"
         return cls(
             root=root,
             runtime=runtime,
             config=root / "deck_config.json",
             integrations=root / "integration_registry.json",
+            integrations_dir=root / "integrations",
             memory=root / "memory",
             projects=root / "projects",
-            artifacts=root / "artifacts",
-            backups=root / "backups",
+            assets=root / "assets",
+            backups=backups or (root / "backups"),
             logs=root / "logs",
         )
 
 
-def default_deck_config(deck_name: str, deck_slug: str, root: Path) -> Dict[str, Any]:
+def default_deck_config(deck_name: str, deck_slug: str, root: Path, backup_root: Path) -> Dict[str, Any]:
     return {
         "deck": {
             "name": deck_name,
@@ -320,7 +336,7 @@ def default_deck_config(deck_name: str, deck_slug: str, root: Path) -> Dict[str,
             "optional_tabs": ["Projects", "Calendar", "Drive", "Work Library", "Insights"],
         },
         "runtime": {
-            "mode": "deck_runtime",
+            "mode": "runtime",
             "auto_backup": False,
             "backup_retention": BACKUP_RETENTION_DEFAULT,
             "idle_reflection_seconds": 600,
@@ -331,8 +347,8 @@ def default_deck_config(deck_name: str, deck_slug: str, root: Path) -> Dict[str,
             "root": str(root.resolve()),
             "memory": str((root / "memory").resolve()),
             "projects": str((root / "projects").resolve()),
-            "artifacts": str((root / "artifacts").resolve()),
-            "backups": str((root / "backups").resolve()),
+            "assets": str((root / "assets").resolve()),
+            "backups": str(backup_root),
             "logs": str((root / "logs").resolve()),
             "runtime": str((root / "runtime").resolve()),
         },
@@ -476,7 +492,7 @@ class ProjectStore:
         if truth_mode not in TRUTH_MODES:
             raise ValueError(f"invalid truth mode: {truth_mode}")
 
-        project_artifact_dir = ensure_dir(self.paths.artifacts / project_id)
+        project_artifact_dir = ensure_dir(self.paths.assets / project_id)
         artifact_id = str(uuid.uuid4())
         dest = project_artifact_dir / f"{artifact_id}{ext}"
         shutil.copy2(src_file, dest)
@@ -602,11 +618,14 @@ class PersonaLayer:
 
 class SystemLayer:
     def __init__(self, paths: DeckPaths):
-        self.paths = paths
         self.config = read_json(paths.config, {})
-        self.integration_registry = read_json(paths.integrations, default_integration_registry())
-        self.lanes = MemoryLaneStore(paths)
-        self.projects = ProjectStore(self.lanes, paths)
+        config_paths = self.config.get("paths", {})
+        backup_path_cfg = config_paths.get("backups")
+        backups_root = Path(backup_path_cfg).expanduser() if backup_path_cfg else paths.backups
+        self.paths = DeckPaths.from_root(paths.root, backups=backups_root)
+        self.integration_registry = read_json(self.paths.integrations, default_integration_registry())
+        self.lanes = MemoryLaneStore(self.paths)
+        self.projects = ProjectStore(self.lanes, self.paths)
         self.scheduler = SchedulerShell()
         self.scheduler.register_job("idle_contemplation", self.config.get("runtime", {}).get("idle_reflection_seconds", 600))
         self.scheduler.register_job("daily_review", 24 * 3600)
@@ -703,8 +722,6 @@ class SystemLayer:
         ensure_dir(target)
 
         for item in self.paths.root.iterdir():
-            if item.name == "backups":
-                continue
             dest = target / item.name
             if item.is_dir():
                 shutil.copytree(item, dest, dirs_exist_ok=True)
@@ -757,8 +774,9 @@ class SystemLayer:
 
 
 def initialize_deck_files(paths: DeckPaths, cfg: Dict[str, Any]) -> None:
-    for p in [paths.root, paths.runtime, paths.memory, paths.projects, paths.artifacts, paths.backups, paths.logs]:
+    for p in [paths.root, paths.runtime, paths.memory, paths.projects, paths.assets, paths.logs, paths.integrations_dir]:
         ensure_dir(p)
+    ensure_dir(paths.backups)
 
     write_json(paths.config, cfg)
     write_json(paths.integrations, default_integration_registry())
@@ -774,11 +792,48 @@ def initialize_deck_files(paths: DeckPaths, cfg: Dict[str, Any]) -> None:
             write_json(store_path, {})
 
 
-def create_launcher(deck_root: Path) -> Path:
-    launcher = deck_root / "launch_deck.sh"
-    content = "#!/usr/bin/env bash\nset -euo pipefail\ncd \"$(dirname \"$0\")\"\npython3 runtime/uni_deck.py --runtime\n"
+def deck_launcher_basename(deck_name: str) -> str:
+    return f"{safe_name_token(deck_name)}_deck"
+
+
+def create_runtime_python_launcher(deck_root: Path, deck_name: str) -> Path:
+    launcher = deck_root / f"{deck_launcher_basename(deck_name)}.py"
+    content = """#!/usr/bin/env python3
+from pathlib import Path
+import json
+import runpy
+import sys
+
+ROOT = Path(__file__).resolve().parent
+RUNTIME_ENTRY = ROOT / "runtime" / "uni_deck.py"
+if not RUNTIME_ENTRY.exists():
+    raise SystemExit(f"Missing runtime entrypoint: {RUNTIME_ENTRY}")
+
+config_path = ROOT / "deck_config.json"
+try:
+    cfg = json.loads(config_path.read_text(encoding="utf-8"))
+except Exception as exc:
+    raise SystemExit(f"Invalid or missing deck_config.json: {exc}")
+
+if cfg.get("runtime", {}).get("mode") != "runtime":
+    raise SystemExit("Deck is not initialized for runtime mode.")
+
+sys.argv = [str(RUNTIME_ENTRY), "--runtime", "--deck-root", str(ROOT)] + sys.argv[1:]
+runpy.run_path(str(RUNTIME_ENTRY), run_name="__main__")
+"""
     launcher.write_text(content, encoding="utf-8")
-    launcher.chmod(launcher.stat().st_mode | stat.S_IEXEC)
+    return launcher
+
+
+def create_windows_launcher(deck_root: Path, deck_name: str) -> Path:
+    launcher_name = f"{deck_launcher_basename(deck_name)}.py"
+    launcher = deck_root / f"{deck_launcher_basename(deck_name)}.cmd"
+    content = f"""@echo off
+setlocal
+cd /d "%~dp0"
+python "{launcher_name}" %*
+"""
+    launcher.write_text(content, encoding="utf-8")
     return launcher
 
 
@@ -788,8 +843,9 @@ def create_deck_instance(seed_file: Path, output_dir: Path, deck_name: str, mode
     if deck_root.exists():
         raise FileExistsError(f"Deck directory already exists: {deck_root}")
 
-    paths = DeckPaths.from_root(deck_root)
-    cfg = default_deck_config(deck_name=deck_name, deck_slug=deck_slug, root=deck_root)
+    backup_root = default_backup_root(deck_name)
+    paths = DeckPaths.from_root(deck_root, backups=backup_root)
+    cfg = default_deck_config(deck_name=deck_name, deck_slug=deck_slug, root=deck_root, backup_root=backup_root)
     cfg["model"]["backend"] = model_backend
     cfg["model"]["model_id"] = model_id
 
@@ -798,7 +854,8 @@ def create_deck_instance(seed_file: Path, output_dir: Path, deck_name: str, mode
     runtime_file = paths.runtime / "uni_deck.py"
     shutil.copy2(seed_file, runtime_file)
 
-    create_launcher(deck_root)
+    create_runtime_python_launcher(deck_root, deck_name)
+    create_windows_launcher(deck_root, deck_name)
     return deck_root
 
 
@@ -1107,6 +1164,22 @@ def run_runtime(deck_root: Path) -> int:
     return app.exec()
 
 
+def resolve_runtime_root(this_file: Path, argv: Sequence[str]) -> Optional[Path]:
+    if "--deck-root" in argv:
+        idx = argv.index("--deck-root")
+        if idx + 1 < len(argv):
+            return Path(argv[idx + 1]).expanduser().resolve()
+    if this_file.parent.name == "runtime":
+        return this_file.parent.parent.resolve()
+    return None
+
+
+def has_valid_runtime_config(deck_root: Path) -> bool:
+    cfg = read_json(deck_root / "deck_config.json", {})
+    runtime_mode = cfg.get("runtime", {}).get("mode")
+    return bool(cfg.get("deck")) and runtime_mode == "runtime"
+
+
 def run_builder(seed_file: Path) -> int:
     try:
         deck_name, output_parent, model_backend, model_id = prompt_builder_inputs()
@@ -1119,7 +1192,8 @@ def run_builder(seed_file: Path) -> int:
             model_id=model_id,
         )
         print(f"\nDeck created at: {deck_root}")
-        print(f"Launcher: {deck_root / 'launch_deck.sh'}")
+        launcher = deck_root / f"{deck_launcher_basename(deck_name)}.py"
+        print(f"Launcher: {launcher}")
         return 0
     except Exception as exc:
         print(f"Builder failed: {exc}")
@@ -1128,13 +1202,17 @@ def run_builder(seed_file: Path) -> int:
 
 def main(argv: Sequence[str]) -> int:
     this_file = Path(__file__).resolve()
-    cwd = Path.cwd().resolve()
+    explicit_create = "--create-deck" in argv
+    explicit_runtime = "--runtime" in argv
+    runtime_root = resolve_runtime_root(this_file, argv)
 
-    if "--runtime" in argv:
-        deck_root = this_file.parent.parent if this_file.parent.name == "runtime" else cwd
-        return run_runtime(deck_root)
+    if explicit_runtime and runtime_root is not None:
+        return run_runtime(runtime_root)
 
-    # Direct invocation of seed file is always builder mode.
+    if runtime_root is not None and has_valid_runtime_config(runtime_root) and not explicit_create:
+        return run_runtime(runtime_root)
+
+    # Seed / explicit creation invocation stays in builder mode.
     return run_builder(this_file)
 
 
