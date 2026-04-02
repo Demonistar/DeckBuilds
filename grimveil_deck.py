@@ -79,7 +79,7 @@ except ImportError:
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QFrame, QCalendarWidget,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QStackedWidget
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QStackedWidget, QTabWidget
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QDate, QSize
 from PyQt6.QtGui import (
@@ -2501,6 +2501,20 @@ class GrimveilDeck(QMainWindow):
         inst_label.setStyleSheet(f"color: {C_GOLD}; font-size: 10px; letter-spacing: 2px; font-family: Georgia, serif;")
         right_panel.addWidget(inst_label)
 
+        instruments_tabs = QTabWidget()
+        instruments_tabs.setStyleSheet(
+            f"QTabWidget::pane {{ border: 1px solid {C_BORDER}; background: {C_BG2}; }}"
+            f"QTabBar::tab {{ background: {C_PANEL}; color: {C_TEXT_DIM}; border: 1px solid {C_BORDER}; "
+            f"padding: 4px 8px; font-family: Georgia, serif; font-size: 9px; letter-spacing: 1px; }}"
+            f"QTabBar::tab:selected {{ color: {C_CYAN}; border-color: {C_CYAN_DIM}; }}"
+            f"QTabBar::tab:hover {{ color: {C_TEXT}; }}"
+        )
+
+        instruments_tab = QWidget()
+        instruments_layout = QVBoxLayout(instruments_tab)
+        instruments_layout.setContentsMargins(0, 0, 0, 0)
+        instruments_layout.setSpacing(4)
+
         status_frame = QFrame()
         status_frame.setStyleSheet(f"background: {C_PANEL}; border: 1px solid {C_BORDER}; border-radius: 2px;")
         sf_layout = QVBoxLayout(status_frame)
@@ -2527,7 +2541,7 @@ class GrimveilDeck(QMainWindow):
         sf_layout.addWidget(self.lbl_anchor)
         sf_layout.addWidget(self.lbl_memory)
         self.status_section = CollapsibleSection("STATUS / SESSION", status_frame, expanded=True)
-        right_panel.addWidget(self.status_section)
+        instruments_layout.addWidget(self.status_section)
 
         system_load_content = QWidget()
         gauge_grid = QGridLayout(system_load_content)
@@ -2542,7 +2556,7 @@ class GrimveilDeck(QMainWindow):
         gauge_grid.addWidget(self.gauge_cpu,  1, 0)
         gauge_grid.addWidget(self.gauge_gpu,  1, 1)
         self.system_load_section = CollapsibleSection("SYSTEM LOAD", system_load_content, expanded=False)
-        right_panel.addWidget(self.system_load_section)
+        instruments_layout.addWidget(self.system_load_section)
 
         thermal_content = QWidget()
         thermal_layout = QVBoxLayout(thermal_content)
@@ -2552,7 +2566,7 @@ class GrimveilDeck(QMainWindow):
         self.gauge_temp.setMinimumHeight(70)
         thermal_layout.addWidget(self.gauge_temp)
         self.thermal_section = CollapsibleSection("THERMAL / ANOMALY LOAD", thermal_content, expanded=False)
-        right_panel.addWidget(self.thermal_section)
+        instruments_layout.addWidget(self.thermal_section)
 
         emo_content = QWidget()
         emo_layout = QVBoxLayout(emo_content)
@@ -2571,7 +2585,34 @@ class GrimveilDeck(QMainWindow):
         """)
         emo_layout.addWidget(self.emo_log)
         self.emotion_section = CollapsibleSection("EMOTIONAL RECORD", emo_content, expanded=True)
-        right_panel.addWidget(self.emotion_section)
+        instruments_layout.addWidget(self.emotion_section)
+
+        records_tab = QWidget()
+        records_layout = QVBoxLayout(records_tab)
+        records_layout.setContentsMargins(8, 8, 8, 8)
+        records_layout.setSpacing(6)
+        records_title = QLabel("Records Interface")
+        records_title.setStyleSheet(f"color: {C_GOLD}; font-size: 10px; letter-spacing: 1px; font-family: Georgia, serif;")
+        records_layout.addWidget(records_title)
+        records_placeholder = QLabel("Google Docs integration loading...")
+        records_placeholder.setStyleSheet(
+            f"background: {C_PANEL}; color: {C_TEXT_DIM}; border: 1px solid {C_BORDER}; "
+            f"font-family: Georgia, serif; font-size: 10px; padding: 8px;"
+        )
+        records_layout.addWidget(records_placeholder)
+        records_list_placeholder = QFrame()
+        records_list_placeholder.setMinimumHeight(90)
+        records_list_placeholder.setStyleSheet(f"background: {C_BG3}; border: 1px solid {C_BORDER};")
+        records_layout.addWidget(records_list_placeholder)
+        records_preview_placeholder = QFrame()
+        records_preview_placeholder.setMinimumHeight(120)
+        records_preview_placeholder.setStyleSheet(f"background: {C_BG3}; border: 1px solid {C_BORDER};")
+        records_layout.addWidget(records_preview_placeholder)
+        records_layout.addStretch()
+
+        instruments_tabs.addTab(instruments_tab, "System Instruments")
+        instruments_tabs.addTab(records_tab, "Records")
+        right_panel.addWidget(instruments_tabs)
 
         task_content = QWidget()
         task_layout = QVBoxLayout(task_content)
