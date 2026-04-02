@@ -1,11 +1,13 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.11.0
+# Version: 1.11.1
 # Build Date: 2026-04-02
 # Summary:
 #   Records tab converted to Drive-first workspace with folder navigation and creation.
 # Changelog:
+#   - fixed Google OAuth scope list causing invalid_scope failures
+#   - added diagnostics logging for requested Google scopes
 #   - converted Records tab from Docs-first to Drive-first workspace
 #   - added folder navigation and folder creation
 #   - preserved Google Docs support inside the unified Records tab
@@ -100,7 +102,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.11.0"
+APP_VERSION = "1.11.1"
 VERSION_DATE = "2026-04-02"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -173,6 +175,10 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/documents",
 ]
+GOOGLE_SCOPE_REAUTH_MSG = (
+    "Google token scopes are outdated or incompatible with requested scopes. "
+    "Delete token.json and reauthorize with the updated scope list."
+)
 DEFAULT_GOOGLE_IANA_TIMEZONE = "America/Chicago"
 GOOGLE_INBOUND_SYNC_INTERVAL_MS = 5 * 60 * 1000
 GOOGLE_INBOUND_LOOKBACK_DAYS = 30
@@ -1504,10 +1510,18 @@ class GoogleCalendarService:
         if self.token_path.exists():
             creds = GoogleCredentials.from_authorized_user_file(str(self.token_path), GOOGLE_SCOPES)
 
+        if creds and creds.valid and not creds.has_scopes(GOOGLE_SCOPES):
+            raise RuntimeError(GOOGLE_SCOPE_REAUTH_MSG)
+
         if creds and creds.expired and creds.refresh_token:
             print("[GCal][DEBUG] Refreshing expired Google token.")
-            creds.refresh(GoogleAuthRequest())
-            self._persist_token(creds)
+            try:
+                creds.refresh(GoogleAuthRequest())
+                self._persist_token(creds)
+            except Exception as ex:
+                raise RuntimeError(
+                    f"Google token refresh failed after scope expansion: {ex}. {GOOGLE_SCOPE_REAUTH_MSG}"
+                ) from ex
 
         if not creds or not creds.valid:
             print("[GCal][DEBUG] Starting OAuth flow for Google Calendar.")
@@ -1670,9 +1684,7 @@ class GoogleDocsDriveService:
             creds = GoogleCredentials.from_authorized_user_file(str(self.token_path), GOOGLE_SCOPES)
 
         if creds and creds.valid and not creds.has_scopes(GOOGLE_SCOPES):
-            raise RuntimeError(
-                "Google token missing required Drive/Docs scopes. Remove token and re-authenticate."
-            )
+            raise RuntimeError(GOOGLE_SCOPE_REAUTH_MSG)
 
         if creds and creds.expired and creds.refresh_token:
             try:
@@ -1680,7 +1692,7 @@ class GoogleDocsDriveService:
                 self._persist_token(creds)
             except Exception as ex:
                 raise RuntimeError(
-                    f"Google token refresh failed after scope expansion: {ex}"
+                    f"Google token refresh failed after scope expansion: {ex}. {GOOGLE_SCOPE_REAUTH_MSG}"
                 ) from ex
 
         if not creds or not creds.valid:
@@ -2091,6 +2103,14 @@ class GrimveilDeck(QMainWindow):
         self._append_chat("SYSTEM", "Anchor state: CONNECTED. E-42 docked.")
         self._append_chat("SYSTEM", "Persistent memory namespace linked.")
         self.log_diagnostic("Diagnostics panel active and receiving backend/system events.")
+        self.log_diagnostic(
+            f"Google OAuth scopes requested ({len(GOOGLE_SCOPES)}): {', '.join(GOOGLE_SCOPES)}",
+            level="INFO"
+        )
+        self.log_diagnostic(
+            "If Google auth fails after scope updates, delete token.json and reauthorize.",
+            level="INFO"
+        )
         self.send_btn.setEnabled(False)
         self.input_field.setEnabled(False)
 
