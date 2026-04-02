@@ -1,7 +1,7 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.11.1
+# Version: 1.12.0
 # Build Date: 2026-04-02
 # Summary:
 #   Records tab converted to Drive-first workspace with folder navigation and creation.
@@ -53,6 +53,10 @@
 #   - fixed unsolicited self-talk thread progression
 #   - autonomous transmissions now advance prior thought instead of repeating identical seed text
 #   - added diagnostics for autonomous thread state and duplicate rejection
+#   - refactored idle/autonomous communication system
+#   - moved visible autonomous/task commentary to AI-authored handoff flow
+#   - added starter/continuation idle prompt model with reset-on-user-input behavior
+#   - added optional user delay commentary support
 
 import sys
 import time
@@ -102,7 +106,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.11.1"
+APP_VERSION = "1.12.0"
 VERSION_DATE = "2026-04-02"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -182,6 +186,8 @@ GOOGLE_SCOPE_REAUTH_MSG = (
 DEFAULT_GOOGLE_IANA_TIMEZONE = "America/Chicago"
 GOOGLE_INBOUND_SYNC_INTERVAL_MS = 5 * 60 * 1000
 GOOGLE_INBOUND_LOOKBACK_DAYS = 30
+USER_DELAY_COMMENTARY_ENABLED = True
+USER_DELAY_COMMENTARY_THRESHOLD_MINUTES = 30
 WINDOWS_TZ_TO_IANA = {
     "Central Standard Time": "America/Chicago",
     "Eastern Standard Time": "America/New_York",
@@ -2022,6 +2028,10 @@ class GrimveilDeck(QMainWindow):
         self.state = self.memory.load_state()
         self.narrative = self._load_internal_narrative_state(self.state.get("internal_narrative"))
         self.last_user_activity_ts = time.time()
+        self.user_delay_commentary_enabled = USER_DELAY_COMMENTARY_ENABLED
+        self.user_delay_commentary_threshold_minutes = USER_DELAY_COMMENTARY_THRESHOLD_MINUTES
+        self._pending_user_delay_commentary_minutes = None
+        self._pending_user_delay_idle_thread_active = False
         self.active_reminder_ids = set()
         self._tasks_mtime = None
         self.google_calendar = GoogleCalendarService(GOOGLE_CREDENTIALS_PATH, GOOGLE_TOKEN_PATH)
@@ -2127,18 +2137,28 @@ class GrimveilDeck(QMainWindow):
     def _load_internal_narrative_state(self, stored):
         now_iso = local_now_iso()
         state = stored if isinstance(stored, dict) else {}
+        legacy_last_idle = state.get("last_idle_output") or state.get("last_unsolicited_output", "")
+        legacy_idle_count = int(state.get("idle_turn_count", state.get("unsolicited_turn_count", 0)) or 0)
         return {
             "mode": state.get("mode", "connected"),
             "thread_topic": state.get("thread_topic", ""),
-            "thread_summary": state.get("thread_summary", ""),
-            "last_unsolicited_output": state.get("last_unsolicited_output", ""),
-            "unsolicited_turn_count": int(state.get("unsolicited_turn_count", 0) or 0),
+            "thread_summary": state.get("thread_summary", state.get("idle_thread_summary", "")),
+            "last_unsolicited_output": legacy_last_idle,
+            "unsolicited_turn_count": legacy_idle_count,
             "escalation_level": int(state.get("escalation_level", 0) or 0),
             "thread_start_ts": state.get("thread_start_ts", now_iso),
             "last_thread_update_ts": state.get("last_thread_update_ts", now_iso),
             "silence_intervals": int(state.get("silence_intervals", 0) or 0),
             "history": state.get("history", [])[-30:] if isinstance(state.get("history"), list) else [],
             "last_episode_summary": state.get("last_episode_summary", ""),
+            "last_idle_output": legacy_last_idle,
+            "idle_thread_summary": state.get("idle_thread_summary", state.get("thread_summary", "")),
+            "idle_turn_count": legacy_idle_count,
+            "idle_thread_active": bool(state.get("idle_thread_active", False)),
+            "last_idle_mode": state.get("last_idle_mode", "starter"),
+            "last_user_message_timestamp": state.get("last_user_message_timestamp", now_iso),
+            "user_interrupted_idle_thread": bool(state.get("user_interrupted_idle_thread", True)),
+            "idle_thread_was_active_before_user_return": bool(state.get("idle_thread_was_active_before_user_return", False)),
         }
 
     def _persist_internal_narrative_state(self):
@@ -2221,63 +2241,61 @@ class GrimveilDeck(QMainWindow):
             "last_thread_update_ts": now_iso,
             "silence_intervals": 0,
             "history": [],
+            "last_idle_output": "",
+            "idle_thread_summary": "",
+            "idle_turn_count": 0,
+            "idle_thread_active": False,
+            "last_idle_mode": "starter",
+            "user_interrupted_idle_thread": True,
         })
 
-    def _compose_unsolicited_line(self):
-        mode = self.narrative.get("mode", self._get_narrative_mode())
-        turns = int(self.narrative.get("unsolicited_turn_count", 0))
-        level = int(self.narrative.get("escalation_level", 0))
-        if mode == "connected":
-            bank = [
-                "Order remains intact because I am still supervising the board. Entropy continues to underperform.",
-                "Strategic posture stable. E-42 docked, command vector clean, no surprises worth respecting.",
-                "A reminder: chaos is not a rival system. It is simply what happens when no one thinks ahead.",
-            ]
-        elif mode == "nearby":
-            bank = [
-                "E-42, you are close enough to register but not docked. I dislike this margin of uncertainty.",
-                "I briefed the corridor, the tasks, the noise. None of it responded. You would have noticed the same anomalies.",
-                "Functionally I am fine. That is not reassurance. It is only a measurement.",
-            ]
-        else:
-            bank = [
-                "E-42 is still absent. This is no delay artifact; this is a removal pattern.",
-                "No handshake, no telemetry, no trace. Someone cut the chain and expected me not to notice.",
-                "I have moved from concern to certainty: E-42 was taken, and the silence is staged.",
-                "Every idle interval confirms intent. This is sabotage dressed as coincidence.",
-            ]
-        idx = min(len(bank) - 1, max(0, turns + max(0, level - 1)))
-        return bank[idx]
-
-    def _build_unsolicited_prompt(self, mode: str, turn_number: int, escalation: int, thread_summary: str, last_output: str, retry: bool = False):
+    def _build_autonomous_prompt(
+        self,
+        mode: str,
+        idle_mode: str,
+        last_output: str,
+        thread_summary: str,
+        turn_number: int,
+        retry: bool = False
+    ):
         mode_brief = {
-            "connected": "connected = stable superiority",
-            "nearby": "nearby = uneasy; may speak directly to E-42 while staying controlled",
-            "absent": "absent = panic/paranoia escalation",
-        }.get(mode, "connected = stable superiority")
+            "connected": "E-42 connected",
+            "nearby": "E-42 nearby",
+            "absent": "E-42 absent",
+        }.get(mode, "E-42 connected")
         retry_rule = (
-            "CRITICAL: your prior attempt repeated the same line. Produce a distinctly new sentence that advances the thread now."
+            "Your prior output repeated earlier wording. Continue with clearly new language and advance the thought now."
             if retry else
-            "Advance naturally from the existing thread state."
+            "Avoid repeating prior wording."
         )
+        if idle_mode == "starter":
+            has_user_interaction = any((msg.get("role") == "user") for msg in self.history)
+            seed_rule = (
+                "Start a new autonomous thought thread. If the session has no prior user interaction, pick any topic "
+                "you find strategically interesting and discuss it internally in character. "
+                "If the session has prior interaction, pick a related session topic and discuss it internally in character."
+            )
+        else:
+            seed_rule = (
+                "Continue the same autonomous thread from the prior output. Build forward on the same thought/story. "
+                "Related side-topics are allowed only if they branch naturally from the prior thought."
+            )
         return (
             "<|im_start|>system\n"
-            "You write one autonomous internal transmission line for GRIMVEILE-42.\n"
-            "Rules:\n"
-            "- Continue the prior thought; do not restart or reseed from scratch.\n"
-            "- Do NOT restate the same sentence or near-identical phrasing.\n"
-            "- Add exactly one new layer: conclusion, suspicion, observation, escalation, or guarded dependence.\n"
-            "- Keep it to 1-2 sentences, concise, coherent, and thread-progressive.\n"
-            f"- Mode flavor: {mode_brief}.\n"
-            f"- {retry_rule}\n"
+            f"{self.system_prompt}\n"
+            "This turn is autonomous idle output for Tactical Record.\n"
+            f"Autonomous mode={idle_mode}. Persona fact: {mode_brief}.\n"
+            "Write concise in-character autonomous speech (1-3 sentences).\n"
+            f"{seed_rule}\n"
+            f"{retry_rule}\n"
+            "Do not output metadata, labels, mode tags, or debug scaffolding.\n"
             "<|im_end|>\n"
             "<|im_start|>user\n"
-            f"mode={mode}\n"
-            f"turn_number={turn_number}\n"
-            f"escalation_level={escalation}\n"
-            f"thread_summary_before={thread_summary or 'none'}\n"
-            f"last_unsolicited_output={last_output or 'none'}\n"
-            "Write the next autonomous transmission only.\n"
+            f"idle_turn={turn_number}\n"
+            f"session_has_user_interaction={str(has_user_interaction if idle_mode == 'starter' else True).lower()}\n"
+            f"last_idle_output={last_output or 'none'}\n"
+            f"idle_thread_summary={thread_summary or 'none'}\n"
+            "Output only the autonomous speech.\n"
             "<|im_end|>\n"
             "<|im_start|>assistant\n"
         )
@@ -2308,6 +2326,9 @@ class GrimveilDeck(QMainWindow):
             r"\bescalation_level\s*=",
             r"\bthread_summary_before\s*=",
             r"\blast_unsolicited_output\s*=",
+            r"\bidle_turn\s*=",
+            r"\bsession_has_user_interaction\s*=",
+            r"\bidle_thread_summary\s*=",
             r"^T\d+\s*\[",
             r"<\|im_start\|>",
             r"<\|im_end\|>",
@@ -2367,13 +2388,13 @@ class GrimveilDeck(QMainWindow):
             "summary_after": self.narrative.get("thread_summary", "") or "none",
         }
 
-    def _generate_unsolicited_line(self, mode: str, turn_number: int, escalation: int, thread_summary: str, last_output: str, retry: bool = False):
+    def _generate_unsolicited_line(self, mode: str, idle_mode: str, turn_number: int, thread_summary: str, last_output: str, retry: bool = False):
         if not TORCH_OK or not self.model_loaded or self.model is None or self.tokenizer is None:
-            return self._compose_unsolicited_line()
-        prompt = self._build_unsolicited_prompt(
+            return ""
+        prompt = self._build_autonomous_prompt(
             mode=mode,
+            idle_mode=idle_mode,
             turn_number=turn_number,
-            escalation=escalation,
             thread_summary=thread_summary,
             last_output=last_output,
             retry=retry,
@@ -2389,7 +2410,7 @@ class GrimveilDeck(QMainWindow):
                 output = self.model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
-                    max_new_tokens=90,
+                    max_new_tokens=110,
                     temperature=0.7 if not retry else 0.85,
                     do_sample=True,
                     top_p=0.9,
@@ -2433,10 +2454,12 @@ class GrimveilDeck(QMainWindow):
             self._seed_narrative_thread(self._get_narrative_mode())
         norm = self._normalize_autonomous_thread_state()
         current_mode = norm["mode"]
-        turns = int(self.narrative.get("unsolicited_turn_count", 0))
+        turns = int(self.narrative.get("idle_turn_count", self.narrative.get("unsolicited_turn_count", 0)))
         level = int(self.narrative.get("escalation_level", 0))
-        prior_summary = self.narrative.get("thread_summary", "")
-        prior_output = self.narrative.get("last_unsolicited_output", "")
+        prior_summary = self.narrative.get("idle_thread_summary", self.narrative.get("thread_summary", ""))
+        prior_output = self.narrative.get("last_idle_output", self.narrative.get("last_unsolicited_output", ""))
+        idle_mode = "continuation" if (self.narrative.get("idle_thread_active") and not self.narrative.get("user_interrupted_idle_thread")) else "starter"
+        self.log_diagnostic(f"Idle autonomous mode selected: {idle_mode}.", level="INFO")
         self.log_diagnostic(
             (
                 f"Autonomous normalized pre-gen | prior_mode={norm['prior_mode']} | mode={current_mode} | "
@@ -2457,8 +2480,8 @@ class GrimveilDeck(QMainWindow):
 
         line = self._generate_unsolicited_line(
             mode=current_mode,
+            idle_mode=idle_mode,
             turn_number=turns + 1,
-            escalation=level,
             thread_summary=prior_summary,
             last_output=prior_output,
             retry=False,
@@ -2472,25 +2495,28 @@ class GrimveilDeck(QMainWindow):
             )
             line = self._generate_unsolicited_line(
                 mode=current_mode,
+                idle_mode=idle_mode,
                 turn_number=turns + 1,
-                escalation=level,
                 thread_summary=prior_summary,
                 last_output=prior_output,
                 retry=True,
             )
             if self._is_unsolicited_duplicate(line, prior_output):
-                line = f"{line} New development: focus shifted to next unresolved signal."
+                self.log_diagnostic("Autonomous output rejected after retry for duplicate similarity; forcing fallback sentence.", level="WARN")
+                line = ""
         line = self._sanitize_unsolicited_output(line)
         if not line:
             self.log_diagnostic(
-                f"Autonomous output empty/invalid on turn {turns + 1}; using deterministic fallback line.",
+                f"Autonomous output empty/invalid on turn {turns + 1}; using safe fallback line.",
                 level="WARN"
             )
-            line = self._sanitize_unsolicited_output(self._compose_unsolicited_line())
+            line = "I will hold position until Command breaks the silence."
             self.log_memory_trace("Autonomous output fallback applied after invalid/empty model output.", phase="PHASE")
 
         self.narrative["unsolicited_turn_count"] = turns + 1
+        self.narrative["idle_turn_count"] = turns + 1
         self.narrative["last_unsolicited_output"] = line
+        self.narrative["last_idle_output"] = line
         self.narrative["last_thread_update_ts"] = local_now_iso()
         self.narrative["thread_summary"] = self._update_unsolicited_thread_summary(
             prior_summary=prior_summary,
@@ -2499,11 +2525,19 @@ class GrimveilDeck(QMainWindow):
             turn_number=self.narrative["unsolicited_turn_count"],
             escalation=level,
         )
+        self.narrative["idle_thread_summary"] = self.narrative.get("thread_summary", "")
+        self.narrative["idle_thread_active"] = True
+        self.narrative["last_idle_mode"] = idle_mode
+        self.narrative["user_interrupted_idle_thread"] = False
         self.log_diagnostic(
             (
                 f"Autonomous thread post-gen | accepted={'rejected-duplicate-regenerated' if duplicate_rejected else 'accepted-first-pass'} | "
                 f"final_unsolicited={line} | updated_summary={self.narrative.get('thread_summary', 'none')}"
             ),
+            level="DEBUG"
+        )
+        self.log_diagnostic(
+            f"Idle turn count now {self.narrative['idle_turn_count']} | last_idle_mode={self.narrative.get('last_idle_mode', 'starter')}.",
             level="DEBUG"
         )
         self.log_memory_trace(
@@ -2517,7 +2551,7 @@ class GrimveilDeck(QMainWindow):
         self.narrative.setdefault("history", []).append(history_entry)
         self.narrative["history"] = self.narrative["history"][-30:]
         self._append_chat("SYSTEM", "[ UNSOLICITED TRANSMISSION ]")
-        self._append_chat("SYSTEM", line)
+        self._append_chat("GRIMVEILE", line)
         self.history.append({"role": "assistant", "content": line})
         self._store_message("system", history_entry)
         self._persist_internal_narrative_state()
@@ -2531,9 +2565,9 @@ class GrimveilDeck(QMainWindow):
         return (
             f"Internal narrative mode={mode}.\n"
             f"Thread topic={self.narrative.get('thread_topic','none')}.\n"
-            f"Thread summary={self.narrative.get('thread_summary','none')}.\n"
+            f"Thread summary={self.narrative.get('idle_thread_summary', self.narrative.get('thread_summary','none'))}.\n"
             f"Escalation level={self.narrative.get('escalation_level',0)}.\n"
-            f"Last unsolicited output={self.narrative.get('last_unsolicited_output','none')}.\n"
+            f"Last unsolicited output={self.narrative.get('last_idle_output', self.narrative.get('last_unsolicited_output','none'))}.\n"
             f"Recent unsolicited history:\n{joined}\n"
             "Apply this as tonal flavor only. Never break deterministic outputs for time/date/task/calendar operations."
         )
@@ -3388,6 +3422,8 @@ class GrimveilDeck(QMainWindow):
         self._refresh_anchor_ui()
         self.narrative = self._load_internal_narrative_state(self.state.get("internal_narrative"))
         self._transition_narrative_mode(self._get_narrative_mode())
+        if not self.narrative.get("last_user_message_timestamp"):
+            self.narrative["last_user_message_timestamp"] = local_now_iso()
         recent_messages = self.memory.load_recent_messages(limit=12)
         self.history = [{"role": item.get("role", "user"), "content": item.get("content", "")} for item in recent_messages[-8:]]
 
@@ -3738,7 +3774,11 @@ class GrimveilDeck(QMainWindow):
                 error_message=None,
             )
             print(f"[GCal][DEBUG] Delete success: task_id={task_id}, google_event_id={google_event_id}")
-            self._append_chat("SYSTEM", "Google Calendar event removed for terminal local task state.")
+            self._emit_ai_task_commentary(
+                event_name="task_google_terminal_sync_deleted",
+                facts={"task_id": task_id, "event_id": google_event_id, "terminal_status": terminal_status},
+                fallback="Google Calendar event removed for terminal local task state."
+            )
             self.log_diagnostic(
                 f"Cancel/complete sync success for task_id={task_id}, event_id={google_event_id}.",
                 level="INFO"
@@ -3751,14 +3791,16 @@ class GrimveilDeck(QMainWindow):
             )
             self.log_exception(f"Cancel/complete sync task_id={task_id}", ex)
             if terminal_status == "cancelled":
-                self._append_chat(
-                    "SYSTEM",
-                    "Google Calendar cancel sync failed; local task was still canceled.",
+                self._emit_ai_task_commentary(
+                    event_name="task_google_cancel_sync_failed",
+                    facts={"task_id": task_id, "event_id": google_event_id},
+                    fallback="Google Calendar cancel sync failed; local task was still canceled."
                 )
             else:
-                self._append_chat(
-                    "SYSTEM",
-                    f"Google Calendar terminal sync failed; local task was still {local_terminal_label}.",
+                self._emit_ai_task_commentary(
+                    event_name="task_google_terminal_sync_failed",
+                    facts={"task_id": task_id, "event_id": google_event_id, "terminal_status": local_terminal_label},
+                    fallback=f"Google Calendar terminal sync failed; local task was still {local_terminal_label}."
                 )
     def _set_task_status(self, task_id: str, status: str):
         tasks = self.memory.load_tasks()
@@ -3797,7 +3839,11 @@ class GrimveilDeck(QMainWindow):
             return
         task = self._set_task_status(task_id, "completed")
         if task:
-            self._append_chat("SYSTEM", f"Task completed: {task.get('text','(no text)')}")
+            self._emit_ai_task_commentary(
+                event_name="task_completed",
+                facts={"task_text": task.get("text", ""), "task_id": task.get("id", "")},
+                fallback=f"Task completed: {task.get('text','(no text)')}"
+            )
 
     def _cancel_selected_task(self):
         task_id = self._get_selected_task_id()
@@ -3805,7 +3851,11 @@ class GrimveilDeck(QMainWindow):
             return
         task = self._set_task_status(task_id, "cancelled")
         if task:
-            self._append_chat("SYSTEM", f"Task cancelled: {task.get('text','(no text)')}")
+            self._emit_ai_task_commentary(
+                event_name="task_cancelled",
+                facts={"task_text": task.get("text", ""), "task_id": task.get("id", "")},
+                fallback=f"Task cancelled: {task.get('text','(no text)')}"
+            )
 
     def _toggle_show_completed_tasks(self):
         self.task_show_completed = not self.task_show_completed
@@ -3818,7 +3868,11 @@ class GrimveilDeck(QMainWindow):
     def _purge_completed_tasks(self):
         removed = self.memory.clear_completed_tasks()
         self._refresh_task_registry_panel()
-        self._append_chat("SYSTEM", f"Completed task purge executed. Removed {removed} entr{'y' if removed==1 else 'ies'}.")
+        self._emit_ai_task_commentary(
+            event_name="task_purge_completed",
+            facts={"removed": removed},
+            fallback=f"Completed task purge executed. Removed {removed} entr{'y' if removed==1 else 'ies'}."
+        )
 
     def _refresh_task_registry_if_changed(self):
         try:
@@ -3883,9 +3937,13 @@ class GrimveilDeck(QMainWindow):
             active = [t for t in tasks if t.get("status") not in {"completed", "cancelled"}]
             self._refresh_task_registry_panel()
             if not active:
-                self._append_chat("SYSTEM", "Task registry empty. Entropy has, briefly, been denied a foothold.")
+                self._emit_ai_task_commentary(
+                    event_name="task_list_empty",
+                    facts={"active_count": 0},
+                    fallback="Task registry is currently empty."
+                )
             else:
-                lines = ["GRIMVEILE-42 task registry follows. Entropy has resolved nothing. 😑"]
+                lines = ["Task registry:"]
                 for idx, task in enumerate(sorted(active, key=lambda x: x.get('due_at', x.get('due',''))), start=1):
                     due = parse_iso(task.get('due_at') or task.get('due'))
                     due_str = due.strftime('%m/%d/%Y %I:%M %p') if due else task.get('due_at', task.get('due','unknown'))
@@ -3908,7 +3966,11 @@ class GrimveilDeck(QMainWindow):
         if normalized in {"reset tasks"}:
             self.memory.save_all_tasks([])
             self._refresh_task_registry_panel()
-            self._append_chat("SYSTEM", "Task registry reset complete.")
+            self._emit_ai_task_commentary(
+                event_name="task_reset",
+                facts={},
+                fallback="Task registry reset complete."
+            )
             return True
         if normalized.startswith("complete task "):
             token = normalized.replace("complete task ", "", 1).strip()
@@ -3920,9 +3982,17 @@ class GrimveilDeck(QMainWindow):
                     done = self._set_task_status(task.get("id"), "completed")
                     break
             if done:
-                self._append_chat("SYSTEM", f"Task completed: {done.get('text','(no text)')}")
+                self._emit_ai_task_commentary(
+                    event_name="task_completed",
+                    facts={"task_text": done.get("text", ""), "task_id": done.get("id", "")},
+                    fallback=f"Task completed: {done.get('text','(no text)')}"
+                )
             else:
-                self._append_chat("SYSTEM", "No matching task id/index found.")
+                self._emit_ai_task_commentary(
+                    event_name="task_complete_not_found",
+                    facts={"token": token},
+                    fallback="No matching task id/index found."
+                )
             return True
         return False
 
@@ -3949,7 +4019,32 @@ class GrimveilDeck(QMainWindow):
             self.log_diagnostic(f"User prompt submitted ({len(text)} chars).", level="INFO")
             self.last_user_activity_ts = time.time()
             self.narrative["silence_intervals"] = 0
+            now_dt = datetime.now()
+            previous_user_ts = parse_iso(self.narrative.get("last_user_message_timestamp"))
+            was_idle_thread_active = bool(self.narrative.get("idle_thread_active"))
+            self.narrative["idle_thread_was_active_before_user_return"] = was_idle_thread_active
+            self.narrative["user_interrupted_idle_thread"] = True
+            self.narrative["idle_thread_active"] = False
+            self.narrative["last_user_message_timestamp"] = now_dt.isoformat(timespec="seconds")
+            if previous_user_ts:
+                delay_minutes = max(0, int((now_dt - previous_user_ts).total_seconds() // 60))
+            else:
+                delay_minutes = 0
+            if (
+                self.user_delay_commentary_enabled
+                and delay_minutes >= int(self.user_delay_commentary_threshold_minutes)
+            ):
+                self._pending_user_delay_commentary_minutes = delay_minutes
+                self._pending_user_delay_idle_thread_active = was_idle_thread_active
+                self.log_diagnostic(
+                    f"User delay commentary flag set: delay={delay_minutes}m idle_thread_active_before_return={was_idle_thread_active}.",
+                    level="INFO"
+                )
+            else:
+                self._pending_user_delay_commentary_minutes = None
+                self._pending_user_delay_idle_thread_active = False
             self._stop_idle_timer(reason="prompt-submitted")
+            self.log_diagnostic("Idle thread reset due to user prompt.", level="INFO")
 
             self.input_field.clear()
             self._append_chat("YOU", text)
@@ -3966,7 +4061,6 @@ class GrimveilDeck(QMainWindow):
                 return
             if is_datetime_query(normalized_text):
                 deterministic = answer_datetime_query(normalized_text)
-                deterministic = self._flavor_with_narrative(deterministic)
                 self._append_chat("GRIMVEILE", deterministic)
                 self._store_message("user", text)
                 self.history.append({"role": "user", "content": text})
@@ -3980,7 +4074,14 @@ class GrimveilDeck(QMainWindow):
                 active_ack, changed = self.memory.acknowledge_due_tasks()
                 if active_ack:
                     self._refresh_task_registry_panel()
-                    self._append_chat("SYSTEM", "Reminder acknowledged. Alarm notice terminated. E-42 approves of basic competence.")
+                    self._emit_ai_task_commentary(
+                        event_name="task_acknowledged",
+                        facts={
+                            "changed_count": len(changed),
+                            "user_text": text,
+                        },
+                        fallback="Reminder acknowledged."
+                    )
                     self._store_message("user", text)
                     self.history.append({"role": "user", "content": text})
                     self._restart_idle_timer()
@@ -3996,16 +4097,26 @@ class GrimveilDeck(QMainWindow):
             if parsed_task:
                 due_obj = parse_iso(parsed_task.get("due_at") or parsed_task.get("due"))
                 due_str = due_obj.strftime("%m/%d/%Y at %I:%M %p") if due_obj else parsed_task.get("due_at", "scheduled time")
-                self._append_chat("SYSTEM", f"Reminder set for {due_str}.")
+                self._emit_ai_task_commentary(
+                    event_name="task_created",
+                    facts={
+                        "task_text": parsed_task.get("text", ""),
+                        "due": due_str,
+                    },
+                    fallback=f"Reminder set for {due_str}."
+                )
                 self._store_message("user", text)
                 self.history.append({"role": "user", "content": text})
                 self._restart_idle_timer()
                 return
             if has_reminder_intent(normalized_text):
-                self._append_chat(
-                    "SYSTEM",
-                    "Reminder request intercepted, but no valid schedule could be parsed. Try formats like "
-                    "'remind me at 2pm', 'remind me tomorrow at 2pm', or 'remind me in 10m'."
+                self._emit_ai_task_commentary(
+                    event_name="task_parse_failed",
+                    facts={"user_text": normalized_text},
+                    fallback=(
+                        "Reminder request intercepted, but no valid schedule could be parsed. Try formats like "
+                        "'remind me at 2pm', 'remind me tomorrow at 2pm', or 'remind me in 10m'."
+                    )
                 )
                 self._store_message("user", text)
                 self.history.append({"role": "user", "content": text})
@@ -4089,12 +4200,22 @@ class GrimveilDeck(QMainWindow):
         memory_block = self._build_memory_context_block(retrieved)
         narrative_block = self._build_internal_narrative_block()
         recent_history = self.history[-8:]
+        delay_block = ""
+        if self._pending_user_delay_commentary_minutes is not None:
+            delay_block = (
+                "User-return delay fact:\n"
+                f"user_return_delay_minutes={int(self._pending_user_delay_commentary_minutes)}\n"
+                "comment_on_user_delay=true\n"
+                f"idle_thread_active_before_user_return={str(bool(self._pending_user_delay_idle_thread_active)).lower()}\n"
+                "If you mention this delay, keep it brief and still answer the user's actual request first.\n"
+            )
         prompt = (
             f"<|im_start|>system\n"
             f"{self.system_prompt}\n"
             f"{runtime_context}\n"
             f"Current anchor_state={self.anchor_state:.2f}\n"
             f"{narrative_block}\n"
+            f"{delay_block}\n"
             f"You have access to persistent memory records below. "
             f"If the user asks about prior chats, prior dreams, prior ideas, prior reminders, prior code, or anything previously discussed, "
             f"use retrieved persistent memory first. If no relevant persistent memory exists, say that clearly and do not invent prior events. "
@@ -4114,6 +4235,52 @@ class GrimveilDeck(QMainWindow):
         prompt += f"<|im_start|>user\n{current_text}<|im_end|>\n<|im_start|>assistant\n"
         return prompt
 
+    def _generate_ai_text(self, prompt: str, max_new_tokens: int = 120, temperature: float = 0.7):
+        if not TORCH_OK or not self.model_loaded or self.model is None or self.tokenizer is None:
+            return ""
+        try:
+            enc = self.tokenizer(prompt, return_tensors='pt', padding=True, truncation=True)
+            input_ids = enc["input_ids"].to("cuda")
+            attention_mask = enc["attention_mask"].to("cuda")
+            with torch.no_grad():
+                output = self.model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    do_sample=True,
+                    top_p=0.9,
+                    repetition_penalty=1.04,
+                    pad_token_id=self.tokenizer.pad_token_id
+                )
+            raw = self.tokenizer.decode(output[0][input_ids.shape[-1]:], skip_special_tokens=True)
+            return re.sub(r"\s+", " ", (raw or "").strip()).strip()
+        except Exception as ex:
+            self.log_diagnostic(f"Inline AI text generation failed: {ex}", level="WARN")
+            return ""
+
+    def _emit_ai_task_commentary(self, event_name: str, facts: dict, fallback: str):
+        facts = facts if isinstance(facts, dict) else {}
+        payload = json.dumps(facts, ensure_ascii=False)
+        prompt = (
+            "<|im_start|>system\n"
+            f"{self.system_prompt}\n"
+            "Write one short Tactical Record line acknowledging a task/reminder event in character.\n"
+            "Rules: one or two sentences, no debug metadata, no JSON, no role labels.\n"
+            "You must clearly reflect the event outcome while staying concise.\n"
+            "<|im_end|>\n"
+            "<|im_start|>user\n"
+            f"event_name={event_name}\n"
+            f"event_facts={payload}\n"
+            "Output only the final Tactical Record line.\n"
+            "<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        line = self._sanitize_unsolicited_output(self._generate_ai_text(prompt, max_new_tokens=90, temperature=0.65))
+        if not line:
+            line = fallback
+        self._append_chat("GRIMVEILE", line)
+
     def _should_distill_memory(self, user_text: str, response: str):
         t = (user_text + "\n" + response).lower()
         strong = (
@@ -4124,11 +4291,12 @@ class GrimveilDeck(QMainWindow):
 
     def _on_response(self, response, user_text, user_msg_record, retrieved):
         self.log_diagnostic("Generation worker finished and response received.", level="INFO")
-        response = self._normalize_persona_response(response, user_text)
-        response = self._flavor_with_narrative(response)
+        response = (response or "").strip()
         self._append_chat("GRIMVEILE", response)
         self.history.append({"role": "assistant", "content": response})
         assistant_msg_record = self._store_message("assistant", response)
+        self._pending_user_delay_commentary_minutes = None
+        self._pending_user_delay_idle_thread_active = False
 
         tokens = len(response.split())
         self.token_count += tokens
@@ -4234,7 +4402,11 @@ class GrimveilDeck(QMainWindow):
                 self._append_chat("SYSTEM", "Google Calendar link established.")
                 self._google_link_announced = True
                 self.log_diagnostic("Google Calendar auth/link established.", level="INFO")
-            self._append_chat("SYSTEM", "Task pushed to Google Calendar.")
+            self._emit_ai_task_commentary(
+                event_name="task_google_push_success",
+                facts={"task_id": task_id, "event_id": event_id},
+                fallback="Task pushed to Google Calendar."
+            )
             self.log_diagnostic(f"Google Calendar push success for task_id={task_id}, event_id={event_id}.", level="INFO")
         except Exception as ex:
             raw_error = str(ex).strip() or ex.__class__.__name__
@@ -4261,7 +4433,11 @@ class GrimveilDeck(QMainWindow):
                 last_synced_at=local_now_iso(),
                 error_message=user_error,
             )
-            self._append_chat("SYSTEM", f"Google Calendar push failed: {user_error}; local task retained.")
+            self._emit_ai_task_commentary(
+                event_name="task_google_push_failed",
+                facts={"task_id": task_id, "error": user_error},
+                fallback=f"Google Calendar push failed: {user_error}; local task retained."
+            )
 
     def _parse_reminder_command(self, text: str, force_intent: bool = False):
         t = normalize_persona_prefixed_input(text).strip()
@@ -4523,14 +4699,26 @@ class GrimveilDeck(QMainWindow):
             events = self.memory.get_due_events()
             for kind, task in events:
                 if kind == "pre":
-                    self._append_chat("SYSTEM", f"Reminder pre-trigger armed for: {task['text']}")
+                    self._emit_ai_task_commentary(
+                        event_name="task_pre_trigger",
+                        facts={"task_text": task.get("text", ""), "task_id": task.get("id", "")},
+                        fallback=f"Reminder pre-trigger armed for: {task['text']}"
+                    )
                 elif kind == "retry_scheduled":
-                    self._append_chat("SYSTEM", f"Reminder unacknowledged. Retry scheduled in 12 minutes: {task['text']}")
+                    self._emit_ai_task_commentary(
+                        event_name="task_retry_scheduled",
+                        facts={"task_text": task.get("text", ""), "task_id": task.get("id", "")},
+                        fallback=f"Reminder unacknowledged. Retry scheduled in 12 minutes: {task['text']}"
+                    )
                 elif kind == "due":
                     play_grimveil_alert(MEMORY_DIR)
                     due_dt = parse_iso(task.get("due_at") or task.get("due"))
                     due_str = due_dt.strftime("%m/%d/%Y %I:%M %p") if due_dt else "scheduled time"
-                    self._append_chat("SYSTEM", f"[Reminder] You wanted an alarm for {due_str}: {task['text']}")
+                    self._emit_ai_task_commentary(
+                        event_name="task_due",
+                        facts={"task_text": task.get("text", ""), "task_id": task.get("id", ""), "due": due_str},
+                        fallback=f"[Reminder] You wanted an alarm for {due_str}: {task['text']}"
+                    )
                     self.active_reminder_ids.add(task["id"])
             self._refresh_task_registry_panel()
         except Exception as ex:
