@@ -1,11 +1,13 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.12.6
-# Build Date: 2026-04-02-r6
+# Version: 1.12.7
+# Build Date: 2026-04-02-r7
 # Summary:
-#   Natural reminder parsing expansion + clean parse-failure acknowledgement handoff.
+#   Restored clean final task acknowledgement rendering with diagnostics-safe extraction cleanup.
 # Changelog:
+#   - fixed malformed task acknowledgement rendering caused by broken response extraction/cleanup
+#   - preserved working task parsing and Google sync while restoring clean visible AI acknowledgements
 #   - improved natural reminder parsing for common phrasing
 #   - fixed malformed parse-failure acknowledgements leaking raw payload text into Tactical Record
 #   - improved GrimVeile persona quality in task/reminder acknowledgements while preserving bounded fast generation
@@ -120,8 +122,8 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.12.6"
-VERSION_DATE = "2026-04-02-r6"
+APP_VERSION = "1.12.7"
+VERSION_DATE = "2026-04-02-r7"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
 
@@ -4336,24 +4338,28 @@ class GrimveilDeck(QMainWindow):
             return ""
         try:
             bounded_input_len = max(64, int(max_input_length))
-            enc = self.tokenizer(
-                prompt,
-                return_tensors='pt',
-                padding=True,
-                truncation=True,
-                max_length=bounded_input_len,
-            )
-            input_ids = enc["input_ids"].to("cuda")
-            attention_mask = enc["attention_mask"].to("cuda")
+            enc = self.tokenizer(prompt, return_tensors='pt', add_special_tokens=True, truncation=False)
+            input_ids = enc["input_ids"]
+            attention_mask = enc["attention_mask"]
             tokenized_input_len = int(input_ids.shape[-1])
-            effective_max_length = tokenized_input_len + max(1, int(max_new_tokens))
+            if tokenized_input_len > bounded_input_len:
+                overflow = tokenized_input_len - bounded_input_len
+                self.log_diagnostic(
+                    f"{diagnostics_prefix} input truncated from the left by {overflow} token(s) to preserve handoff tail.",
+                    level="DEBUG",
+                )
+                input_ids = input_ids[:, -bounded_input_len:]
+                attention_mask = attention_mask[:, -bounded_input_len:]
+                tokenized_input_len = int(input_ids.shape[-1])
+            input_ids = input_ids.to("cuda")
+            attention_mask = attention_mask.to("cuda")
+            tokenized_input_len = int(input_ids.shape[-1])
             self.log_diagnostic(f"{diagnostics_prefix} tokenized input length: {tokenized_input_len}", level="DEBUG")
-            self.log_diagnostic(f"{diagnostics_prefix} max_length: {effective_max_length}", level="DEBUG")
+            self.log_diagnostic(f"{diagnostics_prefix} max_new_tokens: {max_new_tokens}", level="DEBUG")
             with torch.no_grad():
                 output = self.model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
-                    max_length=effective_max_length,
                     max_new_tokens=max_new_tokens,
                     temperature=temperature,
                     do_sample=True,
@@ -4464,7 +4470,22 @@ class GrimveilDeck(QMainWindow):
         )
         if is_task_final_ack and not generated:
             self.log_diagnostic("Task final AI acknowledgement failed / timed out.", level="WARN")
+        if is_task_final_ack:
+            self.log_diagnostic(
+                f"Task final AI acknowledgement raw decoded output: {self._preview_text(generated, max_chars=240) or '[empty]'}",
+                level="DEBUG",
+            )
         line = self._sanitize_task_commentary_output(generated)
+        if is_task_final_ack:
+            transformed = bool((generated or "").strip() != (line or "").strip())
+            self.log_diagnostic(
+                f"Task final AI acknowledgement cleaned output: {self._preview_text(line, max_chars=240) or '[empty]'}",
+                level="DEBUG",
+            )
+            self.log_diagnostic(
+                f"Task final AI acknowledgement cleanup/transformation applied: {'yes' if transformed else 'no'}",
+                level="DEBUG",
+            )
         if not line:
             line = self._task_commentary_fallback_line(event_name, compact_facts, fallback)
             if is_task_final_ack:
@@ -4477,10 +4498,31 @@ class GrimveilDeck(QMainWindow):
         raw = (text or "").strip()
         if not raw:
             return ""
-        first_line = raw.splitlines()[0].strip()
-        cleaned = re.sub(r"\s+", " ", first_line).strip()
+        if "<|im_start|>" in raw and "<|im_end|>" in raw:
+            segments = re.split(r"<\|im_start\|>assistant\s*", raw, flags=re.IGNORECASE)
+            raw = segments[-1] if segments else raw
+            raw = re.split(r"<\|im_end\|>", raw, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        raw = re.sub(r"^assistant\s*:\s*", "", raw, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"\s+", " ", raw).strip()
+        if cleaned.startswith("{") and cleaned.endswith("}"):
+            try:
+                parsed = json.loads(cleaned)
+                if isinstance(parsed, dict):
+                    for key in ("acknowledgement", "acknowledgment", "message", "response", "text", "line"):
+                        value = parsed.get(key)
+                        if isinstance(value, str) and value.strip():
+                            cleaned = value.strip()
+                            break
+            except Exception:
+                pass
+        cleaned = cleaned.strip("`").strip()
+        cleaned = cleaned.strip("\"'").strip()
+        if "\n" in cleaned:
+            lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+            cleaned = lines[0] if lines else cleaned
         cleaned = re.sub(r"^[\-\*\•]\s*", "", cleaned).strip()
         cleaned = re.sub(r"^(?:tactical\s*record\s*:|explanation\s*:)\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r'^[^A-Za-z0-9"\']*(?=[A-Za-z0-9"\'])', "", cleaned).strip()
         disallowed_patterns = [
             r"<\|im_start\|>",
             r"<\|im_end\|>",
@@ -4516,7 +4558,10 @@ class GrimveilDeck(QMainWindow):
             return ""
         if cleaned and cleaned[-1] not in ".!?":
             cleaned = f"{cleaned}."
-        if not cleaned or len(cleaned) < 3:
+        if not cleaned or len(cleaned) < 6:
+            return ""
+        alpha_count = len(re.findall(r"[A-Za-z]", cleaned))
+        if alpha_count < 4:
             return ""
         return cleaned
 
