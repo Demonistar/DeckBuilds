@@ -1,11 +1,13 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.9.0
+# Version: 1.10.0
 # Build Date: 2026-04-02
 # Summary:
-#   Records tab now performs live Google Drive/Docs listing and preview retrieval.
+#   Records tab now includes Google Docs/Drive action controls for create/open/delete/export workflows.
 # Changelog:
+#   - expanded Records tab with document actions
+#   - added create/open/delete/export support for Google Docs/Drive records
 #   - made Records tab functional with Google Drive/Docs integration
 #   - added recent Google Docs listing and preview support
 #   - added diagnostics for Docs/Drive auth and document fetch activity
@@ -54,6 +56,7 @@ import re
 import uuid
 import html
 import random
+import webbrowser
 from datetime import datetime, date, timedelta
 import urllib.request
 from pathlib import Path
@@ -92,7 +95,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.10.0"
 VERSION_DATE = "2026-04-02"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -159,10 +162,11 @@ if SCRIPT_DIR.name.lower() == "models" and SCRIPT_DIR.parent.name.lower() == "ai
 MEMORY_DIR = AI_MODELS_DIR / "GrimVeil_Memories"
 GOOGLE_CREDENTIALS_PATH = Path(r"C:\AI\config\google_credentials.json")
 GOOGLE_TOKEN_PATH = Path(r"C:\AI\Models\GrimVeil_Memories\google\token.json")
+GOOGLE_EXPORTS_DIR = Path(r"C:\AI\Models\GrimVeil_Memories\exports")
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
-    "https://www.googleapis.com/auth/drive.readonly",
-    "https://www.googleapis.com/auth/documents.readonly",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/documents",
 ]
 DEFAULT_GOOGLE_IANA_TIMEZONE = "America/Chicago"
 GOOGLE_INBOUND_SYNC_INTERVAL_MS = 5 * 60 * 1000
@@ -1738,6 +1742,45 @@ class GoogleDocsDriveService:
             "preview_text": parsed or "[No text content returned from Docs API.]",
         }
 
+    def create_doc(self, title: str = "New GrimVeile Record"):
+        safe_title = (title or "New GrimVeile Record").strip() or "New GrimVeile Record"
+        self.ensure_services()
+        created = self._docs_service.documents().create(body={"title": safe_title}).execute()
+        doc_id = created.get("documentId")
+        meta = self.get_doc_metadata(doc_id) if doc_id else {}
+        return {
+            "id": doc_id,
+            "name": meta.get("name") or safe_title,
+            "webViewLink": meta.get("webViewLink"),
+        }
+
+    def get_doc_metadata(self, doc_id: str):
+        if not doc_id:
+            raise ValueError("Document id is required.")
+        self.ensure_services()
+        return self._drive_service.files().get(
+            fileId=doc_id,
+            fields="id,name,modifiedTime,webViewLink",
+        ).execute()
+
+    def delete_doc(self, doc_id: str):
+        if not doc_id:
+            raise ValueError("Document id is required.")
+        self.ensure_services()
+        self._drive_service.files().delete(fileId=doc_id).execute()
+
+    def export_doc_text(self, doc_id: str):
+        if not doc_id:
+            raise ValueError("Document id is required.")
+        self.ensure_services()
+        payload = self._drive_service.files().export(
+            fileId=doc_id,
+            mimeType="text/plain",
+        ).execute()
+        if isinstance(payload, bytes):
+            return payload.decode("utf-8", errors="replace")
+        return str(payload or "")
+
 
 class FaceWidget(QLabel):
     def __init__(self, faces_dir, parent=None):
@@ -2725,16 +2768,38 @@ class GrimveilDeck(QMainWindow):
         records_title.setStyleSheet(f"color: {C_GOLD}; font-size: 10px; letter-spacing: 1px; font-family: Georgia, serif;")
         records_header.addWidget(records_title)
         records_header.addStretch(1)
-        self.btn_records_refresh = QPushButton("REFRESH")
-        self.btn_records_refresh.setFixedHeight(22)
-        self.btn_records_refresh.setStyleSheet(
-            f"QPushButton {{ background-color: {C_BG3}; color: {C_CYAN}; border: 1px solid {C_CYAN_DIM}; "
-            f"font-family: Georgia, serif; font-size: 9px; padding: 2px 8px; }}"
-            f"QPushButton:hover {{ border-color: {C_CYAN}; color: {C_TEXT}; }}"
-        )
-        self.btn_records_refresh.clicked.connect(self._refresh_records_docs)
-        records_header.addWidget(self.btn_records_refresh)
         records_layout.addLayout(records_header)
+
+        records_actions = QHBoxLayout()
+        records_actions.setContentsMargins(0, 0, 0, 0)
+        records_actions.setSpacing(4)
+        self.btn_records_refresh = QPushButton("REFRESH")
+        self.btn_records_new = QPushButton("NEW DOC")
+        self.btn_records_open = QPushButton("OPEN")
+        self.btn_records_delete = QPushButton("DELETE")
+        self.btn_records_export = QPushButton("EXPORT")
+        for btn in (
+            self.btn_records_refresh,
+            self.btn_records_new,
+            self.btn_records_open,
+            self.btn_records_delete,
+            self.btn_records_export,
+        ):
+            btn.setFixedHeight(22)
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {C_BG3}; color: {C_CYAN}; border: 1px solid {C_CYAN_DIM}; "
+                f"font-family: Georgia, serif; font-size: 9px; padding: 2px 8px; }}"
+                f"QPushButton:hover {{ border-color: {C_CYAN}; color: {C_TEXT}; }}"
+                f"QPushButton:disabled {{ background-color: {C_BG}; color: {C_TEXT_DIM}; border-color: {C_TEXT_DIM}; }}"
+            )
+            records_actions.addWidget(btn)
+        records_actions.addStretch(1)
+        self.btn_records_refresh.clicked.connect(self._refresh_records_docs)
+        self.btn_records_new.clicked.connect(self._records_create_new_doc)
+        self.btn_records_open.clicked.connect(self._records_open_selected_doc)
+        self.btn_records_delete.clicked.connect(self._records_delete_selected_doc)
+        self.btn_records_export.clicked.connect(self._records_export_selected_doc)
+        records_layout.addLayout(records_actions)
 
         self.records_status_label = QLabel("Google Docs integration loading...")
         self.records_status_label.setStyleSheet(
@@ -2875,16 +2940,41 @@ class GrimveilDeck(QMainWindow):
         if label == "Records" and not self.records_initialized:
             self._refresh_records_docs()
 
-    def _refresh_records_docs(self):
+    def _safe_records_filename(self, title: str) -> str:
+        base = re.sub(r"[\\/:*?\"<>|]+", "_", (title or "untitled_record")).strip(" ._")
+        base = re.sub(r"\s+", " ", base).strip()
+        if not base:
+            base = "untitled_record"
+        return base[:120]
+
+    def _get_selected_record_item(self):
+        return self.records_list_widget.currentItem()
+
+    def _get_selected_record_info(self):
+        item = self._get_selected_record_item()
+        if item is None:
+            return None, {}
+        return item, item.data(Qt.ItemDataRole.UserRole) or {}
+
+    def _set_record_preview_empty(self, message: str = "Select a document to load metadata and preview."):
+        self.records_preview_meta.setText(message)
+        self.records_preview_text.setPlainText("")
+
+    def _refresh_records_docs(self, preferred_doc_id: str = ""):
         if not hasattr(self, "records_status_label"):
             return
+        current_item = self.records_list_widget.currentItem()
+        if not preferred_doc_id and current_item is not None:
+            current_info = current_item.data(Qt.ItemDataRole.UserRole) or {}
+            preferred_doc_id = (current_info.get("id") or "").strip()
         self.records_status_label.setText("Loading recent Google Docs records...")
-        self.log_diagnostic("Drive file list fetch started.", level="INFO")
+        self.log_diagnostic("Records refresh started.", level="INFO")
         try:
             files = self.google_records.list_recent_docs(page_size=30)
             self.records_cache = files
             self.records_initialized = True
             self.records_list_widget.clear()
+            selected_item = None
             for file_info in files:
                 title = (file_info.get("name") or "Untitled").strip() or "Untitled"
                 modified = file_info.get("modifiedTime") or "unknown-time"
@@ -2892,6 +2982,8 @@ class GrimveilDeck(QMainWindow):
                 row_text = f"{title}    [{pretty_modified}]"
                 item = QListWidgetItem(row_text)
                 item.setData(Qt.ItemDataRole.UserRole, file_info)
+                if preferred_doc_id and (file_info.get("id") or "").strip() == preferred_doc_id:
+                    selected_item = item
                 tooltip = (
                     f"id: {file_info.get('id', 'n/a')}\n"
                     f"modified: {modified}\n"
@@ -2902,13 +2994,91 @@ class GrimveilDeck(QMainWindow):
             doc_count = len(files)
             if doc_count:
                 self.records_status_label.setText(f"Loaded {doc_count} recent Google Docs record(s).")
+                if selected_item is not None:
+                    self.records_list_widget.setCurrentItem(selected_item)
+                    self._on_records_doc_selected(selected_item)
             else:
                 self.records_status_label.setText("No Google Docs records returned.")
+                self._set_record_preview_empty("No Records document selected.\nPreview unavailable.")
+            self.log_diagnostic(f"Records refresh completed. docs={doc_count}", level="INFO")
         except Exception as ex:
             self.records_initialized = False
             self.records_list_widget.clear()
             self.records_status_label.setText("Records unavailable. See Diagnostics for details.")
+            self._set_record_preview_empty("Records unavailable.\nPreview unavailable.")
+            self.log_diagnostic(f"Records refresh failed: {ex}", level="ERROR")
             self.log_diagnostic(f"Drive auth/docs fetch failure: {ex}", level="ERROR")
+
+    def _records_create_new_doc(self):
+        default_title = "New GrimVeile Record"
+        self.log_diagnostic(f"New doc creation started. requested_title={default_title}", level="INFO")
+        try:
+            created = self.google_records.create_doc(default_title)
+            created_id = (created.get("id") or "").strip()
+            created_title = (created.get("name") or default_title).strip() or default_title
+            self.log_diagnostic(
+                f"New doc creation succeeded. id={created_id or 'n/a'} title={created_title}",
+                level="INFO"
+            )
+            self._refresh_records_docs(preferred_doc_id=created_id)
+        except Exception as ex:
+            self.log_diagnostic(f"New doc creation failed: {ex}", level="ERROR")
+
+    def _records_open_selected_doc(self):
+        self.log_diagnostic("Open selected doc requested.", level="INFO")
+        _, file_info = self._get_selected_record_info()
+        doc_id = (file_info.get("id") or "").strip()
+        title = (file_info.get("name") or "Untitled").strip() or "Untitled"
+        if not doc_id:
+            self.log_diagnostic("Open selected doc failed: no document selected.", level="WARN")
+            return
+        self.log_diagnostic(f"Open selected doc target id={doc_id} title={title}", level="INFO")
+        try:
+            web_link = (file_info.get("webViewLink") or "").strip()
+            if not web_link:
+                meta = self.google_records.get_doc_metadata(doc_id)
+                web_link = (meta.get("webViewLink") or "").strip()
+            if not web_link:
+                raise RuntimeError("No webViewLink returned for selected document.")
+            webbrowser.open(web_link, new=2)
+            self.log_diagnostic(f"Open selected doc succeeded. link={web_link}", level="INFO")
+        except Exception as ex:
+            self.log_diagnostic(f"Open selected doc failed: {ex}", level="ERROR")
+
+    def _records_delete_selected_doc(self):
+        item, file_info = self._get_selected_record_info()
+        doc_id = (file_info.get("id") or "").strip()
+        title = (file_info.get("name") or "Untitled").strip() or "Untitled"
+        if not doc_id or item is None:
+            self.log_diagnostic("Delete selected doc failed: no document selected.", level="WARN")
+            return
+        self.log_diagnostic(f"Delete selected doc started. id={doc_id} title={title}", level="INFO")
+        try:
+            self.google_records.delete_doc(doc_id)
+            self.log_diagnostic(f"Delete selected doc succeeded. id={doc_id} title={title}", level="INFO")
+            self._set_record_preview_empty("Document deleted.\nSelect a document to load metadata and preview.")
+            self._refresh_records_docs()
+        except Exception as ex:
+            self.log_diagnostic(f"Delete selected doc failed. id={doc_id} title={title} error={ex}", level="ERROR")
+
+    def _records_export_selected_doc(self):
+        self.log_diagnostic("Export selected doc started.", level="INFO")
+        _, file_info = self._get_selected_record_info()
+        doc_id = (file_info.get("id") or "").strip()
+        title = (file_info.get("name") or "Untitled").strip() or "Untitled"
+        if not doc_id:
+            self.log_diagnostic("Export selected doc failed: no document selected.", level="WARN")
+            return
+        self.log_diagnostic(f"Export selected doc target id={doc_id} title={title}", level="INFO")
+        try:
+            payload = self.google_records.export_doc_text(doc_id)
+            GOOGLE_EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+            safe_name = self._safe_records_filename(title)
+            export_path = GOOGLE_EXPORTS_DIR / f"{safe_name}.txt"
+            export_path.write_text(payload, encoding="utf-8")
+            self.log_diagnostic(f"Export selected doc succeeded. path={export_path}", level="INFO")
+        except Exception as ex:
+            self.log_diagnostic(f"Export selected doc failed. id={doc_id} title={title} error={ex}", level="ERROR")
 
     def _on_records_doc_selected(self, item: QListWidgetItem):
         if item is None:
