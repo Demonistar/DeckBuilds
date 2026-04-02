@@ -1,11 +1,14 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.10.1
+# Version: 1.11.0
 # Build Date: 2026-04-02
 # Summary:
-#   Records tab now defaults Open to local export + local app launch, with separate Open Web action.
+#   Records tab converted to Drive-first workspace with folder navigation and creation.
 # Changelog:
+#   - converted Records tab from Docs-first to Drive-first workspace
+#   - added folder navigation and folder creation
+#   - preserved Google Docs support inside the unified Records tab
 #   - changed Records default open behavior to local export + local app launch
 #   - added separate Open Web action for browser access
 #   - expanded Records tab with document actions
@@ -97,7 +100,7 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.10.1"
+APP_VERSION = "1.11.0"
 VERSION_DATE = "2026-04-02"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
@@ -1701,17 +1704,27 @@ class GoogleDocsDriveService:
             self._log(f"Docs auth failure: {ex}", level="ERROR")
             raise
 
-    def list_recent_docs(self, page_size: int = 25):
+    def list_folder_items(self, folder_id: str = "root", page_size: int = 100):
         self.ensure_services()
-        self._log("Drive file list fetch started.", level="INFO")
+        safe_folder_id = (folder_id or "root").strip() or "root"
+        self._log(f"Drive file list fetch started. folder_id={safe_folder_id}", level="INFO")
         response = self._drive_service.files().list(
-            q="mimeType='application/vnd.google-apps.document' and trashed=false",
-            pageSize=max(1, min(int(page_size or 25), 100)),
-            orderBy="modifiedTime desc",
-            fields="files(id,name,modifiedTime,webViewLink,lastModifyingUser(displayName,emailAddress))",
+            q=f"'{safe_folder_id}' in parents and trashed=false",
+            pageSize=max(1, min(int(page_size or 100), 200)),
+            orderBy="folder,name,modifiedTime desc",
+            fields=(
+                "files("
+                "id,name,mimeType,modifiedTime,webViewLink,parents,size,"
+                "lastModifyingUser(displayName,emailAddress)"
+                ")"
+            ),
         ).execute()
         files = response.get("files", [])
-        self._log(f"Drive docs returned: {len(files)}", level="INFO")
+        for item in files:
+            mime = (item.get("mimeType") or "").strip()
+            item["is_folder"] = mime == "application/vnd.google-apps.folder"
+            item["is_google_doc"] = mime == "application/vnd.google-apps.document"
+        self._log(f"Drive items returned: {len(files)} folder_id={safe_folder_id}", level="INFO")
         return files
 
     def get_doc_preview(self, doc_id: str, max_chars: int = 1800):
@@ -1744,32 +1757,63 @@ class GoogleDocsDriveService:
             "preview_text": parsed or "[No text content returned from Docs API.]",
         }
 
-    def create_doc(self, title: str = "New GrimVeile Record"):
+    def create_doc(self, title: str = "New GrimVeile Record", parent_folder_id: str = "root"):
         safe_title = (title or "New GrimVeile Record").strip() or "New GrimVeile Record"
         self.ensure_services()
-        created = self._docs_service.documents().create(body={"title": safe_title}).execute()
-        doc_id = created.get("documentId")
-        meta = self.get_doc_metadata(doc_id) if doc_id else {}
+        safe_parent_id = (parent_folder_id or "root").strip() or "root"
+        created = self._drive_service.files().create(
+            body={
+                "name": safe_title,
+                "mimeType": "application/vnd.google-apps.document",
+                "parents": [safe_parent_id],
+            },
+            fields="id,name,mimeType,modifiedTime,webViewLink,parents",
+        ).execute()
+        doc_id = created.get("id")
+        meta = self.get_file_metadata(doc_id) if doc_id else {}
         return {
             "id": doc_id,
             "name": meta.get("name") or safe_title,
+            "mimeType": meta.get("mimeType") or "application/vnd.google-apps.document",
+            "modifiedTime": meta.get("modifiedTime"),
             "webViewLink": meta.get("webViewLink"),
+            "parents": meta.get("parents") or [safe_parent_id],
         }
 
-    def get_doc_metadata(self, doc_id: str):
-        if not doc_id:
-            raise ValueError("Document id is required.")
+    def create_folder(self, name: str = "New Folder", parent_folder_id: str = "root"):
+        safe_name = (name or "New Folder").strip() or "New Folder"
+        safe_parent_id = (parent_folder_id or "root").strip() or "root"
+        self.ensure_services()
+        created = self._drive_service.files().create(
+            body={
+                "name": safe_name,
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents": [safe_parent_id],
+            },
+            fields="id,name,mimeType,modifiedTime,webViewLink,parents",
+        ).execute()
+        return created
+
+    def get_file_metadata(self, file_id: str):
+        if not file_id:
+            raise ValueError("File id is required.")
         self.ensure_services()
         return self._drive_service.files().get(
-            fileId=doc_id,
-            fields="id,name,modifiedTime,webViewLink",
+            fileId=file_id,
+            fields="id,name,mimeType,modifiedTime,webViewLink,parents,size",
         ).execute()
 
-    def delete_doc(self, doc_id: str):
-        if not doc_id:
-            raise ValueError("Document id is required.")
+    def get_doc_metadata(self, doc_id: str):
+        return self.get_file_metadata(doc_id)
+
+    def delete_item(self, file_id: str):
+        if not file_id:
+            raise ValueError("File id is required.")
         self.ensure_services()
-        self._drive_service.files().delete(fileId=doc_id).execute()
+        self._drive_service.files().delete(fileId=file_id).execute()
+
+    def delete_doc(self, doc_id: str):
+        self.delete_item(doc_id)
 
     def export_doc_text(self, doc_id: str):
         if not doc_id:
@@ -1782,6 +1826,12 @@ class GoogleDocsDriveService:
         if isinstance(payload, bytes):
             return payload.decode("utf-8", errors="replace")
         return str(payload or "")
+
+    def download_file_bytes(self, file_id: str):
+        if not file_id:
+            raise ValueError("File id is required.")
+        self.ensure_services()
+        return self._drive_service.files().get_media(fileId=file_id).execute()
 
 
 class FaceWidget(QLabel):
@@ -1970,6 +2020,8 @@ class GrimveilDeck(QMainWindow):
         )
         self.records_cache = []
         self.records_initialized = False
+        self.records_current_folder_id = "root"
+        self.records_path_stack = [{"id": "root", "name": "My Drive"}]
         self._google_link_announced = False
         self._last_status_logged = None
         self._generation_started_at = None
@@ -2776,6 +2828,8 @@ class GrimveilDeck(QMainWindow):
         records_actions.setContentsMargins(0, 0, 0, 0)
         records_actions.setSpacing(4)
         self.btn_records_refresh = QPushButton("REFRESH")
+        self.btn_records_up = QPushButton("UP")
+        self.btn_records_new_folder = QPushButton("NEW FOLDER")
         self.btn_records_new = QPushButton("NEW DOC")
         self.btn_records_open = QPushButton("OPEN")
         self.btn_records_open_web = QPushButton("OPEN WEB")
@@ -2783,6 +2837,8 @@ class GrimveilDeck(QMainWindow):
         self.btn_records_export = QPushButton("EXPORT")
         for btn in (
             self.btn_records_refresh,
+            self.btn_records_up,
+            self.btn_records_new_folder,
             self.btn_records_new,
             self.btn_records_open,
             self.btn_records_open_web,
@@ -2799,19 +2855,28 @@ class GrimveilDeck(QMainWindow):
             records_actions.addWidget(btn)
         records_actions.addStretch(1)
         self.btn_records_refresh.clicked.connect(self._refresh_records_docs)
+        self.btn_records_up.clicked.connect(self._records_navigate_up)
+        self.btn_records_new_folder.clicked.connect(self._records_create_new_folder)
         self.btn_records_new.clicked.connect(self._records_create_new_doc)
-        self.btn_records_open.clicked.connect(self._records_open_selected_doc)
-        self.btn_records_open_web.clicked.connect(self._records_open_selected_doc_web)
-        self.btn_records_delete.clicked.connect(self._records_delete_selected_doc)
-        self.btn_records_export.clicked.connect(self._records_export_selected_doc)
+        self.btn_records_open.clicked.connect(self._records_open_selected_item)
+        self.btn_records_open_web.clicked.connect(self._records_open_selected_item_web)
+        self.btn_records_delete.clicked.connect(self._records_delete_selected_item)
+        self.btn_records_export.clicked.connect(self._records_export_selected_item)
         records_layout.addLayout(records_actions)
 
-        self.records_status_label = QLabel("Google Docs integration loading...")
+        self.records_status_label = QLabel("Google Drive integration loading...")
         self.records_status_label.setStyleSheet(
             f"background: {C_PANEL}; color: {C_TEXT_DIM}; border: 1px solid {C_BORDER}; "
             f"font-family: Georgia, serif; font-size: 10px; padding: 8px;"
         )
         records_layout.addWidget(self.records_status_label)
+
+        self.records_path_label = QLabel("Path: My Drive")
+        self.records_path_label.setStyleSheet(
+            f"background: {C_PANEL}; color: {C_TEXT_DIM}; border: 1px solid {C_BORDER}; "
+            f"font-family: Georgia, serif; font-size: 10px; padding: 6px;"
+        )
+        records_layout.addWidget(self.records_path_label)
 
         self.records_list_widget = QListWidget()
         self.records_list_widget.setMinimumHeight(110)
@@ -2819,10 +2884,10 @@ class GrimveilDeck(QMainWindow):
             f"background: {C_BG3}; color: {C_TEXT}; border: 1px solid {C_BORDER}; "
             f"font-family: Georgia, serif; font-size: 10px;"
         )
-        self.records_list_widget.itemClicked.connect(self._on_records_doc_selected)
+        self.records_list_widget.itemClicked.connect(self._on_records_item_selected)
         records_layout.addWidget(self.records_list_widget)
 
-        self.records_preview_meta = QLabel("Select a document to load metadata and preview.")
+        self.records_preview_meta = QLabel("Select an item to load metadata and preview.")
         self.records_preview_meta.setWordWrap(True)
         self.records_preview_meta.setStyleSheet(
             f"background: {C_PANEL}; color: {C_TEXT_DIM}; border: 1px solid {C_BORDER}; "
@@ -2961,9 +3026,44 @@ class GrimveilDeck(QMainWindow):
             return None, {}
         return item, item.data(Qt.ItemDataRole.UserRole) or {}
 
-    def _set_record_preview_empty(self, message: str = "Select a document to load metadata and preview."):
+    def _set_record_preview_empty(self, message: str = "Select an item to load metadata and preview."):
         self.records_preview_meta.setText(message)
         self.records_preview_text.setPlainText("")
+
+    def _records_is_folder(self, file_info: dict) -> bool:
+        return (file_info.get("mimeType") or "").strip() == "application/vnd.google-apps.folder"
+
+    def _records_is_google_doc(self, file_info: dict) -> bool:
+        return (file_info.get("mimeType") or "").strip() == "application/vnd.google-apps.document"
+
+    def _update_records_path_label(self):
+        path_text = " / ".join(node.get("name") or "?" for node in self.records_path_stack)
+        self.records_path_label.setText(f"Path: {path_text}")
+        self.log_diagnostic(f"Records current folder/path id={self.records_current_folder_id} path={path_text}", level="INFO")
+
+    def _records_enter_folder(self, folder_info: dict):
+        folder_id = (folder_info.get("id") or "").strip()
+        folder_name = (folder_info.get("name") or "Untitled Folder").strip() or "Untitled Folder"
+        if not folder_id:
+            self.log_diagnostic("Records folder navigation failed: folder id missing.", level="WARN")
+            return
+        self.records_current_folder_id = folder_id
+        self.records_path_stack.append({"id": folder_id, "name": folder_name})
+        self.log_diagnostic(f"Records folder navigation enter id={folder_id} name={folder_name}", level="INFO")
+        self._refresh_records_docs()
+
+    def _records_navigate_up(self):
+        if len(self.records_path_stack) <= 1:
+            self.log_diagnostic("Records folder navigation up ignored: already at My Drive root.", level="INFO")
+            return
+        current = self.records_path_stack.pop()
+        parent = self.records_path_stack[-1]
+        self.records_current_folder_id = parent.get("id") or "root"
+        self.log_diagnostic(
+            f"Records folder navigation up from id={current.get('id')} to id={self.records_current_folder_id}",
+            level="INFO"
+        )
+        self._refresh_records_docs()
 
     def _refresh_records_docs(self, preferred_doc_id: str = ""):
         if not hasattr(self, "records_status_label"):
@@ -2972,40 +3072,50 @@ class GrimveilDeck(QMainWindow):
         if not preferred_doc_id and current_item is not None:
             current_info = current_item.data(Qt.ItemDataRole.UserRole) or {}
             preferred_doc_id = (current_info.get("id") or "").strip()
-        self.records_status_label.setText("Loading recent Google Docs records...")
-        self.log_diagnostic("Records refresh started.", level="INFO")
+        self.records_status_label.setText("Loading Google Drive records...")
+        self._update_records_path_label()
+        self.log_diagnostic(f"Records refresh started. folder_id={self.records_current_folder_id}", level="INFO")
         try:
-            files = self.google_records.list_recent_docs(page_size=30)
+            files = self.google_records.list_folder_items(folder_id=self.records_current_folder_id, page_size=200)
             self.records_cache = files
             self.records_initialized = True
             self.records_list_widget.clear()
             selected_item = None
             for file_info in files:
                 title = (file_info.get("name") or "Untitled").strip() or "Untitled"
+                mime = (file_info.get("mimeType") or "unknown").strip()
+                is_folder = self._records_is_folder(file_info)
+                is_doc = self._records_is_google_doc(file_info)
                 modified = file_info.get("modifiedTime") or "unknown-time"
                 pretty_modified = modified.replace("T", " ").replace("Z", " UTC")
-                row_text = f"{title}    [{pretty_modified}]"
+                type_prefix = "📁" if is_folder else ("📝" if is_doc else "📄")
+                row_text = f"{type_prefix} {title}    [{pretty_modified}]"
                 item = QListWidgetItem(row_text)
                 item.setData(Qt.ItemDataRole.UserRole, file_info)
                 if preferred_doc_id and (file_info.get("id") or "").strip() == preferred_doc_id:
                     selected_item = item
                 tooltip = (
                     f"id: {file_info.get('id', 'n/a')}\n"
+                    f"mimeType: {mime}\n"
                     f"modified: {modified}\n"
+                    f"parents: {', '.join(file_info.get('parents') or []) or 'n/a'}\n"
                     f"link: {file_info.get('webViewLink', 'n/a')}"
                 )
                 item.setToolTip(tooltip)
                 self.records_list_widget.addItem(item)
-            doc_count = len(files)
-            if doc_count:
-                self.records_status_label.setText(f"Loaded {doc_count} recent Google Docs record(s).")
+            item_count = len(files)
+            if item_count:
+                self.records_status_label.setText(f"Loaded {item_count} Google Drive item(s).")
                 if selected_item is not None:
                     self.records_list_widget.setCurrentItem(selected_item)
-                    self._on_records_doc_selected(selected_item)
+                    self._on_records_item_selected(selected_item)
             else:
-                self.records_status_label.setText("No Google Docs records returned.")
-                self._set_record_preview_empty("No Records document selected.\nPreview unavailable.")
-            self.log_diagnostic(f"Records refresh completed. docs={doc_count}", level="INFO")
+                self.records_status_label.setText("No Google Drive items returned for current folder.")
+                self._set_record_preview_empty("No Records item selected.\nPreview unavailable.")
+            self.log_diagnostic(
+                f"Records refresh completed. folder_id={self.records_current_folder_id} item_count={item_count}",
+                level="INFO"
+            )
         except Exception as ex:
             self.records_initialized = False
             self.records_list_widget.clear()
@@ -3014,125 +3124,205 @@ class GrimveilDeck(QMainWindow):
             self.log_diagnostic(f"Records refresh failed: {ex}", level="ERROR")
             self.log_diagnostic(f"Drive auth/docs fetch failure: {ex}", level="ERROR")
 
+    def _records_create_new_folder(self):
+        default_name = "New GrimVeile Folder"
+        self.log_diagnostic(
+            f"New folder creation started. folder_id={self.records_current_folder_id} name={default_name}",
+            level="INFO"
+        )
+        try:
+            created = self.google_records.create_folder(default_name, parent_folder_id=self.records_current_folder_id)
+            created_id = (created.get("id") or "").strip() or "n/a"
+            created_name = (created.get("name") or default_name).strip() or default_name
+            self.log_diagnostic(
+                f"New folder creation succeeded. id={created_id} name={created_name} parent={self.records_current_folder_id}",
+                level="INFO"
+            )
+            self._refresh_records_docs(preferred_doc_id=created_id)
+        except Exception as ex:
+            self.log_diagnostic(f"New folder creation failed: {ex}", level="ERROR")
+
     def _records_create_new_doc(self):
         default_title = "New GrimVeile Record"
-        self.log_diagnostic(f"New doc creation started. requested_title={default_title}", level="INFO")
+        self.log_diagnostic(
+            f"New doc creation started. requested_title={default_title} parent={self.records_current_folder_id}",
+            level="INFO"
+        )
         try:
-            created = self.google_records.create_doc(default_title)
+            created = self.google_records.create_doc(default_title, parent_folder_id=self.records_current_folder_id)
             created_id = (created.get("id") or "").strip()
             created_title = (created.get("name") or default_title).strip() or default_title
             self.log_diagnostic(
-                f"New doc creation succeeded. id={created_id or 'n/a'} title={created_title}",
+                f"New doc creation succeeded. id={created_id or 'n/a'} title={created_title} parent={self.records_current_folder_id}",
                 level="INFO"
             )
             self._refresh_records_docs(preferred_doc_id=created_id)
         except Exception as ex:
             self.log_diagnostic(f"New doc creation failed: {ex}", level="ERROR")
 
-    def _records_open_selected_doc(self):
-        self.log_diagnostic("Open selected doc requested.", level="INFO")
+    def _records_open_selected_item(self):
+        self.log_diagnostic("Open selected item requested.", level="INFO")
         _, file_info = self._get_selected_record_info()
-        doc_id = (file_info.get("id") or "").strip()
+        item_id = (file_info.get("id") or "").strip()
         title = (file_info.get("name") or "Untitled").strip() or "Untitled"
-        if not doc_id:
-            self.log_diagnostic("Open selected doc failed: no document selected.", level="WARN")
+        mime = (file_info.get("mimeType") or "").strip()
+        if not item_id:
+            self.log_diagnostic("Open selected item failed: no item selected.", level="WARN")
             return
-        self.log_diagnostic(f"Open selected doc target id={doc_id} title={title}", level="INFO")
+        if self._records_is_folder(file_info):
+            self.log_diagnostic(f"Open selected folder target id={item_id} title={title}", level="INFO")
+            self._records_enter_folder(file_info)
+            return
+        self.log_diagnostic(f"Open selected file target id={item_id} title={title} mimeType={mime}", level="INFO")
         try:
-            export_path = self._records_export_doc_to_local(doc_id=doc_id, title=title, action_label="Open selected doc")
-            self.log_diagnostic(f"Open selected doc local open started. path={export_path}", level="INFO")
+            export_path = self._records_export_item_to_local(file_info=file_info, action_label="Open selected file")
+            self.log_diagnostic(f"Open selected file local open started. path={export_path}", level="INFO")
             os.startfile(str(export_path))
-            self.log_diagnostic(f"Open selected doc local open succeeded. path={export_path}", level="INFO")
+            self.log_diagnostic(f"Open selected file local open succeeded. path={export_path}", level="INFO")
         except Exception as ex:
-            self.log_diagnostic(f"Open selected doc failed: {ex}", level="ERROR")
+            self.log_diagnostic(f"Open selected file failed: {ex}", level="ERROR")
 
-    def _records_open_selected_doc_web(self):
-        self.log_diagnostic("Open web selected doc requested.", level="INFO")
+    def _records_open_selected_item_web(self):
+        self.log_diagnostic("Open web selected item requested.", level="INFO")
         _, file_info = self._get_selected_record_info()
-        doc_id = (file_info.get("id") or "").strip()
+        item_id = (file_info.get("id") or "").strip()
         title = (file_info.get("name") or "Untitled").strip() or "Untitled"
-        if not doc_id:
-            self.log_diagnostic("Open web selected doc failed: no document selected.", level="WARN")
+        if not item_id:
+            self.log_diagnostic("Open web selected item failed: no item selected.", level="WARN")
             return
-        self.log_diagnostic(f"Open web selected doc target id={doc_id} title={title}", level="INFO")
+        self.log_diagnostic(f"Open web selected item target id={item_id} title={title}", level="INFO")
         try:
-            self.log_diagnostic(f"Open web selected doc started. id={doc_id} title={title}", level="INFO")
+            self.log_diagnostic(f"Open web selected item started. id={item_id} title={title}", level="INFO")
             web_link = (file_info.get("webViewLink") or "").strip()
             if not web_link:
-                meta = self.google_records.get_doc_metadata(doc_id)
+                meta = self.google_records.get_file_metadata(item_id)
                 web_link = (meta.get("webViewLink") or "").strip()
             if not web_link:
-                raise RuntimeError("No webViewLink returned for selected document.")
+                raise RuntimeError("No webViewLink returned for selected item.")
             webbrowser.open(web_link, new=2)
-            self.log_diagnostic(f"Open web selected doc succeeded. link={web_link}", level="INFO")
+            self.log_diagnostic(f"Open web selected item succeeded. link={web_link}", level="INFO")
         except Exception as ex:
-            self.log_diagnostic(f"Open web selected doc failed. id={doc_id} title={title} error={ex}", level="ERROR")
+            self.log_diagnostic(f"Open web selected item failed. id={item_id} title={title} error={ex}", level="ERROR")
 
-    def _records_delete_selected_doc(self):
+    def _records_delete_selected_item(self):
         item, file_info = self._get_selected_record_info()
-        doc_id = (file_info.get("id") or "").strip()
+        item_id = (file_info.get("id") or "").strip()
         title = (file_info.get("name") or "Untitled").strip() or "Untitled"
-        if not doc_id or item is None:
-            self.log_diagnostic("Delete selected doc failed: no document selected.", level="WARN")
+        mime = (file_info.get("mimeType") or "").strip()
+        if not item_id or item is None:
+            self.log_diagnostic("Delete selected item failed: no item selected.", level="WARN")
             return
-        self.log_diagnostic(f"Delete selected doc started. id={doc_id} title={title}", level="INFO")
+        self.log_diagnostic(f"Delete selected item started. id={item_id} title={title} mimeType={mime}", level="INFO")
         try:
-            self.google_records.delete_doc(doc_id)
-            self.log_diagnostic(f"Delete selected doc succeeded. id={doc_id} title={title}", level="INFO")
-            self._set_record_preview_empty("Document deleted.\nSelect a document to load metadata and preview.")
+            self.google_records.delete_item(item_id)
+            self.log_diagnostic(f"Delete selected item succeeded. id={item_id} title={title}", level="INFO")
+            self._set_record_preview_empty("Item deleted.\nSelect an item to load metadata and preview.")
             self._refresh_records_docs()
         except Exception as ex:
-            self.log_diagnostic(f"Delete selected doc failed. id={doc_id} title={title} error={ex}", level="ERROR")
+            self.log_diagnostic(f"Delete selected item failed. id={item_id} title={title} error={ex}", level="ERROR")
 
-    def _records_export_selected_doc(self):
-        self.log_diagnostic("Export selected doc started.", level="INFO")
+    def _records_export_selected_item(self):
+        self.log_diagnostic("Export selected item started.", level="INFO")
         _, file_info = self._get_selected_record_info()
-        doc_id = (file_info.get("id") or "").strip()
+        item_id = (file_info.get("id") or "").strip()
         title = (file_info.get("name") or "Untitled").strip() or "Untitled"
-        if not doc_id:
-            self.log_diagnostic("Export selected doc failed: no document selected.", level="WARN")
+        mime = (file_info.get("mimeType") or "").strip()
+        if not item_id:
+            self.log_diagnostic("Export selected item failed: no item selected.", level="WARN")
             return
-        self.log_diagnostic(f"Export selected doc target id={doc_id} title={title}", level="INFO")
+        if self._records_is_folder(file_info):
+            self.log_diagnostic("Export selected item skipped: folders cannot be exported as files.", level="WARN")
+            return
+        self.log_diagnostic(f"Export selected item target id={item_id} title={title} mimeType={mime}", level="INFO")
         try:
-            export_path = self._records_export_doc_to_local(doc_id=doc_id, title=title, action_label="Export selected doc")
-            self.log_diagnostic(f"Export selected doc succeeded. path={export_path}", level="INFO")
+            export_path = self._records_export_item_to_local(file_info=file_info, action_label="Export selected item")
+            self.log_diagnostic(f"Export selected item succeeded. path={export_path}", level="INFO")
         except Exception as ex:
-            self.log_diagnostic(f"Export selected doc failed. id={doc_id} title={title} error={ex}", level="ERROR")
+            self.log_diagnostic(f"Export selected item failed. id={item_id} title={title} error={ex}", level="ERROR")
 
-    def _records_export_doc_to_local(self, doc_id: str, title: str, action_label: str = "Records export") -> Path:
-        self.log_diagnostic(f"{action_label} local export started. id={doc_id} title={title}", level="INFO")
-        payload = self.google_records.export_doc_text(doc_id)
+    def _records_export_item_to_local(self, file_info: dict, action_label: str = "Records export") -> Path:
+        item_id = (file_info.get("id") or "").strip()
+        title = (file_info.get("name") or "Untitled").strip() or "Untitled"
+        mime = (file_info.get("mimeType") or "").strip()
+        self.log_diagnostic(
+            f"{action_label} local export started. id={item_id} title={title} mimeType={mime}",
+            level="INFO"
+        )
+        if self._records_is_folder(file_info):
+            raise RuntimeError("Folders cannot be exported as local files.")
         GOOGLE_EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
         safe_name = self._safe_records_filename(title)
-        export_path = GOOGLE_EXPORTS_DIR / f"{safe_name}.txt"
-        export_path.write_text(payload, encoding="utf-8")
+        if self._records_is_google_doc(file_info):
+            payload = self.google_records.export_doc_text(item_id)
+            export_path = GOOGLE_EXPORTS_DIR / f"{safe_name}.txt"
+            export_path.write_text(payload, encoding="utf-8")
+        else:
+            payload = self.google_records.download_file_bytes(item_id)
+            extension = ".bin"
+            if "." in safe_name:
+                extension = ""
+            export_path = GOOGLE_EXPORTS_DIR / f"{safe_name}{extension}"
+            if isinstance(payload, bytes):
+                export_path.write_bytes(payload)
+            else:
+                export_path.write_text(str(payload or ""), encoding="utf-8")
         self.log_diagnostic(f"{action_label} local export path={export_path}", level="INFO")
         return export_path
 
-    def _on_records_doc_selected(self, item: QListWidgetItem):
+    def _on_records_item_selected(self, item: QListWidgetItem):
         if item is None:
             return
         file_info = item.data(Qt.ItemDataRole.UserRole) or {}
-        doc_id = (file_info.get("id") or "").strip()
+        item_id = (file_info.get("id") or "").strip()
         title = (file_info.get("name") or "Untitled").strip() or "Untitled"
         modified = file_info.get("modifiedTime") or "unknown-time"
-        self.log_diagnostic(f"Records selected doc id={doc_id} title={title}", level="INFO")
+        mime = (file_info.get("mimeType") or "unknown").strip()
+        is_folder = self._records_is_folder(file_info)
+        is_doc = self._records_is_google_doc(file_info)
+        self.log_diagnostic(
+            f"Records selected item id={item_id} title={title} mimeType={mime} folder={is_folder} google_doc={is_doc}",
+            level="INFO"
+        )
+        if is_folder:
+            self.records_preview_meta.setText(
+                f"Type: Folder\n"
+                f"Title: {title}\n"
+                f"Folder ID: {item_id or 'n/a'}\n"
+                f"Modified: {modified}\n"
+                f"Parents: {', '.join(file_info.get('parents') or []) or 'n/a'}"
+            )
+            self.records_preview_text.setPlainText("Folder selected.\nUse OPEN to navigate into this folder.")
+            return
+        if not is_doc:
+            self.records_preview_meta.setText(
+                f"Type: File\n"
+                f"Title: {title}\n"
+                f"File ID: {item_id or 'n/a'}\n"
+                f"MIME Type: {mime}\n"
+                f"Modified: {modified}\n"
+                f"Parents: {', '.join(file_info.get('parents') or []) or 'n/a'}"
+            )
+            self.records_preview_text.setPlainText(
+                "Binary/other file selected.\nUse OPEN, OPEN WEB, or EXPORT for supported actions."
+            )
+            return
         try:
-            preview = self.google_records.get_doc_preview(doc_id)
+            self.log_diagnostic(f"Records doc preview load started. id={item_id} title={title}", level="INFO")
+            preview = self.google_records.get_doc_preview(item_id)
             self.records_preview_meta.setText(
                 f"Title: {preview.get('title', title)}\n"
-                f"Document ID: {preview.get('document_id', doc_id)}\n"
+                f"Document ID: {preview.get('document_id', item_id)}\n"
                 f"Revision: {preview.get('revision_id', 'n/a')}\n"
                 f"Modified: {modified}"
             )
             self.records_preview_text.setPlainText(preview.get("preview_text") or "")
-            self.log_diagnostic("Records preview fetch success.", level="INFO")
+            self.log_diagnostic("Records doc preview load succeeded.", level="INFO")
         except Exception as ex:
             self.records_preview_meta.setText(
-                f"Title: {title}\nDocument ID: {doc_id or 'n/a'}\nModified: {modified}\nPreview: unavailable"
+                f"Title: {title}\nDocument ID: {item_id or 'n/a'}\nModified: {modified}\nPreview: unavailable"
             )
             self.records_preview_text.setPlainText("")
-            self.log_diagnostic(f"Records preview fetch failure: {ex}", level="ERROR")
+            self.log_diagnostic(f"Records doc preview load failure: {ex}", level="ERROR")
 
     def _load_model(self):
         self._qt_set_status("LOADING")
