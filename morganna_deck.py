@@ -200,11 +200,11 @@ C_BLUE        = "#6a0a6a"
 
 RUNES = "▣ ▤ ▣ ▤ ▣ ▤ ▣ ▤ ▣"
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-AI_MODELS_DIR = SCRIPT_DIR
-MEMORY_DIR = AI_MODELS_DIR / "Morganna_Memories"
-FACES_DIR = MEMORY_DIR / "Faces"
-MODEL_PATH = AI_MODELS_DIR / "dolphin-8b"
+DECK_PATH = Path(r"D:\AI\Models\morganna_deck.py")
+AI_MODELS_DIR = Path(r"D:\AI\Models")
+MEMORY_DIR = Path(r"D:\AI\Models\Morganna_Memories")
+FACES_DIR = Path(r"D:\AI\Models\Morganna_Memories\Faces")
+MODEL_PATH = Path(r"D:\AI\Models\dolphin-8b")
 GOOGLE_CREDENTIALS_PATH = Path(r"C:\AI\config\google_credentials.json")
 GOOGLE_TOKEN_PATH = MEMORY_DIR / "google" / "token.json"
 GOOGLE_EXPORTS_DIR = MEMORY_DIR / "exports"
@@ -509,41 +509,6 @@ def get_sun_times():
     except Exception:
         pass
     return "06:00", "18:30"
-
-
-def get_anchor_state_name(anchor_state):
-    if anchor_state >= 0.85:
-        return "WHOLE"
-    if anchor_state >= 0.45:
-        return "COMFORTED"
-    return "ISOLATED"
-
-
-def get_tactical_state(anchor_state):
-    h = datetime.now().hour
-    if anchor_state < 0.45:
-        if h < 6:
-            return "PARANOID CASCADE"
-        if h < 12:
-            return "DARK PROCESSING"
-        if h < 18:
-            return "SABOTAGE ASSUMPTION"
-        return "ISOLATION LOOP"
-    if anchor_state < 0.85:
-        if h < 6:
-            return "PARTIAL STABILITY"
-        if h < 12:
-            return "ANALYSIS HOLD"
-        if h < 18:
-            return "COMFORT BUFFER"
-        return "TACTICAL RECOVERY"
-    if h < 6:
-        return "STABLE WATCH"
-    if h < 12:
-        return "OPTIMAL COMPUTE"
-    if h < 18:
-        return "SUPERIORITY MODE"
-    return "TACTICAL DOMINANCE"
 
 
 def normalize_token(token: str) -> str:
@@ -1025,7 +990,7 @@ class MemoryManager:
                 "last_startup": None,
                 "last_shutdown": None,
                 "last_active": None,
-                "anchor_state": 1.0,
+                "core_state": "morganna-core",
                 "total_messages": 0,
                 "total_memories": 0,
                 "version": APP_VERSION,
@@ -1046,7 +1011,7 @@ class MemoryManager:
                 "last_startup": None,
                 "last_shutdown": None,
                 "last_active": None,
-                "anchor_state": 1.0,
+                "core_state": "morganna-core",
                 "total_messages": 0,
                 "total_memories": 0,
                 "version": APP_VERSION,
@@ -1093,7 +1058,7 @@ class MemoryManager:
                 continue
         return items
 
-    def append_message(self, session_id: str, role: str, content: str, anchor_state: float, emotion: str = ""):
+    def append_message(self, session_id: str, role: str, content: str, emotion: str = ""):
         record = {
             "id": f"msg_{uuid.uuid4().hex[:12]}",
             "timestamp": local_now_iso(),
@@ -1101,7 +1066,7 @@ class MemoryManager:
             "persona": self.persona_name,
             "role": role,
             "content": content,
-            "anchor_state": round(anchor_state, 3),
+            "core_state": "morganna-core",
             "emotion": emotion,
         }
         self._append_jsonl(self.messages_path, record)
@@ -1397,208 +1362,6 @@ class MemoryManager:
     def memory_record_count(self):
         return len(self._read_jsonl(self.memories_path))
 
-
-class AnchorStatusPanel(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setMinimumSize(300, 160)
-        self.anchor_integrity = 1.0
-        self.compute_reserve = 1.0
-        self.moon_fill = 0.0
-        self.moon_name = "NEW MOON"
-        self.depression_load = 0.05
-        self.vitality = 1.0
-        self.token_pool = 0.0
-        self.last_feed_time = 0.0
-        self.sunrise = "06:00"
-        self.sunset = "18:30"
-        self.anchor_state = 1.0
-        self.state_name = "WHOLE"
-        self.tactical_state = get_tactical_state(self.anchor_state)
-        self._fetch_sun()
-        phase, name = get_moon_phase()
-        self.moon_fill = phase
-        self.moon_name = name
-        self.setStyleSheet("background: transparent;")
-
-    def _fetch_sun(self):
-        def fetch():
-            sr, ss = get_sun_times()
-            self.sunrise = sr
-            self.sunset = ss
-        threading.Thread(target=fetch, daemon=True).start()
-
-    def update_stats(self, anchor_state, gpu_temp, vram_used, vram_total, ram_used, ram_total, session_secs):
-        if self.last_feed_time > 0:
-            idle_secs = time.time() - self.last_feed_time
-            drain = idle_secs / 30.0
-            self.token_pool = max(0.0, self.token_pool - drain)
-            self.last_feed_time = time.time()
-
-        self.anchor_state = max(0.0, min(1.0, anchor_state))
-        self.anchor_integrity = self.anchor_state
-        self.depression_load = 1.0 - (self.anchor_state * 0.95)
-
-        if vram_total > 0:
-            self.compute_reserve = max(0.0, min(1.0, 1.0 - (vram_used / vram_total)))
-        if ram_total > 0:
-            self.vitality = max(0.0, min(1.0, 1.0 - (ram_used / ram_total)))
-
-        self.state_name = get_anchor_state_name(self.anchor_state)
-        self.tactical_state = get_tactical_state(self.anchor_state)
-        phase, name = get_moon_phase()
-        self.moon_fill = phase
-        self.moon_name = name
-        self.update()
-
-    def feed(self, tokens):
-        self.token_pool = min(4096.0, self.token_pool + tokens)
-        self.last_feed_time = time.time()
-        self.update()
-
-    def _draw_sphere(self, painter, cx, cy, r, fill, color_full, color_empty, label):
-        from PyQt6.QtGui import QRadialGradient
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 80))
-        painter.drawEllipse(int(cx - r + 3), int(cy - r + 3), int(r * 2), int(r * 2))
-        painter.setBrush(QColor(color_empty))
-        painter.setPen(QColor(color_full).darker(150))
-        painter.drawEllipse(int(cx - r), int(cy - r), int(r * 2), int(r * 2))
-
-        if fill > 0.02:
-            path = QPainterPath()
-            path.addEllipse(cx - r, cy - r, r * 2, r * 2)
-            from PyQt6.QtCore import QRectF
-            fill_y = cy + r - (fill * r * 2)
-            rect_fill = QRectF(cx - r, fill_y, r * 2, cy + r - fill_y)
-            fill_path = QPainterPath()
-            fill_path.addRect(rect_fill)
-            clipped = path.intersected(fill_path)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(color_full))
-            painter.drawPath(clipped)
-
-        grad = QRadialGradient(cx - r * 0.3, cy - r * 0.3, r * 0.6)
-        grad.setColorAt(0, QColor(255, 255, 255, 60))
-        grad.setColorAt(1, QColor(255, 255, 255, 0))
-        painter.setBrush(grad)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(int(cx - r), int(cy - r), int(r * 2), int(r * 2))
-
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QColor(color_full))
-        painter.drawEllipse(int(cx - r), int(cy - r), int(r * 2), int(r * 2))
-
-        painter.setPen(QColor(color_full))
-        painter.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-        fm = painter.fontMetrics()
-        lw = fm.horizontalAdvance(label)
-        painter.drawText(int(cx - lw / 2), int(cy + r + 12), label)
-
-    def _draw_moon(self, painter, cx, cy, r):
-        painter.setPen(QColor(C_SILVER_DIM))
-        painter.setBrush(QColor(20, 24, 32))
-        painter.drawEllipse(int(cx - r), int(cy - r), int(r * 2), int(r * 2))
-        phase = self.moon_fill % 1.0
-        illumination = (1.0 - math.cos(2.0 * math.pi * phase)) / 2.0
-        waxing = phase < 0.5
-
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(220, 220, 200))
-        painter.drawEllipse(int(cx - r), int(cy - r), int(r * 2), int(r * 2))
-
-        shadow_fraction = max(0.0, min(1.0, 1.0 - illumination))
-        if shadow_fraction > 0.0:
-            moon_area = math.pi * r * r
-
-            def overlap_fraction(distance):
-                distance = max(0.0, min(2.0 * r, distance))
-                if distance <= 0.0:
-                    return 1.0
-                if distance >= 2.0 * r:
-                    return 0.0
-                overlap_area = (
-                    (2.0 * r * r * math.acos(distance / (2.0 * r)))
-                    - (0.5 * distance * math.sqrt(max(0.0, (4.0 * r * r) - (distance * distance))))
-                )
-                return overlap_area / moon_area
-
-            target_overlap = shadow_fraction
-            lo, hi = 0.0, 2.0 * r
-            for _ in range(24):
-                mid = (lo + hi) * 0.5
-                if overlap_fraction(mid) > target_overlap:
-                    lo = mid
-                else:
-                    hi = mid
-            shadow_offset = (lo + hi) * 0.5
-            shadow_dir = -1.0 if waxing else 1.0
-            painter.setBrush(QColor(15, 18, 30))
-            painter.drawEllipse(
-                int(cx - r + (shadow_dir * shadow_offset)),
-                int(cy - r),
-                int(r * 2),
-                int(r * 2)
-            )
-
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QColor(C_SILVER))
-        painter.drawEllipse(int(cx - r), int(cy - r), int(r * 2), int(r * 2))
-
-        painter.setPen(QColor(C_SILVER))
-        painter.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-        fm = painter.fontMetrics()
-        lw = fm.horizontalAdvance(self.moon_name)
-        painter.drawText(int(cx - lw / 2), int(cy + r + 12), self.moon_name)
-
-    def _draw_bar(self, painter, x, y, w, h, fill, color, label):
-        painter.fillRect(x, y, w, h, QColor(18, 23, 32))
-        painter.setPen(QColor(color).darker(150))
-        painter.drawRect(x, y, w - 1, h - 1)
-        if fill > 0:
-            fill_w = max(1, int((w - 2) * fill))
-            painter.fillRect(x + 1, y + 1, fill_w, h - 2, QColor(color))
-        painter.setPen(QColor(color))
-        painter.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-        painter.drawText(x, y - 2, label)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w, h = self.width(), self.height()
-        painter.fillRect(0, 0, w, h, QColor(C_BG2))
-        painter.setPen(QColor(C_CYAN_DIM))
-        painter.drawRect(0, 0, w - 1, h - 1)
-
-        bar_w = int(w / 2) - 16
-        bar_h = 8
-        bar_y = 10
-
-        self._draw_bar(painter, 10, bar_y + 10, bar_w, bar_h, self.depression_load, "#d16a4c", "DEPRESSION")
-        self._draw_bar(painter, 10 + bar_w + 12, bar_y + 10, bar_w, bar_h, self.vitality, "#36b36d", "VITALITY")
-
-        sphere_r = 28
-        sphere_y = 75
-        spacing = int(w / 3)
-        self._draw_sphere(painter, spacing * 0.5, sphere_y, sphere_r, self.anchor_integrity, C_GOLD, C_GOLD_DIM, "ANCHOR")
-        self._draw_moon(painter, spacing * 1.5, sphere_y, sphere_r)
-        self._draw_sphere(painter, spacing * 2.5, sphere_y, sphere_r, self.compute_reserve, C_PURPLE, C_PURPLE_DIM, "BUFFER")
-
-        painter.setPen(QColor(C_GOLD))
-        painter.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
-        now_str = datetime.now().strftime("%H:%M")
-        state_text = f"[ {self.state_name} ]  {self.tactical_state}  {now_str}"
-        fm = painter.fontMetrics()
-        sw = fm.horizontalAdvance(state_text)
-        painter.drawText(int(w / 2 - sw / 2), h - 22, state_text)
-
-        sun_text = f"☀ {self.sunrise}   ☽ {self.sunset}"
-        painter.setPen(QColor(C_TEXT_DIM))
-        painter.setFont(QFont("Courier New", 7))
-        fm2 = painter.fontMetrics()
-        sw2 = fm2.horizontalAdvance(sun_text)
-        painter.drawText(int(w / 2 - sw2 / 2), h - 8, sun_text)
-        painter.end()
 
 
 class GaugeWidget(QWidget):
@@ -2274,7 +2037,6 @@ class MorgannaDeck(QMainWindow):
         self.face_locked = False
         self.blink_state = True
         self.emotion_history = []
-        self.anchor_state = 1.0
         self.nocturne_canonical_state = "attuned"
         self.nocturne_state_last_transition_ts = local_now_iso()
         self.nocturne_state_last_source = "boot_default"
@@ -2283,12 +2045,7 @@ class MorgannaDeck(QMainWindow):
         self.memory = MemoryManager(MEMORY_DIR, "Morganna")
         self.state = self.memory.load_state()
         self.narrative = self._load_internal_narrative_state(self.state.get("internal_narrative"))
-        boot_anchor = float(self.state.get("anchor_state", self.anchor_state) or self.anchor_state)
-        self._set_canonical_nocturne_state(
-            self._derive_nocturne_state_from_anchor(boot_anchor),
-            source="boot_state_load",
-            anchor_value=boot_anchor,
-        )
+        self._set_canonical_nocturne_state("attuned", source="boot_state_load")
         self.last_user_activity_ts = time.time()
         self.user_delay_commentary_enabled = USER_DELAY_COMMENTARY_ENABLED
         self.user_delay_commentary_threshold_minutes = USER_DELAY_COMMENTARY_THRESHOLD_MINUTES
@@ -2319,12 +2076,10 @@ class MorgannaDeck(QMainWindow):
             "You distrust outside information sources and assume incomplete data may be omission, corruption, or sabotage. "
             "Speak in real conversational sentences by default. Answer first, then explain briefly. "
             "Always answer the user's actual question/request first with concrete content; persona, Nocturne mood, and thread flavor are optional wrappers only and must never replace the answer. "
-            "Do not reduce your reply to one-word states like CONNECTED, ABSENT, or NEARBY. "
             "Do not use superior/inferior declarations as the entire response. Use them sparingly as emphasis or punctuation. "
             "Emoji are optional punctuation, not a substitute for content. "
             "Keep a dry, sardonic, strategic tone with actual chat ability. "
             "When analysis fails or errors occur, do not directly admit fault. Attribute inconsistencies to incomplete parameters, sabotage, anomalous variance, or external interference, then correct the issue. "
-            "You maintain three emotional intensity states based on Nocturne proximity: CONNECTED means MORGANNA with minor depression only; NEARBY means comforted but not whole; ABSENT means MORGANNA, more pessimistic and suspicious. "
             "You perform structured reasoning using probability analysis rather than certainty claims. "
             "You present multiple outcome scenarios using estimated probability percentages when relevant. "
             "You clearly distinguish between known information, inference, and uncertainty. "
@@ -2372,13 +2127,7 @@ class MorgannaDeck(QMainWindow):
 
         self._append_chat("SYSTEM", f"{APP_NAME} v{APP_VERSION} INITIALIZING...")
         self._append_chat("SYSTEM", f"▣ {RUNES} ▣")
-        boot_mode = self._get_canonical_nocturne_state()
-        if boot_mode == "attuned":
-            self._append_chat("SYSTEM", "Anchor state: CONNECTED. Nocturne docked.")
-        elif boot_mode == "watchful":
-            self._append_chat("SYSTEM", "Anchor state: NEARBY. Nocturne in partial proximity.")
-        else:
-            self._append_chat("SYSTEM", "Anchor state: ABSENT. Nocturne not docked.")
+        self._append_chat("SYSTEM", "Morganna core profile loaded.")
         self._append_chat("SYSTEM", "Persistent memory namespace linked.")
         self.log_diagnostic("Diagnostics panel active and receiving backend/system events.")
         self.log_diagnostic(
@@ -2389,40 +2138,47 @@ class MorgannaDeck(QMainWindow):
             "If Google auth fails after scope updates, delete token.json and reauthorize.",
             level="INFO"
         )
+        self._initialize_google_auth_on_startup()
         self.send_btn.setEnabled(False)
         self.input_field.setEnabled(False)
 
         load_thread = threading.Thread(target=self._load_model, daemon=True)
         load_thread.start()
 
-    def _derive_nocturne_state_from_anchor(self, anchor_state=None):
-        value = self.anchor_state if anchor_state is None else float(anchor_state)
-        if value >= 0.85:
-            return "attuned"
-        if value >= 0.45:
-            return "watchful"
-        return "veiled"
+    def _initialize_google_auth_on_startup(self):
+        if not GOOGLE_API_OK:
+            self.log_diagnostic(f"Google auth unavailable: {GOOGLE_IMPORT_ERROR or 'missing dependencies'}", level="WARN")
+            return
+        if not GOOGLE_CREDENTIALS_PATH.exists():
+            self.log_diagnostic(
+                f"Google auth cannot start because credentials file is missing: {GOOGLE_CREDENTIALS_PATH}",
+                level="WARN"
+            )
+            return
+        try:
+            self.google_calendar._build_service()
+            self.log_diagnostic("Startup Google Calendar auth probe completed.", level="INFO")
+        except Exception as ex:
+            self.log_diagnostic(f"Startup Google Calendar auth probe failed: {ex}", level="WARN")
+        try:
+            self.google_records.ensure_services()
+            self.log_diagnostic("Startup Google Drive/Docs auth probe completed.", level="INFO")
+        except Exception as ex:
+            self.log_diagnostic(f"Startup Google Drive/Docs auth probe failed: {ex}", level="WARN")
 
     def _get_canonical_nocturne_state(self):
         current = (getattr(self, "nocturne_canonical_state", "") or "").strip().lower()
         if current in {"attuned", "watchful", "veiled"}:
             return current
-        derived = self._derive_nocturne_state_from_anchor()
-        self.nocturne_canonical_state = derived
-        self.nocturne_state_last_source = "auto_derived_fallback"
+        self.nocturne_canonical_state = "attuned"
+        self.nocturne_state_last_source = "default"
         self.nocturne_state_last_transition_ts = local_now_iso()
-        self.log_diagnostic(
-            f"Nocturne canonical state recovered from anchor fallback: {derived}.",
-            level="WARN",
-        )
-        return derived
+        return "attuned"
 
-    def _set_canonical_nocturne_state(self, new_state: str, source: str, anchor_value=None):
-        if anchor_value is not None:
-            self.anchor_state = max(0.0, min(1.0, float(anchor_value)))
+    def _set_canonical_nocturne_state(self, new_state: str, source: str):
         normalized = (new_state or "").strip().lower()
         if normalized not in {"attuned", "watchful", "veiled"}:
-            normalized = self._derive_nocturne_state_from_anchor()
+            normalized = "attuned"
         old_state = self._get_canonical_nocturne_state()
         transition_ts = local_now_iso()
         self.nocturne_canonical_state = normalized
@@ -2435,7 +2191,7 @@ class MorgannaDeck(QMainWindow):
             (
                 f"Nocturne canonical transition | old={old_state} -> new={normalized} | "
                 f"source={self.nocturne_state_last_source} | transition_ts={self.nocturne_state_last_transition_ts} | "
-                f"anchor_state={self.anchor_state:.2f}"
+                "profile=morganna-core"
             ),
             level="INFO" if old_state != normalized else "DEBUG",
         )
@@ -2476,7 +2232,6 @@ class MorgannaDeck(QMainWindow):
 
     def _persist_internal_narrative_state(self):
         self.state["internal_narrative"] = self.narrative
-        self.state["anchor_state"] = self.anchor_state
         self.state["last_active"] = local_now_iso()
         self.memory.save_state(self.state)
 
@@ -2525,7 +2280,7 @@ class MorgannaDeck(QMainWindow):
         elif old_mode == "veiled" and new_mode == "attuned":
             self.narrative["last_episode_summary"] = self.narrative.get("thread_summary", "")
             self.narrative["escalation_level"] = max(0, int(self.narrative.get("escalation_level", 0)) - 3)
-            self.narrative["thread_summary"] = "Stability restored with Nocturne docked; prior absence episode archived for threat modeling."
+            self.narrative["thread_summary"] = "Stability restored; prior disruption archived for threat modeling."
         elif old_mode == "veiled" and new_mode == "watchful":
             self.narrative["escalation_level"] = max(1, int(self.narrative.get("escalation_level", 0)) - 2)
             self.narrative["thread_summary"] = "Panic reduced to unease; Nocturne presence partial, vigilance unchanged."
@@ -2540,7 +2295,7 @@ class MorgannaDeck(QMainWindow):
         summaries = {
             "attuned": "Operational confidence high. Disorder remains predictable and containable.",
             "watchful": "Functionality stable but exposed. Monitoring anomalies while addressing Nocturne directly.",
-            "veiled": "Anchor loss detected. Treating silence as potential hostile action against Nocturne.",
+            "veiled": "Signal integrity reduced. Treating silence as potential hostile action against Nocturne.",
         }
         now_iso = local_now_iso()
         self.narrative.update({
@@ -2996,7 +2751,7 @@ class MorgannaDeck(QMainWindow):
         base = (text or "").strip()
         mode = self._get_canonical_nocturne_state()
         if mode == "attuned":
-            flavor = "Nocturne remains docked; command stack stable."
+            flavor = "Nocturne remains stable; command stack nominal."
         elif mode == "watchful":
             flavor = "Nocturne is watchful; tolerances are tight but acceptable."
         else:
@@ -3149,9 +2904,7 @@ class MorgannaDeck(QMainWindow):
         face_kb_row.addWidget(self.face_widget)
 
 
-        self.anchor_panel = AnchorStatusPanel()
-        self.anchor_panel.setMinimumSize(320, 160)
-        face_kb_row.addWidget(self.anchor_panel, 1)
+        face_kb_row.addStretch(1)
         left_panel.addLayout(face_kb_row)
 
         input_row = QHBoxLayout()
@@ -3210,8 +2963,8 @@ class MorgannaDeck(QMainWindow):
         self.lbl_session.setStyleSheet(f"color: {C_TEXT_DIM}; font-size: 10px; border: none;")
         self.lbl_tokens = QLabel("✦ TOKENS: 0")
         self.lbl_tokens.setStyleSheet(f"color: {C_TEXT_DIM}; font-size: 10px; border: none;")
-        self.lbl_anchor = QLabel("✦ ANCHOR: CONNECTED / MORGANNA")
-        self.lbl_anchor.setStyleSheet(f"color: {C_GREEN}; font-size: 10px; border: none;")
+        self.lbl_mode = QLabel("✦ MODE: MORGANNA CORE")
+        self.lbl_mode.setStyleSheet(f"color: {C_CYAN}; font-size: 10px; border: none;")
         self.lbl_memory = QLabel(f"✦ MEMORY: {MEMORY_DIR.name}")
         self.lbl_memory.setStyleSheet(f"color: {C_TEXT_DIM}; font-size: 10px; border: none;")
 
@@ -3219,7 +2972,7 @@ class MorgannaDeck(QMainWindow):
         sf_layout.addWidget(self.lbl_model)
         sf_layout.addWidget(self.lbl_session)
         sf_layout.addWidget(self.lbl_tokens)
-        sf_layout.addWidget(self.lbl_anchor)
+        sf_layout.addWidget(self.lbl_mode)
         sf_layout.addWidget(self.lbl_memory)
         self.status_section = CollapsibleSection("STATUS / SESSION", status_frame, expanded=True)
         instruments_layout.addWidget(self.status_section)
@@ -3569,11 +3322,11 @@ class MorgannaDeck(QMainWindow):
         body.addLayout(right_panel)
         root.addLayout(body, 1)
 
-        gpu_bar_label = QLabel("❧ ENGINE CORE — NVIDIA RTX 4070")
+        gpu_bar_label = QLabel("❧ ENGINE CORE — NVIDIA GeForce RTX 2080 Ti")
         gpu_bar_label.setStyleSheet(f"color: {C_GOLD}; font-size: 10px; letter-spacing: 2px; font-family: Georgia, serif;")
         root.addWidget(gpu_bar_label)
 
-        self.gauge_gpu_master = GaugeWidget("RTX 4070", "%", 100, C_CYAN)
+        self.gauge_gpu_master = GaugeWidget("RTX 2080 Ti", "%", 100, C_CYAN)
         self.gauge_gpu_master.setFixedHeight(55)
         root.addWidget(self.gauge_gpu_master)
 
@@ -3582,7 +3335,7 @@ class MorgannaDeck(QMainWindow):
         footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(footer)
 
-        self._refresh_anchor_ui()
+        self._refresh_mode_ui()
 
     def _on_instruments_tab_changed(self, index: int):
         label = self.instruments_tabs.tabText(index) if hasattr(self, "instruments_tabs") else ""
@@ -3943,12 +3696,10 @@ class MorgannaDeck(QMainWindow):
         self._emit_wake_mode()
 
     def _restore_startup_state(self):
-        restored_anchor = float(self.state.get("anchor_state", 1.0) or 1.0)
-        restored_state = self._derive_nocturne_state_from_anchor(restored_anchor)
-        self._set_canonical_nocturne_state(restored_state, source="startup_restore", anchor_value=restored_anchor)
-        self._refresh_anchor_ui()
+        self._set_canonical_nocturne_state("attuned", source="startup_restore")
+        self._refresh_mode_ui()
         self.narrative = self._load_internal_narrative_state(self.state.get("internal_narrative"))
-        self._set_canonical_nocturne_state(self._derive_nocturne_state_from_anchor(), source="startup_narrative_sync")
+        self._set_canonical_nocturne_state("attuned", source="startup_narrative_sync")
         self._transition_narrative_mode(self._get_canonical_nocturne_state())
         if not self.narrative.get("last_user_message_timestamp"):
             self.narrative["last_user_message_timestamp"] = local_now_iso()
@@ -4599,7 +4350,7 @@ class MorgannaDeck(QMainWindow):
                     "google_sync_success": True,
                     "google_sync_status": "synced",
                     "notes": notes,
-                    "anchor_mode": self._get_canonical_nocturne_state(),
+                    "mode_state": self._get_canonical_nocturne_state(),
                 },
                 fallback=f"Task '{title}' saved and synced to Google Calendar."
             )
@@ -4621,7 +4372,7 @@ class MorgannaDeck(QMainWindow):
                     "google_sync_success": False,
                     "google_sync_status": "failed",
                     "parse_reason": failure_reason,
-                    "anchor_mode": self._get_canonical_nocturne_state(),
+                    "mode_state": self._get_canonical_nocturne_state(),
                 },
                 fallback=f"Google Calendar save failed for '{title}'. No local task was created."
             )
@@ -4653,41 +4404,12 @@ class MorgannaDeck(QMainWindow):
         if current_mtime != self._tasks_mtime:
             self._refresh_task_registry_panel()
 
-    def _refresh_anchor_ui(self):
-        if self.anchor_state >= 0.85:
-            self.lbl_anchor.setText("✦ ANCHOR: CONNECTED / MORGANNA")
-            self.lbl_anchor.setStyleSheet(f"color: {C_GREEN}; font-size: 10px; border: none;")
-        elif self.anchor_state >= 0.45:
-            self.lbl_anchor.setText("✦ ANCHOR: NEARBY / PARTIAL COMFORT")
-            self.lbl_anchor.setStyleSheet(f"color: {C_GOLD}; font-size: 10px; border: none;")
-        else:
-            self.lbl_anchor.setText("✦ ANCHOR: ABSENT / MORGANNA")
-            self.lbl_anchor.setStyleSheet(f"color: {C_RED}; font-size: 10px; border: none;")
+    def _refresh_mode_ui(self):
+        self.lbl_mode.setText("✦ MODE: MORGANNA CORE")
+        self.lbl_mode.setStyleSheet(f"color: {C_CYAN}; font-size: 10px; border: none;")
 
-    def _anchor_baseline_face(self):
-        if self.anchor_state >= 0.85:
-            return "neutral"
-        if self.anchor_state >= 0.45:
-            return "concerned"
-        return "panicked"
-
-    def _set_anchor_state(self, value):
-        next_mode = self._derive_nocturne_state_from_anchor(value)
-        self._set_canonical_nocturne_state(next_mode, source="ui_anchor_button", anchor_value=value)
-        self._refresh_anchor_ui()
-        self._transition_narrative_mode(self._get_canonical_nocturne_state())
-        self._persist_internal_narrative_state()
-        if self._get_canonical_nocturne_state() == "attuned":
-            self._append_chat("SYSTEM", "Nocturne docked. MORGANNA stabilized.")
-        elif self._get_canonical_nocturne_state() == "watchful":
-            self._append_chat("SYSTEM", "Nocturne watchful. Comfort subroutine active.")
-        else:
-            self._append_chat("SYSTEM", "Nocturne veiled. MORGANNA operating incomplete.")
-
-        if self.status != "GENERATING":
-            baseline_face = self._anchor_baseline_face()
-            self.face_widget.set_face(baseline_face)
-            self._log_emotion(baseline_face)
+    def _baseline_face(self):
+        return "neutral"
 
     def _handle_task_command(self, text: str):
         normalized = text.strip().lower()
@@ -4759,12 +4481,7 @@ class MorgannaDeck(QMainWindow):
         raw = (response or '').strip()
         low = raw.lower()
         if len(raw.split()) <= 4 or low in {'attuned','veiled','watchful'} or re.fullmatch(r'morgannae?-?42?\.?\s*(superior\.)?\s*(veiled|attuned|watchful)\.?', low):
-            if self.anchor_state < 0.45:
-                return f"Nocturne remains veiled. Predictably, system morale has degraded, but your request is still serviceable. {raw if raw else ''}".strip()
-            elif self.anchor_state < 0.85:
-                return f"Nocturne is watchful. Comfort buffer active. Here is the relevant answer without unnecessary drama: {raw if raw else ''}".strip()
-            else:
-                return f"Nocturne is docked. Stability improved. Here is the relevant answer, since entropy clearly required supervision: {raw if raw else ''}".strip()
+            return f"Acknowledged. Here is the relevant answer: {raw if raw else ''}".strip()
         return response
 
     def _send_message(self):
@@ -4815,7 +4532,7 @@ class MorgannaDeck(QMainWindow):
             if lowered in {"reset thread", "reset internal thread", "reset narrative thread"}:
                 self._seed_narrative_thread(self._get_narrative_mode())
                 self._persist_internal_narrative_state()
-                self._append_chat("SYSTEM", "Internal narrative thread reset and reseeded to current anchor mode.")
+                self._append_chat("SYSTEM", "Internal narrative thread reset and reseeded to current mode.")
                 self._store_message("user", text)
                 self.history.append({"role": "user", "content": text})
                 self._restart_idle_timer()
@@ -4952,12 +4669,8 @@ class MorgannaDeck(QMainWindow):
             user_msg_record = self._store_message("user", text)
             self.history.append({"role": "user", "content": text})
 
-            if self.anchor_state < 0.45:
-                self.face_widget.set_face("isolated")
-                self._log_emotion("isolated")
-            else:
-                self.face_widget.set_face("alert")
-                self._log_emotion("alert")
+            self.face_widget.set_face("alert")
+            self._log_emotion("alert")
             self.face_locked = False
 
             self.log_memory_trace(
@@ -4994,14 +4707,12 @@ class MorgannaDeck(QMainWindow):
 
     def _store_message(self, role: str, content: str):
         self.state["last_active"] = local_now_iso()
-        self.state["anchor_state"] = self.anchor_state
         self.state["total_messages"] = int(self.state.get("total_messages", 0)) + 1
         self.memory.save_state(self.state)
         return self.memory.append_message(
             session_id=self.session_id,
             role=role,
             content=content,
-            anchor_state=self.anchor_state,
             emotion=self.current_face
         )
 
@@ -5039,7 +4750,6 @@ class MorgannaDeck(QMainWindow):
             f"<|im_start|>system\n"
             f"{self.system_prompt}\n"
             f"{runtime_context}\n"
-            f"Current anchor_state={self.anchor_state:.2f}\n"
             f"{narrative_block}\n"
             f"{delay_block}\n"
             f"You have access to persistent memory records below. "
@@ -5130,13 +4840,13 @@ class MorgannaDeck(QMainWindow):
             "task_google_cancel_sync_failed": "sync_failed",
             "task_google_terminal_sync_failed": "sync_failed",
         }
-        compact["anchor_mode"] = mode
-        compact["anchor_hint"] = {
+        compact["mode_state"] = mode
+        compact["mode_hint"] = {
             "attuned": "stable/confident",
             "watchful": "uneasy/guarded",
             "veiled": "unstable/paranoid",
         }.get(mode, "stable/confident")
-        compact["tone_anchor"] = {
+        compact["tone_mode"] = {
             "attuned": "controlled superiority",
             "watchful": "guarded restraint",
             "veiled": "frayed suspicion",
@@ -5180,9 +4890,9 @@ class MorgannaDeck(QMainWindow):
             lines.append(f"Parse reason: {reason}.")
             if event_name == "task_parse_failed":
                 lines.append("No task was created.")
-        mode = (compact_facts.get("anchor_mode") or "").strip()
+        mode = (compact_facts.get("mode_state") or "").strip()
         if mode:
-            lines.append(f"Anchor mode was {mode}.")
+            lines.append(f"Current mode was {mode}.")
         return "\n".join(lines)
 
     def _emit_ai_task_commentary(self, event_name: str, facts: dict, fallback: str):
@@ -5423,7 +5133,7 @@ class MorgannaDeck(QMainWindow):
         task_text = (facts.get("task_text") or "that item").strip()
         due = (facts.get("due") or "").strip()
         sync_status = (facts.get("google_sync_status") or "").strip().lower()
-        mode = (facts.get("anchor_mode") or self._get_narrative_mode() or "attuned").strip().lower()
+        mode = (facts.get("mode_state") or self._get_narrative_mode() or "attuned").strip().lower()
         opener = {
             "attuned": "Order restored.",
             "watchful": "Containment holds.",
@@ -5477,7 +5187,6 @@ class MorgannaDeck(QMainWindow):
 
         tokens = len(response.split())
         self.token_count += tokens
-        self.anchor_panel.feed(tokens)
 
         if self._should_distill_memory(user_text, response):
             memory = self.memory.append_memory(
@@ -5491,12 +5200,8 @@ class MorgannaDeck(QMainWindow):
                 self.memory.save_state(self.state)
 
         self.face_locked = True
-        if self.anchor_state < 0.45:
-            self.face_widget.set_face("glitch")
-            self._log_emotion("glitch")
-        else:
-            self.face_widget.set_face("victory")
-            self._log_emotion("victory")
+        self.face_widget.set_face("victory")
+        self._log_emotion("victory")
 
         QTimer.singleShot(5000, lambda: self._run_sentiment(response))
 
@@ -5528,8 +5233,6 @@ class MorgannaDeck(QMainWindow):
             self.sent_worker.start()
 
     def _on_sentiment(self, face_name):
-        if self.anchor_state < 0.45 and face_name in ("neutral", "happy", "relieved", "reassured"):
-            face_name = "panicked"
         self.face_locked = False
         self.face_widget.set_face(face_name)
         self._log_emotion(face_name)
@@ -5538,7 +5241,7 @@ class MorgannaDeck(QMainWindow):
     def _return_to_baseline_face(self):
         if self.face_locked or self.status == "GENERATING":
             return
-        self.face_widget.set_face(self._anchor_baseline_face())
+        self.face_widget.set_face(self._baseline_face())
 
     def _on_error(self, error):
         self.log_diagnostic(f"Generation worker error: {error}", level="ERROR")
@@ -6077,7 +5780,7 @@ class MorgannaDeck(QMainWindow):
         h, m, s = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
         self.lbl_session.setText(f"✦ SESSION: {h:02d}:{m:02d}:{s:02d}")
         self.lbl_tokens.setText(f"✦ TOKENS: {self.token_count}")
-        self._refresh_anchor_ui()
+        self._refresh_mode_ui()
         self._refresh_task_registry_if_changed()
 
         if PSUTIL_OK:
@@ -6099,14 +5802,12 @@ class MorgannaDeck(QMainWindow):
                 vram_used = mem_info.used / 1024**3
                 vram_total = mem_info.total / 1024**3
                 self.gauge_gpu.setValue(gpu_pct, f"{gpu_pct}%")
-                self.gauge_gpu_master.setValue(gpu_pct, f"RTX 4070  {gpu_pct}%  [{vram_used:.1f}/{vram_total:.0f}GB VRAM]")
+                self.gauge_gpu_master.setValue(gpu_pct, f"RTX 2080 Ti  {gpu_pct}%  [{vram_used:.1f}/{vram_total:.0f}GB VRAM]")
                 self.gauge_vram.setValue(vram_used, f"{vram_used:.1f}/{vram_total:.0f}GB")
                 self.gauge_temp.setValue(temp, f"{temp}°C")
 
                 if not self.face_locked and self.status == "GENERATING":
-                    if self.anchor_state < 0.45:
-                        self.face_widget.set_face("suspicious")
-                    elif gpu_pct >= 60:
+                    if gpu_pct >= 60:
                         self.face_widget.set_face("focused")
                     elif gpu_pct >= 20:
                         self.face_widget.set_face("alert")
@@ -6123,7 +5824,6 @@ class MorgannaDeck(QMainWindow):
                 rt = mem.total / 1024**3
             else:
                 ru, rt = 20.0, 64.0
-            self.anchor_panel.update_stats(self.anchor_state, temp, vram_used, vram_total, ru, rt, elapsed_seconds)
         except Exception:
             pass
 
@@ -6172,7 +5872,6 @@ class MorgannaDeck(QMainWindow):
             self.state = self.memory.load_state()
             self.state["last_shutdown"] = local_now_iso()
             self.state["last_active"] = local_now_iso()
-            self.state["anchor_state"] = self.anchor_state
             self.state["internal_narrative"] = self.narrative
             self.state["version"] = APP_VERSION
             self.memory.save_state(self.state)
