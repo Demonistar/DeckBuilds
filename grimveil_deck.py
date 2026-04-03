@@ -4676,6 +4676,8 @@ class GrimveilDeck(QMainWindow):
                 f"Due-alert cleanup/retry applied due to incomplete ending: {'yes' if retry_used else 'no'}",
                 level="DEBUG",
             )
+        if event_name == "task_parse_failed" and self._is_unhelpful_parse_failure_line(line):
+            line = ""
         if not line:
             line = self._task_commentary_fallback_line(event_name, compact_facts, fallback)
             if is_task_final_ack:
@@ -4767,6 +4769,8 @@ class GrimveilDeck(QMainWindow):
             "noted.",
             "understood.",
             "done.",
+            "failed.",
+            "failed",
         }
         if cleaned in weak_exact:
             return True
@@ -4777,6 +4781,14 @@ class GrimveilDeck(QMainWindow):
             r"^(okay|ok|sure)[.?!]?$",
         )
         return any(re.match(p, cleaned, flags=re.IGNORECASE) for p in weak_patterns)
+
+    def _is_unhelpful_parse_failure_line(self, text: str):
+        cleaned = re.sub(r"\s+", " ", (text or "").strip()).strip().lower()
+        if not cleaned:
+            return True
+        if cleaned in {"failed.", "failed", "parse failed.", "could not parse."}:
+            return True
+        return len(cleaned.split()) < 5
 
     def _task_commentary_fallback_line(self, event_name: str, facts: dict, fallback: str):
         facts = facts if isinstance(facts, dict) else {}
@@ -5049,7 +5061,14 @@ class GrimveilDeck(QMainWindow):
             local_tz = _local_tzinfo()
             return datetime(year, month, day, hour, minute, 0, 0, tzinfo=local_tz)
 
-        def parse_clock(hour_s: str, minute_s: str = None, ampm_s: str = ""):
+        def parse_clock(hour_s: str = "", minute_s: str = None, ampm_s: str = "", special_time: str = ""):
+            special = (special_time or "").strip().lower()
+            if special == "noon":
+                return 12, 0
+            if special == "midnight":
+                return 0, 0
+            if not str(hour_s).strip():
+                return None
             hour = int(hour_s)
             minute = int(minute_s or 0)
             if minute < 0 or minute > 59:
@@ -5066,6 +5085,41 @@ class GrimveilDeck(QMainWindow):
                 return None
             return hour, minute
 
+        def trailing_task_text(span_end: int):
+            tail = (payload[span_end:] if span_end is not None else "").strip()
+            tail = re.sub(r"^(?:to|that|about)\b[\s,.-]*", "", tail, flags=re.I).strip()
+            tail = re.sub(r"^[,.\-:;]+\s*", "", tail).strip()
+            return tail
+
+        def looks_like_schedule_conflict(fragment: str):
+            frag = re.sub(r"\s+", " ", (fragment or "").strip()).lower()
+            if not frag:
+                return False
+            conflict_patterns = (
+                r"^(?:at\s+)?(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|(?:[01]?\d|2[0-3]):[0-5]\d\b|noon\b|midnight\b)",
+                r"^(?:on|for)\s+(?:\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})\b",
+                r"^(?:tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+                r"^in\s+\d+\s*(?:d|day|days|h|hr|hour|hours|m|min|minute|minutes|s|sec|second|seconds)\b",
+            )
+            return any(re.search(p, frag, flags=re.I) for p in conflict_patterns)
+
+        def finalize_schedule(due_dt, schedule_type: str, task_tail: str, schedule_span: str):
+            tail = normalize_task_tail(task_tail or "")
+            if task_tail and looks_like_schedule_conflict(task_tail):
+                return {
+                    "ok": False,
+                    "reason": "Conflicting schedule signals detected before task title",
+                    "cleaned_input": cleaned_input,
+                }
+            return {
+                "ok": True,
+                "task_text": tail,
+                "due_dt": due_dt,
+                "schedule_type": schedule_type,
+                "schedule_span": (schedule_span or "").strip(),
+                "cleaned_input": cleaned_input,
+            }
+
         now_local = now_for_compare().replace(second=0, microsecond=0)
 
         # 1) Relative time expressions (deterministic).
@@ -5078,18 +5132,9 @@ class GrimveilDeck(QMainWindow):
             if m:
                 delta = parse_duration_phrase(m.group("dur") or "")
                 if delta and delta.total_seconds() > 0:
-                    task_text = normalize_task_tail(m.groupdict().get("task") or "")
-                    if task_text in {"Reminder", "Timer"}:
-                        remainder = re.sub(pattern, "", payload, flags=re.I).strip(" ,.-")
-                        if remainder:
-                            task_text = normalize_task_tail(remainder)
-                    return {
-                        "ok": True,
-                        "task_text": task_text,
-                        "due_dt": now_local + delta,
-                        "schedule_type": "relative",
-                        "cleaned_input": cleaned_input,
-                    }
+                    schedule_span = payload[m.start():m.end()]
+                    task_tail = m.groupdict().get("task") or trailing_task_text(m.end())
+                    return finalize_schedule(now_local + delta, "relative", task_tail, schedule_span)
 
         # 2) Same-day clock times.
         same_day_match = re.search(
@@ -5104,36 +5149,33 @@ class GrimveilDeck(QMainWindow):
                 due = now_local.replace(hour=hour, minute=minute)
                 if due <= now_local:
                     due += timedelta(days=1)
-                return {
-                    "ok": True,
-                    "task_text": normalize_task_tail(same_day_match.group("task") or "Reminder"),
-                    "due_dt": due,
-                    "schedule_type": "same_day_time",
-                    "cleaned_input": cleaned_input,
-                }
+                schedule_span = payload[same_day_match.start():same_day_match.end()]
+                task_tail = same_day_match.group("task") or trailing_task_text(same_day_match.end())
+                return finalize_schedule(due, "same_day_time", task_tail, schedule_span)
 
         # 3) Explicit date + time.
         tomorrow_match = re.search(
-            r"^(?:for\s+)?tomorrow(?:\s+at)?\s+(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ampm>am|pm)?(?:\s*(?:to|,)?\s*(?P<task>.+))?$",
+            r"^(?:for\s+)?tomorrow(?:\s+at)?\s+(?:(?P<special>noon|midnight)|(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ampm>am|pm)?)\b",
             payload,
             re.I,
         )
         if tomorrow_match:
-            parsed_clock = parse_clock(tomorrow_match.group("h"), tomorrow_match.group("m"), tomorrow_match.group("ampm"))
+            parsed_clock = parse_clock(
+                tomorrow_match.group("h"),
+                tomorrow_match.group("m"),
+                tomorrow_match.group("ampm"),
+                tomorrow_match.group("special"),
+            )
             if parsed_clock:
                 hour, minute = parsed_clock
                 tomorrow = now_local + timedelta(days=1)
                 due = build_due(tomorrow.year, tomorrow.month, tomorrow.day, hour, minute)
-                return {
-                    "ok": True,
-                    "task_text": normalize_task_tail(tomorrow_match.group("task") or "Reminder"),
-                    "due_dt": due,
-                    "schedule_type": "explicit_date_time",
-                    "cleaned_input": cleaned_input,
-                }
+                schedule_span = payload[tomorrow_match.start():tomorrow_match.end()]
+                task_tail = trailing_task_text(tomorrow_match.end())
+                return finalize_schedule(due, "explicit_date_time", task_tail, schedule_span)
 
         dt_match = re.search(
-            r"^(?:on\s+|for\s+)?(?P<d>\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})\s+at\s+(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ampm>am|pm)?(?:\s*(?:to|,)?\s*(?P<task>.+))?$",
+            r"^(?:on\s+|for\s+)?(?P<d>\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})\s+at\s+(?:(?P<special>noon|midnight)|(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ampm>am|pm)?)\b",
             payload,
             re.I,
         )
@@ -5143,27 +5185,33 @@ class GrimveilDeck(QMainWindow):
                 parsed_date = datetime.strptime(date_token, "%m/%d/%Y") if "/" in date_token else datetime.strptime(date_token, "%Y-%m-%d")
             except ValueError:
                 parsed_date = None
-            parsed_clock = parse_clock(dt_match.group("h"), dt_match.group("m"), dt_match.group("ampm"))
+            parsed_clock = parse_clock(
+                dt_match.group("h"),
+                dt_match.group("m"),
+                dt_match.group("ampm"),
+                dt_match.group("special"),
+            )
             if parsed_date and parsed_clock:
                 hour, minute = parsed_clock
                 due = build_due(parsed_date.year, parsed_date.month, parsed_date.day, hour, minute)
-                return {
-                    "ok": True,
-                    "task_text": normalize_task_tail(dt_match.group("task") or "Reminder"),
-                    "due_dt": due,
-                    "schedule_type": "explicit_date_time",
-                    "cleaned_input": cleaned_input,
-                }
+                schedule_span = payload[dt_match.start():dt_match.end()]
+                task_tail = trailing_task_text(dt_match.end())
+                return finalize_schedule(due, "explicit_date_time", task_tail, schedule_span)
 
         weekday_match = re.search(
-            r"^(?:for\s+|on\s+)?(?P<weekday>monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:\s+at)?\s+(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ampm>am|pm)?(?:\s*(?:to|,)?\s*(?P<task>.+))?$",
+            r"^(?:for\s+|on\s+)?(?P<weekday>monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:\s+at)?\s+(?:(?P<special>noon|midnight)|(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ampm>am|pm)?)\b",
             payload,
             re.I,
         )
         if weekday_match:
             weekday_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
             target_idx = weekday_names.index(weekday_match.group("weekday").lower())
-            parsed_clock = parse_clock(weekday_match.group("h"), weekday_match.group("m"), weekday_match.group("ampm"))
+            parsed_clock = parse_clock(
+                weekday_match.group("h"),
+                weekday_match.group("m"),
+                weekday_match.group("ampm"),
+                weekday_match.group("special"),
+            )
             if parsed_clock:
                 hour, minute = parsed_clock
                 days_ahead = (target_idx - now_local.weekday()) % 7
@@ -5173,13 +5221,9 @@ class GrimveilDeck(QMainWindow):
                         days_ahead = 7
                 target_day = now_local + timedelta(days=days_ahead)
                 due = build_due(target_day.year, target_day.month, target_day.day, hour, minute)
-                return {
-                    "ok": True,
-                    "task_text": normalize_task_tail(weekday_match.group("task") or "Reminder"),
-                    "due_dt": due,
-                    "schedule_type": "explicit_date_time",
-                    "cleaned_input": cleaned_input,
-                }
+                schedule_span = payload[weekday_match.start():weekday_match.end()]
+                task_tail = trailing_task_text(weekday_match.end())
+                return finalize_schedule(due, "explicit_date_time", task_tail, schedule_span)
 
         # 4) Fallback fuzzy parsing (confidence gated).
         fuzzy = re.search(
