@@ -200,14 +200,33 @@ C_BLUE        = "#6a0a6a"
 
 RUNES = "▣ ▤ ▣ ▤ ▣ ▤ ▣ ▤ ▣"
 
-DECK_PATH = Path(r"D:\AI\Models\morganna_deck.py")
-AI_MODELS_DIR = Path(r"D:\AI\Models")
-MEMORY_DIR = Path(r"D:\AI\Models\Morganna_Memories")
-FACES_DIR = Path(r"D:\AI\Models\Morganna_Memories\Faces")
-MODEL_PATH = Path(r"D:\AI\Models\dolphin-8b")
-GOOGLE_CREDENTIALS_PATH = Path(r"C:\AI\config\google_credentials.json")
-GOOGLE_TOKEN_PATH = MEMORY_DIR / "google" / "token.json"
-GOOGLE_EXPORTS_DIR = MEMORY_DIR / "exports"
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+AI_MODELS_DIR = SCRIPT_DIR
+MODEL_PATH = AI_MODELS_DIR / "dolphin-8b"
+
+MEMORY_DIR = AI_MODELS_DIR / "Morganna_Memories"
+
+FACES_DIR = MEMORY_DIR / "Faces"
+
+GOOGLE_CONFIG_DIR = MEMORY_DIR / "config"
+GOOGLE_TOKEN_DIR = MEMORY_DIR / "google"
+
+GOOGLE_CREDENTIALS_PATH = GOOGLE_CONFIG_DIR / "google_credentials.json"
+GOOGLE_TOKEN_PATH = GOOGLE_TOKEN_DIR / "token.json"
+
+EXPORT_DIR = MEMORY_DIR / "exports"
+LOG_DIR = MEMORY_DIR / "logs"
+
+SL_SCANS_PATH = MEMORY_DIR / "sl_scans.jsonl"
+SL_COMMANDS_PATH = MEMORY_DIR / "sl_commands.jsonl"
+JOB_TRACKER_PATH = MEMORY_DIR / "job_tracker.jsonl"
+
+GOOGLE_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+GOOGLE_TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+FACES_DIR.mkdir(parents=True, exist_ok=True)
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/drive",
@@ -3582,18 +3601,18 @@ class MorgannaDeck(QMainWindow):
         )
         if self._records_is_folder(file_info):
             raise RuntimeError("Folders cannot be exported as local files.")
-        GOOGLE_EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        EXPORT_DIR.mkdir(parents=True, exist_ok=True)
         safe_name = self._safe_records_filename(title)
         if self._records_is_google_doc(file_info):
             payload = self.google_records.export_doc_text(item_id)
-            export_path = GOOGLE_EXPORTS_DIR / f"{safe_name}.txt"
+            export_path = EXPORT_DIR / f"{safe_name}.txt"
             export_path.write_text(payload, encoding="utf-8")
         else:
             payload = self.google_records.download_file_bytes(item_id)
             extension = ".bin"
             if "." in safe_name:
                 extension = ""
-            export_path = GOOGLE_EXPORTS_DIR / f"{safe_name}{extension}"
+            export_path = EXPORT_DIR / f"{safe_name}{extension}"
             if isinstance(payload, bytes):
                 export_path.write_bytes(payload)
             else:
@@ -5892,7 +5911,7 @@ def main():
 class SLScansTab(QWidget):
     def __init__(self, memory_dir: Path):
         super().__init__()
-        self.store = JsonlStore(memory_dir / "sl_scans.jsonl")
+        self.store = JsonlStore(SL_SCANS_PATH)
         self.records = []
         self.current_id = None
         root = QVBoxLayout(self)
@@ -5961,7 +5980,7 @@ class SLScansTab(QWidget):
 
 class SLCommandsTab(QWidget):
     def __init__(self, memory_dir: Path):
-        super().__init__(); self.store=JsonlStore(memory_dir / "sl_commands.jsonl"); self.records=[]
+        super().__init__(); self.store=JsonlStore(SL_COMMANDS_PATH); self.records=[]
         root=QVBoxLayout(self); bar=QHBoxLayout();
         for t,fn in (("Add",self.add_row),("Modify",self.modify_row),("Delete",self.delete_row),("Refresh",self.refresh)):
             b=QPushButton(t); b.clicked.connect(fn); bar.addWidget(b)
@@ -5993,7 +6012,7 @@ class SLCommandsTab(QWidget):
 
 class JobTrackerTab(QWidget):
     def __init__(self, memory_dir: Path):
-        super().__init__(); self.store=JsonlStore(memory_dir / "job_tracker.jsonl"); self.records=[]
+        super().__init__(); self.store=JsonlStore(JOB_TRACKER_PATH); self.records=[]
         root=QVBoxLayout(self); bar=QHBoxLayout()
         for t,fn in (("Add",self.add_row),("Modify",self.modify_row),("Hide Selected",self.hide_selected),("Unhide Selected",self.unhide_selected),("Delete Selected",self.delete_selected),("Refresh",self.refresh),("Export All",lambda:self.export_rows("all")),("Export Visible",lambda:self.export_rows("visible")),("Export Completed",lambda:self.export_rows("completed"))):
             b=QPushButton(t); b.clicked.connect(fn); bar.addWidget(b)
