@@ -1,11 +1,14 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.13.0
-# Build Date: 2026-04-03-r1
+# Version: 1.13.1
+# Build Date: 2026-04-03-r2
 # Summary:
 #   Refactored deterministic task/reminder scheduling pipeline with AI-only final acknowledgement handoff.
 # Changelog:
+#   - expanded task intent classification to include alarm phrasing
+#   - added scheduling-command safety guard to prevent false-positive chat confirmations when scheduling was not executed
+#   - cleaned remaining truncation/temperature generation warnings where applicable
 #   - refactored task/reminder handling into deterministic schedule resolution + AI acknowledgement pipeline
 #   - fixed relative/same-day scheduling regressions
 #   - improved GrimVeile task acknowledgements while preserving fast bounded generation
@@ -127,8 +130,8 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.13.0"
-VERSION_DATE = "2026-04-03-r1"
+APP_VERSION = "1.13.1"
+VERSION_DATE = "2026-04-03-r2"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
 
@@ -225,6 +228,13 @@ E42_ICON_FILES = {
 }
 _PIXMAP_CACHE = {}
 _MISSING_ASSET_WARNED = set()
+
+
+def safe_tokenizer_max_length(tokenizer, fallback: int = 2048) -> int:
+    candidate = int(getattr(tokenizer, "model_max_length", 0) or 0)
+    if candidate <= 0 or candidate > 1_000_000:
+        return fallback
+    return max(256, min(candidate, fallback))
 
 
 def load_faces_pixmap(filename: str, use_fallback: bool = True) -> QPixmap:
@@ -720,6 +730,8 @@ def classify_task_intent(text: str) -> dict:
     timer_patterns = (
         r"\bset(?:\s+a)?\s+timer\b",
         r"\bstart(?:\s+a)?\s+timer\b",
+        r"\bset\s+timer\s+for\b",
+        r"\bset(?:\s+a)?\s+timer\s+for\b",
         r"\btimer\s+for\b",
     )
     reminder_patterns = (
@@ -727,6 +739,9 @@ def classify_task_intent(text: str) -> dict:
         r"\bset(?:\s+a)?\s+reminder\b",
         r"\badd(?:\s+a)?\s+reminder\b",
         r"\bwant(?:\s+a)?\s+reminder\b",
+        r"\bset(?:\s+an?)?\s+alarm\b",
+        r"\badd(?:\s+an?)?\s+alarm\b",
+        r"\balarm\s+for\b",
     )
     task_patterns = (
         r"\badd(?:\s+a)?\s+task\b",
@@ -745,6 +760,24 @@ def classify_task_intent(text: str) -> dict:
         "intent": intent,
         "cleaned_input": cleaned,
     }
+
+
+def is_strong_scheduling_command(text: str) -> bool:
+    cleaned = strip_leading_invocation_fluff(text)
+    low = cleaned.lower()
+    command_patterns = (
+        r"\bremind me\b",
+        r"\bset(?:\s+a)?\s+reminder\b",
+        r"\badd(?:\s+a)?\s+reminder\b",
+        r"\bset(?:\s+a)?\s+timer\b",
+        r"\bstart(?:\s+a)?\s+timer\b",
+        r"\b(?:set|add)(?:\s+an?)?\s+alarm(?:\s+for)?\b",
+        r"\balarm\s+for\b",
+        r"\btimer\s+for\b",
+        r"\b(?:add|create)(?:\s+a)?\s+task\b",
+        r"\bnew\s+task\b",
+    )
+    return any(re.search(p, low) for p in command_patterns)
 
 
 def parse_duration_phrase(phrase: str):
@@ -2070,7 +2103,13 @@ class SentimentWorker(QThread):
                 f"One word:<|im_end|>\n"
                 f"<|im_start|>assistant\n"
             )
-            enc = self.tokenizer(prompt, return_tensors='pt', padding=True, truncation=True)
+            enc = self.tokenizer(
+                prompt,
+                return_tensors='pt',
+                padding=True,
+                truncation=True,
+                max_length=safe_tokenizer_max_length(self.tokenizer),
+            )
             input_ids = enc["input_ids"].to("cuda")
             attention_mask = enc["attention_mask"].to("cuda")
             self.diagnostic.emit("Sentiment tokenization complete.", "DEBUG")
@@ -2080,7 +2119,6 @@ class SentimentWorker(QThread):
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     max_new_tokens=5,
-                    temperature=0.1,
                     do_sample=False,
                     pad_token_id=self.tokenizer.pad_token_id
                 )
@@ -2111,7 +2149,13 @@ class DolphinWorker(QThread):
         try:
             self.status_changed.emit("GENERATING")
             self.diagnostic.emit("Normal generation started.", "INFO")
-            enc = self.tokenizer(self.prompt, return_tensors='pt', padding=True, truncation=True)
+            enc = self.tokenizer(
+                self.prompt,
+                return_tensors='pt',
+                padding=True,
+                truncation=True,
+                max_length=safe_tokenizer_max_length(self.tokenizer),
+            )
             input_ids = enc["input_ids"].to("cuda")
             attention_mask = enc["attention_mask"].to("cuda")
             self.diagnostic.emit("Normal generation tokenization complete.", "DEBUG")
@@ -2566,7 +2610,13 @@ class GrimveilDeck(QMainWindow):
         )
         try:
             self.log_diagnostic("Unsolicited generation started.", level="INFO")
-            enc = self.tokenizer(prompt, return_tensors='pt', padding=True, truncation=True)
+            enc = self.tokenizer(
+                prompt,
+                return_tensors='pt',
+                padding=True,
+                truncation=True,
+                max_length=safe_tokenizer_max_length(self.tokenizer),
+            )
             input_ids = enc["input_ids"].to("cuda")
             attention_mask = enc["attention_mask"].to("cuda")
             self.log_diagnostic("Unsolicited tokenization complete.", level="DEBUG")
@@ -4288,7 +4338,22 @@ class GrimveilDeck(QMainWindow):
 
             intent_info = classify_task_intent(normalized_text)
             task_intent = intent_info.get("intent", "chat")
-            task_action_result = self._try_create_task(normalized_text, force_intent=task_intent in {"timer", "reminder", "task"})
+            cleaned_task_input = intent_info.get("cleaned_input") or normalized_text
+            scheduling_guard_triggered = is_strong_scheduling_command(normalized_text)
+            entered_task_pipeline = task_intent in {"timer", "reminder", "task"} or scheduling_guard_triggered
+            self.log_diagnostic(
+                f"Raw task intent classification result: intent={task_intent}, cleaned_input=\"{self._preview_text(cleaned_task_input, max_chars=140)}\".",
+                level="INFO",
+            )
+            self.log_diagnostic(
+                f"Scheduling-command guard triggered: {'yes' if scheduling_guard_triggered else 'no'}.",
+                level="INFO",
+            )
+            self.log_diagnostic(
+                f"Entered deterministic task pipeline: {'yes' if entered_task_pipeline else 'no'}.",
+                level="INFO",
+            )
+            task_action_result = self._try_create_task(normalized_text, force_intent=entered_task_pipeline)
             if task_action_result and task_action_result.get("result") == "created":
                 parsed_task = task_action_result.get("task") or {}
                 due_obj = parse_iso_for_compare(parsed_task.get("due_at") or parsed_task.get("due"), context="send_message_due")
@@ -4322,7 +4387,11 @@ class GrimveilDeck(QMainWindow):
                 self.history.append({"role": "user", "content": text})
                 self._restart_idle_timer()
                 return
-            if task_action_result and task_action_result.get("result") == "parse_failed":
+            if task_action_result and task_action_result.get("result") in {"parse_failed", "local_create_failed"}:
+                self.log_diagnostic(
+                    "Fallback to parse-failure acknowledgement: yes.",
+                    level="INFO",
+                )
                 self.log_diagnostic("Task parse-failure acknowledgement handoff started.", level="INFO")
                 self._emit_ai_task_commentary(
                     event_name="task_parse_failed",
@@ -4336,6 +4405,27 @@ class GrimveilDeck(QMainWindow):
                     )
                 )
                 self.log_diagnostic("Task parse-failure acknowledgement handoff completed.", level="INFO")
+                self._store_message("user", text)
+                self.history.append({"role": "user", "content": text})
+                self._restart_idle_timer()
+                return
+            self.log_diagnostic("Fallback to parse-failure acknowledgement: no.", level="INFO")
+            if scheduling_guard_triggered:
+                self.log_diagnostic(
+                    "Scheduling-command guard blocked normal chat fallback due to unresolved scheduling request.",
+                    level="WARN",
+                )
+                self._emit_ai_task_commentary(
+                    event_name="task_parse_failed",
+                    facts={
+                        "parse_reason": "Scheduling-style request detected, but no task was created.",
+                        "intent": task_intent if task_intent in {"timer", "reminder", "task"} else "reminder",
+                    },
+                    fallback=(
+                        "I did not create that reminder because the schedule details could not be resolved. "
+                        "Try formats like 'set an alarm for tomorrow at 12:00 PM' or 'remind me in 10 minutes'."
+                    )
+                )
                 self._store_message("user", text)
                 self.history.append({"role": "user", "content": text})
                 self._restart_idle_timer()
@@ -5036,6 +5126,9 @@ class GrimveilDeck(QMainWindow):
             r"remind me"
             r"|set(?:\s+a)?\s+reminder"
             r"|add(?:\s+a)?\s+reminder"
+            r"|set(?:\s+an?)?\s+alarm"
+            r"|add(?:\s+an?)?\s+alarm"
+            r"|alarm\s+for"
             r"|set(?:\s+a)?\s+timer"
             r"|start(?:\s+a)?\s+timer"
             r"|timer\s+for"
