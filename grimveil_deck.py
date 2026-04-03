@@ -1,11 +1,14 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.13.3
-# Build Date: 2026-04-03-r4
+# Version: 1.14.0
+# Build Date: 2026-04-03-r5
 # Summary:
-#   Fixed E-42 mode/state desynchronization for autonomous/idle AI handoff by using canonical live state.
+#   Added Google-first task editor workspace, multi-select batch task actions, and task registry date-range filtering.
 # Changelog:
+#   - added full upper-right Google-first Task Editor workflow
+#   - added multi-select task complete/cancel actions
+#   - added task/event date-range filtering to reduce long-horizon clutter
 #   - fixed E-42 state desynchronization in autonomous/idle AI handoff
 #   - idle outputs now use canonical current E-42 mode instead of stale cached state
 #   - expanded task intent classification to include alarm phrasing
@@ -125,7 +128,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QFrame, QCalendarWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QStackedWidget, QTabWidget,
-    QListWidget, QListWidgetItem, QSizePolicy
+    QListWidget, QListWidgetItem, QSizePolicy, QComboBox, QCheckBox
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QDate, QSize
 from PyQt6.QtGui import (
@@ -134,8 +137,8 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.13.3"
-VERSION_DATE = "2026-04-03-r4"
+APP_VERSION = "1.14.0"
+VERSION_DATE = "2026-04-03-r5"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
 
@@ -1781,6 +1784,15 @@ class GoogleCalendarService:
             print(f"[GCal][ERROR] Event insert failed with unexpected error: {ex}")
             raise
 
+    def create_event_with_payload(self, event_payload: dict, calendar_id: str = "primary"):
+        if not isinstance(event_payload, dict):
+            raise ValueError("Google event payload must be a dictionary.")
+        link_established = False
+        if self._service is None:
+            link_established = self._build_service()
+        created = self._service.events().insert(calendarId=(calendar_id or "primary"), body=event_payload).execute()
+        return created.get("id"), link_established
+
     def list_primary_events(self, time_min: str = None, max_results: int = 2500):
         if self._service is None:
             self._build_service()
@@ -3114,10 +3126,6 @@ class GrimveilDeck(QMainWindow):
         right_panel.setSpacing(4)
         right_panel.setContentsMargins(0, 0, 0, 0)
 
-        inst_label = QLabel("❧ SYSTEM INSTRUMENTS")
-        inst_label.setStyleSheet(f"color: {C_GOLD}; font-size: 10px; letter-spacing: 2px; font-family: Georgia, serif;")
-        right_panel.addWidget(inst_label)
-
         self.instruments_tabs = QTabWidget()
         self.instruments_tabs.setStyleSheet(
             f"QTabWidget::pane {{ border: 1px solid {C_BORDER}; background: {C_BG2}; }}"
@@ -3301,19 +3309,32 @@ class GrimveilDeck(QMainWindow):
         self.instruments_tabs.addTab(instruments_tab, "System Instruments")
         self.instruments_tabs.addTab(records_tab, "Records")
         self.instruments_tabs.currentChanged.connect(self._on_instruments_tab_changed)
-        right_panel.addWidget(self.instruments_tabs, 1)
+
+        self.upper_right_workspace_stack = QStackedWidget()
+        right_panel.addWidget(self.upper_right_workspace_stack, 1)
+
+        self.upper_right_normal_workspace = QWidget()
+        normal_workspace_layout = QVBoxLayout(self.upper_right_normal_workspace)
+        normal_workspace_layout.setContentsMargins(0, 0, 0, 0)
+        normal_workspace_layout.setSpacing(4)
+
+        inst_label = QLabel("❧ SYSTEM INSTRUMENTS")
+        inst_label.setStyleSheet(f"color: {C_GOLD}; font-size: 10px; letter-spacing: 2px; font-family: Georgia, serif;")
+        normal_workspace_layout.addWidget(inst_label)
+        normal_workspace_layout.addWidget(self.instruments_tabs, 1)
 
         task_content = QWidget()
         task_layout = QVBoxLayout(task_content)
         task_layout.setContentsMargins(0, 0, 0, 0)
         task_layout.setSpacing(4)
         self.task_show_completed = False
+        self.task_date_filter = "next_3_months"
         self.task_row_ids = []
 
         self.task_table = QTableWidget(0, 4)
         self.task_table.setHorizontalHeaderLabels(["DATE", "TIME", "TASK", "STATUS"])
         self.task_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.task_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.task_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.task_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.task_table.setAlternatingRowColors(False)
         self.task_table.verticalHeader().setVisible(False)
@@ -3342,33 +3363,138 @@ class GrimveilDeck(QMainWindow):
         self.task_table.itemDoubleClicked.connect(self._on_task_row_double_clicked)
         task_layout.addWidget(self.task_table)
 
+        task_header = QHBoxLayout()
+        task_header.setContentsMargins(0, 0, 0, 0)
+        task_header.setSpacing(4)
+        task_filter_label = QLabel("RANGE")
+        task_filter_label.setStyleSheet(f"color: {C_TEXT_DIM}; font-size: 9px; letter-spacing: 1px; font-family: Georgia, serif;")
+        self.task_filter_combo = QComboBox()
+        self.task_filter_combo.addItem("WEEK", "week")
+        self.task_filter_combo.addItem("MONTH", "month")
+        self.task_filter_combo.addItem("NEXT 3 MONTHS", "next_3_months")
+        self.task_filter_combo.addItem("YEAR", "year")
+        self.task_filter_combo.setCurrentIndex(2)
+        self.task_filter_combo.setStyleSheet(
+            f"QComboBox {{ background-color: {C_BG3}; color: {C_CYAN}; border: 1px solid {C_CYAN_DIM}; "
+            f"font-size: 9px; padding: 2px 6px; min-height: 20px; }}"
+            f"QComboBox::drop-down {{ border: none; }}"
+        )
+        self.task_filter_combo.currentIndexChanged.connect(self._on_task_filter_changed)
+        task_header.addWidget(task_filter_label)
+        task_header.addWidget(self.task_filter_combo)
+        task_header.addStretch(1)
+        task_layout.addLayout(task_header)
+
         task_actions = QHBoxLayout()
         task_actions.setContentsMargins(0, 0, 0, 0)
         task_actions.setSpacing(4)
+        self.btn_add_task_workspace = QPushButton("ADD TASK")
         self.btn_complete_task = QPushButton("COMPLETE SELECTED")
         self.btn_cancel_task = QPushButton("CANCEL SELECTED")
         self.btn_toggle_completed = QPushButton("SHOW COMPLETED")
         self.btn_purge_completed = QPushButton("PURGE COMPLETED")
-        for btn in (self.btn_complete_task, self.btn_cancel_task, self.btn_toggle_completed, self.btn_purge_completed):
+        for btn in (
+            self.btn_add_task_workspace,
+            self.btn_complete_task,
+            self.btn_cancel_task,
+            self.btn_toggle_completed,
+            self.btn_purge_completed,
+        ):
             btn.setStyleSheet(
                 f"QPushButton {{ background-color: {C_BG3}; color: {C_CYAN}; border: 1px solid {C_CYAN_DIM}; "
                 f"border-radius: 2px; font-size: 9px; padding: 3px 6px; letter-spacing: 1px; }}"
                 f"QPushButton:hover {{ background-color: {C_CYAN_DIM}; color: {C_TEXT}; border-color: {C_CYAN}; }}"
                 f"QPushButton:disabled {{ background-color: {C_BG}; color: {C_TEXT_DIM}; border-color: {C_TEXT_DIM}; }}"
             )
+        self.btn_add_task_workspace.clicked.connect(self._open_task_editor_workspace)
         self.btn_complete_task.clicked.connect(self._complete_selected_task)
         self.btn_cancel_task.clicked.connect(self._cancel_selected_task)
         self.btn_toggle_completed.clicked.connect(self._toggle_show_completed_tasks)
         self.btn_purge_completed.clicked.connect(self._purge_completed_tasks)
         self.btn_complete_task.setEnabled(False)
         self.btn_cancel_task.setEnabled(False)
+        task_actions.addWidget(self.btn_add_task_workspace)
         task_actions.addWidget(self.btn_complete_task)
         task_actions.addWidget(self.btn_cancel_task)
         task_actions.addWidget(self.btn_toggle_completed)
         task_actions.addWidget(self.btn_purge_completed)
         task_layout.addLayout(task_actions)
         self.task_section = CollapsibleSection("TASK REGISTRY", task_content, expanded=True)
-        right_panel.addWidget(self.task_section)
+        normal_workspace_layout.addWidget(self.task_section)
+
+        self.upper_right_workspace_stack.addWidget(self.upper_right_normal_workspace)
+
+        self.upper_right_task_editor_workspace = QWidget()
+        editor_layout = QVBoxLayout(self.upper_right_task_editor_workspace)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(6)
+        editor_title = QLabel("❧ TASK EDITOR — GOOGLE-FIRST")
+        editor_title.setStyleSheet(f"color: {C_GOLD}; font-size: 10px; letter-spacing: 2px; font-family: Georgia, serif;")
+        editor_layout.addWidget(editor_title)
+        self.task_editor_status_label = QLabel("Configure task details, then save to Google Calendar.")
+        self.task_editor_status_label.setStyleSheet(
+            f"background: {C_PANEL}; color: {C_TEXT_DIM}; border: 1px solid {C_BORDER}; "
+            f"font-family: Georgia, serif; font-size: 10px; padding: 6px;"
+        )
+        editor_layout.addWidget(self.task_editor_status_label)
+        self.task_editor_name = QLineEdit()
+        self.task_editor_name.setPlaceholderText("Task Name")
+        self.task_editor_start_date = QLineEdit()
+        self.task_editor_start_date.setPlaceholderText("Start Date (YYYY-MM-DD)")
+        self.task_editor_start_time = QLineEdit()
+        self.task_editor_start_time.setPlaceholderText("Start Time (HH:MM)")
+        self.task_editor_end_date = QLineEdit()
+        self.task_editor_end_date.setPlaceholderText("End Date (YYYY-MM-DD)")
+        self.task_editor_end_time = QLineEdit()
+        self.task_editor_end_time.setPlaceholderText("End Time (HH:MM)")
+        self.task_editor_notes = QTextEdit()
+        self.task_editor_notes.setPlaceholderText("Notes")
+        self.task_editor_notes.setMaximumHeight(90)
+        self.task_editor_all_day = QCheckBox("All-day")
+        self.task_editor_location = QLineEdit()
+        self.task_editor_location.setPlaceholderText("Location (optional)")
+        self.task_editor_recurrence = QLineEdit()
+        self.task_editor_recurrence.setPlaceholderText("Recurrence RRULE (optional, e.g. FREQ=WEEKLY)")
+        for widget in (
+            self.task_editor_name,
+            self.task_editor_start_date,
+            self.task_editor_start_time,
+            self.task_editor_end_date,
+            self.task_editor_end_time,
+            self.task_editor_location,
+            self.task_editor_recurrence,
+        ):
+            widget.setStyleSheet(
+                f"background-color: {C_BG3}; color: {C_TEXT}; border: 1px solid {C_BORDER}; "
+                f"font-family: Georgia, serif; font-size: 10px; padding: 4px;"
+            )
+            editor_layout.addWidget(widget)
+        self.task_editor_all_day.setStyleSheet(f"color: {C_TEXT}; font-size: 10px;")
+        editor_layout.addWidget(self.task_editor_all_day)
+        self.task_editor_notes.setStyleSheet(
+            f"background-color: {C_BG3}; color: {C_TEXT}; border: 1px solid {C_BORDER}; "
+            f"font-family: Georgia, serif; font-size: 10px; padding: 4px;"
+        )
+        editor_layout.addWidget(self.task_editor_notes, 1)
+
+        editor_actions = QHBoxLayout()
+        self.btn_task_editor_save = QPushButton("SAVE")
+        self.btn_task_editor_cancel = QPushButton("CANCEL")
+        for btn in (self.btn_task_editor_save, self.btn_task_editor_cancel):
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {C_BG3}; color: {C_CYAN}; border: 1px solid {C_CYAN_DIM}; "
+                f"border-radius: 2px; font-size: 9px; padding: 4px 10px; letter-spacing: 1px; }}"
+                f"QPushButton:hover {{ background-color: {C_CYAN_DIM}; color: {C_TEXT}; border-color: {C_CYAN}; }}"
+            )
+        self.btn_task_editor_save.clicked.connect(self._save_task_editor_google_first)
+        self.btn_task_editor_cancel.clicked.connect(self._cancel_task_editor_workspace)
+        editor_actions.addWidget(self.btn_task_editor_save)
+        editor_actions.addWidget(self.btn_task_editor_cancel)
+        editor_actions.addStretch(1)
+        editor_layout.addLayout(editor_actions)
+
+        self.upper_right_workspace_stack.addWidget(self.upper_right_task_editor_workspace)
+        self.upper_right_workspace_stack.setCurrentWidget(self.upper_right_normal_workspace)
 
         cal_label = QLabel("❧ CALENDAR")
         cal_label.setStyleSheet(f"color: {C_GOLD}; font-size: 10px; letter-spacing: 2px; font-family: Georgia, serif;")
@@ -4000,7 +4126,7 @@ class GrimveilDeck(QMainWindow):
         except Exception:
             self._tasks_mtime = None
         all_tasks = self.memory.load_tasks()
-        selected_id = self._get_selected_task_id()
+        selected_ids = set(self._get_selected_task_ids())
 
         active_tasks = []
         completed_tasks = []
@@ -4013,6 +4139,7 @@ class GrimveilDeck(QMainWindow):
                 active_tasks.append(task)
 
         visible_tasks = active_tasks + completed_tasks if self.task_show_completed else active_tasks
+        visible_tasks = self._apply_task_date_filter(visible_tasks)
         visible_tasks = sorted(visible_tasks, key=_task_due_sort_key)
         self.task_row_ids = [task.get("id", "") for task in visible_tasks]
 
@@ -4065,25 +4192,59 @@ class GrimveilDeck(QMainWindow):
                 self.task_table.setItem(row, col, item)
             self.task_table.setRowHeight(row, 18)
 
-        if selected_id and selected_id in self.task_row_ids:
-            idx = self.task_row_ids.index(selected_id)
-            self.task_table.selectRow(idx)
+        if selected_ids:
+            self.task_table.clearSelection()
+            for idx, task_id in enumerate(self.task_row_ids):
+                if task_id in selected_ids:
+                    self.task_table.selectRow(idx)
         self._on_task_selection_changed()
 
+    def _apply_task_date_filter(self, tasks):
+        now = now_for_compare()
+        key = (getattr(self, "task_date_filter", "next_3_months") or "next_3_months").strip().lower()
+        horizon_map = {
+            "week": now + timedelta(days=7),
+            "month": now + timedelta(days=31),
+            "next_3_months": now + timedelta(days=93),
+            "year": now + timedelta(days=366),
+        }
+        horizon = horizon_map.get(key, horizon_map["next_3_months"])
+        filtered = []
+        for task in tasks:
+            due = parse_iso_for_compare(task.get("due_at") or task.get("due"), context="task_date_filter_due")
+            if due is None:
+                filtered.append(task)
+                continue
+            if due <= now:
+                filtered.append(task)
+                continue
+            if due <= horizon:
+                filtered.append(task)
+        return filtered
+
     def _get_selected_task_id(self):
+        ids = self._get_selected_task_ids()
+        return ids[0] if ids else None
+
+    def _get_selected_task_ids(self):
         if not hasattr(self, "task_table"):
-            return None
-        row = self.task_table.currentRow()
-        if row < 0 or row >= len(getattr(self, "task_row_ids", [])):
-            return None
-        return self.task_row_ids[row]
+            return []
+        model = self.task_table.selectionModel()
+        if model is None:
+            return []
+        rows = sorted({idx.row() for idx in model.selectedRows()})
+        ids = []
+        for row in rows:
+            if 0 <= row < len(getattr(self, "task_row_ids", [])):
+                ids.append(self.task_row_ids[row])
+        return ids
 
     def _should_delete_google_event_for_terminal_status(self, task: dict):
         event_id = (task or {}).get("google_event_id")
         sync_status = ((task or {}).get("sync_status") or "").strip().lower()
         return bool(event_id and sync_status == "synced")
 
-    def _delete_task_google_calendar_event_if_needed(self, task: dict, terminal_status: str):
+    def _delete_task_google_calendar_event_if_needed(self, task: dict, terminal_status: str, emit_ai_commentary: bool = True):
         if not task:
             return
         task_id = task.get("id")
@@ -4115,11 +4276,12 @@ class GrimveilDeck(QMainWindow):
                 error_message=None,
             )
             print(f"[GCal][DEBUG] Delete success: task_id={task_id}, google_event_id={google_event_id}")
-            self._emit_ai_task_commentary(
-                event_name="task_google_terminal_sync_deleted",
-                facts={"task_id": task_id, "event_id": google_event_id, "terminal_status": terminal_status},
-                fallback="Google Calendar event removed for terminal local task state."
-            )
+            if emit_ai_commentary:
+                self._emit_ai_task_commentary(
+                    event_name="task_google_terminal_sync_deleted",
+                    facts={"task_id": task_id, "event_id": google_event_id, "terminal_status": terminal_status},
+                    fallback="Google Calendar event removed for terminal local task state."
+                )
             self.log_diagnostic(
                 f"Cancel/complete sync success for task_id={task_id}, event_id={google_event_id}.",
                 level="INFO"
@@ -4132,18 +4294,21 @@ class GrimveilDeck(QMainWindow):
             )
             self.log_exception(f"Cancel/complete sync task_id={task_id}", ex)
             if terminal_status == "cancelled":
-                self._emit_ai_task_commentary(
-                    event_name="task_google_cancel_sync_failed",
-                    facts={"task_id": task_id, "event_id": google_event_id},
-                    fallback="Google Calendar cancel sync failed; local task was still canceled."
-                )
+                if emit_ai_commentary:
+                    self._emit_ai_task_commentary(
+                        event_name="task_google_cancel_sync_failed",
+                        facts={"task_id": task_id, "event_id": google_event_id},
+                        fallback="Google Calendar cancel sync failed; local task was still canceled."
+                    )
             else:
-                self._emit_ai_task_commentary(
-                    event_name="task_google_terminal_sync_failed",
-                    facts={"task_id": task_id, "event_id": google_event_id, "terminal_status": local_terminal_label},
-                    fallback=f"Google Calendar terminal sync failed; local task was still {local_terminal_label}."
-                )
-    def _set_task_status(self, task_id: str, status: str):
+                if emit_ai_commentary:
+                    self._emit_ai_task_commentary(
+                        event_name="task_google_terminal_sync_failed",
+                        facts={"task_id": task_id, "event_id": google_event_id, "terminal_status": local_terminal_label},
+                        fallback=f"Google Calendar terminal sync failed; local task was still {local_terminal_label}."
+                    )
+
+    def _set_task_status(self, task_id: str, status: str, emit_sync_commentary: bool = True):
         tasks = self.memory.load_tasks()
         target = None
         for task in tasks:
@@ -4160,13 +4325,12 @@ class GrimveilDeck(QMainWindow):
             target["acknowledged_at"] = target.get("acknowledged_at") or local_now_iso()
             target["cancelled_at"] = local_now_iso()
         self.memory.save_all_tasks(tasks)
-        self._delete_task_google_calendar_event_if_needed(target, status)
+        self._delete_task_google_calendar_event_if_needed(target, status, emit_ai_commentary=emit_sync_commentary)
         self._refresh_task_registry_panel()
         return target
 
     def _on_task_selection_changed(self):
-        selected_id = self._get_selected_task_id()
-        enabled = bool(selected_id)
+        enabled = bool(self._get_selected_task_ids())
         if hasattr(self, "btn_complete_task"):
             self.btn_complete_task.setEnabled(enabled)
             self.btn_cancel_task.setEnabled(enabled)
@@ -4175,28 +4339,207 @@ class GrimveilDeck(QMainWindow):
         self._complete_selected_task()
 
     def _complete_selected_task(self):
-        task_id = self._get_selected_task_id()
-        if not task_id:
+        task_ids = self._get_selected_task_ids()
+        if not task_ids:
             return
-        task = self._set_task_status(task_id, "completed")
-        if task:
+        completed = []
+        for task_id in task_ids:
+            task = self._set_task_status(task_id, "completed", emit_sync_commentary=False)
+            if task:
+                completed.append(task)
+                self.log_diagnostic(f"Batch complete applied for task_id={task_id}.", level="INFO")
+        if completed:
             self._emit_ai_task_commentary(
-                event_name="task_completed",
-                facts={"task_text": task.get("text", ""), "task_id": task.get("id", "")},
-                fallback=f"Task completed: {task.get('text','(no text)')}"
+                event_name="task_batch_completed",
+                facts={"task_count": len(completed), "task_text": completed[0].get("text", "")},
+                fallback=f"Completed {len(completed)} selected task(s)."
             )
 
     def _cancel_selected_task(self):
-        task_id = self._get_selected_task_id()
-        if not task_id:
+        task_ids = self._get_selected_task_ids()
+        if not task_ids:
             return
-        task = self._set_task_status(task_id, "cancelled")
-        if task:
+        cancelled = []
+        for task_id in task_ids:
+            task = self._set_task_status(task_id, "cancelled", emit_sync_commentary=False)
+            if task:
+                cancelled.append(task)
+                self.log_diagnostic(f"Batch cancel applied for task_id={task_id}.", level="INFO")
+        if cancelled:
             self._emit_ai_task_commentary(
-                event_name="task_cancelled",
-                facts={"task_text": task.get("text", ""), "task_id": task.get("id", "")},
-                fallback=f"Task cancelled: {task.get('text','(no text)')}"
+                event_name="task_batch_cancelled",
+                facts={"task_count": len(cancelled), "task_text": cancelled[0].get("text", "")},
+                fallback=f"Canceled {len(cancelled)} selected task(s)."
             )
+
+    def _on_task_filter_changed(self):
+        selected_key = self.task_filter_combo.currentData() or "next_3_months"
+        self.task_date_filter = str(selected_key)
+        self.log_diagnostic(f"Task registry filter changed to {self.task_date_filter}.", level="INFO")
+        self._refresh_task_registry_panel()
+
+    def _set_task_editor_status(self, text: str, ok: bool = False):
+        color = C_GREEN if ok else C_TEXT_DIM
+        self.task_editor_status_label.setStyleSheet(
+            f"background: {C_PANEL}; color: {color}; border: 1px solid {C_BORDER}; "
+            f"font-family: Georgia, serif; font-size: 10px; padding: 6px;"
+        )
+        self.task_editor_status_label.setText(text)
+
+    def _open_task_editor_workspace(self):
+        now_local = datetime.now()
+        end_local = now_local + timedelta(minutes=30)
+        self.task_editor_name.setText("")
+        self.task_editor_start_date.setText(now_local.strftime("%Y-%m-%d"))
+        self.task_editor_start_time.setText(now_local.strftime("%H:%M"))
+        self.task_editor_end_date.setText(end_local.strftime("%Y-%m-%d"))
+        self.task_editor_end_time.setText(end_local.strftime("%H:%M"))
+        self.task_editor_notes.setPlainText("")
+        self.task_editor_location.setText("")
+        self.task_editor_recurrence.setText("")
+        self.task_editor_all_day.setChecked(False)
+        self._set_task_editor_status("Configure task details, then save to Google Calendar.", ok=False)
+        self.upper_right_workspace_stack.setCurrentWidget(self.upper_right_task_editor_workspace)
+        self.log_diagnostic("Task editor workspace opened.", level="INFO")
+
+    def _close_task_editor_workspace(self):
+        self.upper_right_workspace_stack.setCurrentWidget(self.upper_right_normal_workspace)
+        self.log_diagnostic("Task editor workspace closed; restored upper-right workspace.", level="INFO")
+
+    def _cancel_task_editor_workspace(self):
+        self.log_diagnostic("Task editor canceled by operator; no task created.", level="INFO")
+        self._close_task_editor_workspace()
+
+    def _parse_editor_datetime(self, date_text: str, time_text: str, all_day: bool, is_end: bool = False):
+        date_text = (date_text or "").strip()
+        time_text = (time_text or "").strip()
+        if not date_text:
+            return None
+        if all_day:
+            hour = 23 if is_end else 0
+            minute = 59 if is_end else 0
+            parsed = datetime.strptime(f"{date_text} {hour:02d}:{minute:02d}", "%Y-%m-%d %H:%M")
+        else:
+            parsed = datetime.strptime(f"{date_text} {time_text}", "%Y-%m-%d %H:%M")
+        return normalize_datetime_for_compare(parsed, context="task_editor_parse_dt")
+
+    def _save_task_editor_google_first(self):
+        title = self.task_editor_name.text().strip()
+        all_day = self.task_editor_all_day.isChecked()
+        start_date = self.task_editor_start_date.text().strip()
+        start_time = self.task_editor_start_time.text().strip()
+        end_date = self.task_editor_end_date.text().strip()
+        end_time = self.task_editor_end_time.text().strip()
+        notes = self.task_editor_notes.toPlainText().strip()
+        location = self.task_editor_location.text().strip()
+        recurrence = self.task_editor_recurrence.text().strip()
+
+        if not title:
+            self._set_task_editor_status("Task Name is required.", ok=False)
+            return
+        if not start_date or not end_date or (not all_day and (not start_time or not end_time)):
+            self._set_task_editor_status("Start/End date and time are required.", ok=False)
+            return
+        try:
+            start_dt = self._parse_editor_datetime(start_date, start_time, all_day, is_end=False)
+            end_dt = self._parse_editor_datetime(end_date, end_time, all_day, is_end=True)
+            if not start_dt or not end_dt:
+                raise ValueError("datetime parse failed")
+            if end_dt < start_dt:
+                self._set_task_editor_status("End datetime must be after start datetime.", ok=False)
+                return
+        except Exception:
+            self._set_task_editor_status("Invalid date/time format. Use YYYY-MM-DD and HH:MM.", ok=False)
+            return
+
+        tz_name = self.google_calendar._get_google_event_timezone()
+        payload = {"summary": title}
+        if all_day:
+            payload["start"] = {"date": start_dt.date().isoformat()}
+            payload["end"] = {"date": (end_dt.date() + timedelta(days=1)).isoformat()}
+        else:
+            payload["start"] = {"dateTime": start_dt.replace(tzinfo=None).isoformat(timespec="seconds"), "timeZone": tz_name}
+            payload["end"] = {"dateTime": end_dt.replace(tzinfo=None).isoformat(timespec="seconds"), "timeZone": tz_name}
+        if notes:
+            payload["description"] = notes
+        if location:
+            payload["location"] = location
+        if recurrence:
+            rule = recurrence if recurrence.upper().startswith("RRULE:") else f"RRULE:{recurrence}"
+            payload["recurrence"] = [rule]
+
+        self.log_diagnostic(f"Task editor Google-first save started for title='{title}'.", level="INFO")
+        try:
+            event_id, link_established = self.google_calendar.create_event_with_payload(payload, calendar_id="primary")
+            if link_established and not self._google_link_announced:
+                self._google_link_announced = True
+                self.log_diagnostic("Google Calendar auth/link established.", level="INFO")
+            tasks = self.memory.load_tasks()
+            task = {
+                "id": f"task_{uuid.uuid4().hex[:10]}",
+                "created_at": local_now_iso(),
+                "due_at": start_dt.isoformat(timespec="seconds"),
+                "pre_trigger": (start_dt - timedelta(minutes=1)).isoformat(timespec="seconds"),
+                "text": title,
+                "status": "pending",
+                "acknowledged_at": None,
+                "retry_count": 0,
+                "last_triggered_at": None,
+                "next_retry_at": None,
+                "source": "local",
+                "google_event_id": event_id,
+                "sync_status": "synced",
+                "last_synced_at": local_now_iso(),
+                "metadata": {
+                    "input": "task_editor_google_first",
+                    "notes": notes,
+                    "start_at": start_dt.isoformat(timespec="seconds"),
+                    "end_at": end_dt.isoformat(timespec="seconds"),
+                    "all_day": bool(all_day),
+                    "location": location,
+                    "recurrence": recurrence,
+                },
+            }
+            tasks.append(task)
+            self.memory.save_all_tasks(tasks)
+            self._refresh_task_registry_panel()
+            self._emit_ai_task_commentary(
+                event_name="task_created_final",
+                facts={
+                    "task_text": title,
+                    "due": f"{start_dt.strftime('%m/%d/%Y %I:%M %p')} to {end_dt.strftime('%m/%d/%Y %I:%M %p')}",
+                    "status": "Google-first save succeeded",
+                    "google_sync_success": True,
+                    "google_sync_status": "synced",
+                    "notes": notes,
+                    "anchor_mode": self._get_canonical_e42_state(),
+                },
+                fallback=f"Task '{title}' saved and synced to Google Calendar."
+            )
+            self._set_task_editor_status("Google sync succeeded and task registry updated.", ok=True)
+            self.log_diagnostic(
+                f"Task editor Google-first save succeeded for title='{title}', event_id={event_id}.",
+                level="INFO",
+            )
+            self._close_task_editor_workspace()
+        except Exception as ex:
+            failure_reason = str(ex).strip() or ex.__class__.__name__
+            self.log_exception("Task editor Google-first save", ex)
+            self._emit_ai_task_commentary(
+                event_name="task_created_final",
+                facts={
+                    "task_text": title,
+                    "due": f"{start_date} {start_time} -> {end_date} {end_time}",
+                    "status": "Google-first save failed",
+                    "google_sync_success": False,
+                    "google_sync_status": "failed",
+                    "parse_reason": failure_reason,
+                    "anchor_mode": self._get_canonical_e42_state(),
+                },
+                fallback=f"Google Calendar save failed for '{title}'. No local task was created."
+            )
+            self._set_task_editor_status(f"Google save failed: {failure_reason}", ok=False)
+            self._close_task_editor_workspace()
 
     def _toggle_show_completed_tasks(self):
         self.task_show_completed = not self.task_show_completed
@@ -4692,13 +5035,18 @@ class GrimveilDeck(QMainWindow):
 
     def _task_acknowledgement_facts(self, event_name: str, facts: dict):
         facts = facts if isinstance(facts, dict) else {}
-        include_keys = ["task_text", "due", "status", "google_sync_status", "google_sync_success", "schedule_type", "parse_reason", "intent"]
+        include_keys = [
+            "task_text", "due", "status", "google_sync_status", "google_sync_success",
+            "schedule_type", "parse_reason", "intent", "task_count"
+        ]
         compact = {k: facts.get(k) for k in include_keys if facts.get(k) not in (None, "", [])}
         mode = self._get_narrative_mode()
         action_map = {
             "task_created_final": "added",
             "task_completed": "completed",
             "task_cancelled": "canceled",
+            "task_batch_completed": "completed",
+            "task_batch_cancelled": "canceled",
             "task_acknowledged": "acknowledged",
             "task_parse_failed": "failed",
             "task_complete_not_found": "failed",
@@ -4718,7 +5066,7 @@ class GrimveilDeck(QMainWindow):
             "absent": "frayed suspicion",
         }.get(mode, "controlled superiority")
         compact["action"] = action_map.get(event_name, "updated")
-        if event_name in {"task_completed", "task_cancelled"} and facts.get("task_text"):
+        if event_name in {"task_completed", "task_cancelled", "task_batch_completed", "task_batch_cancelled"} and facts.get("task_text"):
             compact["task_text"] = facts.get("task_text")
         if event_name in {"task_parse_failed", "task_complete_not_found"}:
             compact["status"] = "failed"
@@ -4745,13 +5093,17 @@ class GrimveilDeck(QMainWindow):
         status = (compact_facts.get("status") or "").strip()
         if status:
             lines.append(f"The result status is {status}.")
+        task_count = compact_facts.get("task_count")
+        if isinstance(task_count, int) and task_count > 0:
+            lines.append(f"The number of affected tasks is {task_count}.")
         sync_status = (compact_facts.get("google_sync_status") or "").strip()
         if sync_status:
             lines.append(f"Google Calendar sync status is {sync_status}.")
-        if event_name == "task_parse_failed":
+        if event_name == "task_parse_failed" or (compact_facts.get("parse_reason") and sync_status == "failed"):
             reason = (compact_facts.get("parse_reason") or "Could not confidently determine the requested schedule").strip()
             lines.append(f"The parse reason is: {reason}.")
-            lines.append("No task was created.")
+            if event_name == "task_parse_failed":
+                lines.append("No task was created.")
         mode = (compact_facts.get("anchor_mode") or "").strip()
         if mode:
             lines.append(f"Anchor mode is {mode}.")
@@ -4785,6 +5137,8 @@ class GrimveilDeck(QMainWindow):
             "task_parse_failed",
             "task_completed",
             "task_cancelled",
+            "task_batch_completed",
+            "task_batch_cancelled",
             "task_complete_not_found",
         }
         if is_task_final_ack:
@@ -4966,6 +5320,12 @@ class GrimveilDeck(QMainWindow):
             return f"{opener} '{task_text}' is completed."
         if event_name == "task_cancelled":
             return f"{opener} '{task_text}' is canceled."
+        if event_name == "task_batch_completed":
+            count = int(facts.get("task_count") or 0)
+            return f"{opener} Batch completion executed across {count} selected task{'s' if count != 1 else ''}."
+        if event_name == "task_batch_cancelled":
+            count = int(facts.get("task_count") or 0)
+            return f"{opener} Batch cancel executed across {count} selected task{'s' if count != 1 else ''}."
         if event_name == "task_acknowledged":
             return f"{opener} Reminder acknowledged."
         if event_name == "task_parse_failed":
