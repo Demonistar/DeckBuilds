@@ -1,8 +1,8 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.13.2
-# Build Date: 2026-04-03-r3
+# Version: 1.13.3
+# Build Date: 2026-04-03-r4
 # Summary:
 #   Fixed E-42 mode/state desynchronization for autonomous/idle AI handoff by using canonical live state.
 # Changelog:
@@ -28,6 +28,8 @@
 #   - fixed task acknowledgement duplication
 #   - task actions now emit one final visible AI response instead of multiple layered outputs
 #   - moved raw task/sync internals out of Tactical Record and into Diagnostics
+#   - refactored visible task acknowledgements from pseudo-structured output to plain natural-language GrimVeile responses
+#   - removed label/template leakage from task acknowledgement rendering
 #   - fixed Google OAuth scope list causing invalid_scope failures
 #   - added diagnostics logging for requested Google scopes
 #   - converted Records tab from Docs-first to Drive-first workspace
@@ -132,8 +134,8 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.13.2"
-VERSION_DATE = "2026-04-03-r3"
+APP_VERSION = "1.13.3"
+VERSION_DATE = "2026-04-03-r4"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
 
@@ -4730,29 +4732,29 @@ class GrimveilDeck(QMainWindow):
         compact_facts = compact_facts if isinstance(compact_facts, dict) else {}
         lines = []
         action = (compact_facts.get("action") or "updated").strip()
-        lines.append(f"action type: {action}")
+        lines.append(f"The task action result is {action}.")
         task_text = (compact_facts.get("task_text") or "").strip()
         if task_text:
-            lines.append(f"task title: {task_text}")
+            lines.append(f'The task text is "{task_text}".')
         due = (compact_facts.get("due") or "").strip()
         if due:
-            lines.append(f"resolved due datetime: {due}")
+            lines.append(f"The resolved due time is {due}.")
         schedule_type = (compact_facts.get("schedule_type") or "").strip()
         if schedule_type:
-            lines.append(f"schedule type: {schedule_type}")
+            lines.append(f"The schedule type is {schedule_type}.")
         status = (compact_facts.get("status") or "").strip()
         if status:
-            lines.append(f"result: {status}")
+            lines.append(f"The result status is {status}.")
         sync_status = (compact_facts.get("google_sync_status") or "").strip()
         if sync_status:
-            lines.append(f"google sync status: {sync_status}")
+            lines.append(f"Google Calendar sync status is {sync_status}.")
         if event_name == "task_parse_failed":
             reason = (compact_facts.get("parse_reason") or "Could not confidently determine the requested schedule").strip()
-            lines.append(f"reason: {reason}")
-            lines.append("task created: no")
+            lines.append(f"The parse reason is: {reason}.")
+            lines.append("No task was created.")
         mode = (compact_facts.get("anchor_mode") or "").strip()
         if mode:
-            lines.append(f"anchor mode: {mode}")
+            lines.append(f"Anchor mode is {mode}.")
         return "\n".join(lines)
 
     def _emit_ai_task_commentary(self, event_name: str, facts: dict, fallback: str):
@@ -4762,18 +4764,19 @@ class GrimveilDeck(QMainWindow):
         prompt = (
             "<|im_start|>system\n"
             "You are GrimVeile acknowledging a task/reminder action.\n"
-            "Preserve factual correctness from payload: added/canceled/completed/acknowledged/synced/failed as applicable.\n"
+            "Write plain natural language only.\n"
+            "Preserve factual correctness from the fact packet.\n"
             "Stay concise and in-character: dry superiority, restrained sarcasm, command presence, contempt for disorder.\n"
-            "Use anchor mode lightly; mention E-42 only when it strengthens the line.\n"
-            "No internal IDs, no JSON, no metadata labels, no 'Explanation', no 'Tactical Record'.\n"
+            "Respond with 1 or 2 complete sentences maximum.\n"
+            "Sentence 1 must confirm the actual task result.\n"
+            "Sentence 2 is optional flavor.\n"
+            "Do not use numbering, labels, prefixes, headings, field names, templates, or raw IDs.\n"
+            "Never output fragments or pseudo-structured text.\n"
             "<|im_end|>\n"
             "<|im_start|>user\n"
+            "Fact packet:\n"
             f"{payload}\n"
-            "Output contract (critical): 1-2 sentences max.\n"
-            "Sentence 1 must be factual confirmation/result using payload facts.\n"
-            "Sentence 2 is optional GrimVeile flavor.\n"
-            "Forbidden weak outputs: 'Ah, I see.', 'Task: ...', label fragments, raw technical phrasing, generic assistant filler.\n"
-            "Never output clipped or unfinished phrases.\n"
+            "Now provide the final acknowledgement line.\n"
             "<|im_end|>\n"
             "<|im_start|>assistant\n"
         )
@@ -4809,16 +4812,20 @@ class GrimveilDeck(QMainWindow):
             )
         line = self._sanitize_task_commentary_output(generated)
         retry_used = False
-        needs_retry = self._is_weak_task_ack_output(line) or self._looks_incomplete_fragment(line)
+        rejected_banned_prefix = self._starts_with_banned_task_ack_prefix(line)
+        needs_retry = (not line) or rejected_banned_prefix or self._looks_incomplete_fragment(line)
+        if rejected_banned_prefix:
+            self.log_diagnostic("Task acknowledgement rejected for banned prefix/meta label.", level="WARN")
         if needs_retry:
             retry_used = True
-            self.log_diagnostic("Task commentary output weak/incomplete; retrying once with stronger guardrails.", level="WARN")
+            self.log_diagnostic("Task commentary output invalid/incomplete; retrying once with stronger plain-language guardrails.", level="WARN")
             retry_prompt = (
                 prompt
                 + "<|im_start|>system\n"
-                  "Retry now. Produce a complete 1-2 sentence acknowledgement only.\n"
-                  "Sentence 1 = factual result. Optional sentence 2 = terse GrimVeile sting.\n"
-                  "Do not output fragments, labels, or generic filler.\n"
+                  "Retry once now.\n"
+                  "Output only plain natural language in 1-2 complete sentences.\n"
+                  "First sentence confirms the concrete task result.\n"
+                  "No numbering. No labels. No prefixes like Task:, Factual confirmation:, Sentence, Result:, or action type:.\n"
                   "<|im_end|>\n"
                   "<|im_start|>assistant\n"
             )
@@ -4834,12 +4841,13 @@ class GrimveilDeck(QMainWindow):
                 level="DEBUG",
             )
             retry_line = self._sanitize_task_commentary_output(retry_generated)
-            if retry_line and not self._is_weak_task_ack_output(retry_line) and not self._looks_incomplete_fragment(retry_line):
+            retry_rejected_banned_prefix = self._starts_with_banned_task_ack_prefix(retry_line)
+            if retry_rejected_banned_prefix:
+                self.log_diagnostic("Task acknowledgement retry rejected for banned prefix/meta label.", level="WARN")
+            if retry_line and not retry_rejected_banned_prefix and not self._looks_incomplete_fragment(retry_line):
                 line = retry_line
             else:
-                safe_line = self._trim_to_complete_sentence(line, max_sentences=2)
-                if safe_line and not self._looks_incomplete_fragment(safe_line):
-                    line = safe_line
+                line = ""
         if is_task_final_ack:
             transformed = bool((generated or "").strip() != (line or "").strip())
             self.log_diagnostic(
@@ -4851,7 +4859,11 @@ class GrimveilDeck(QMainWindow):
                 level="DEBUG",
             )
             self.log_diagnostic(
-                f"Task final AI acknowledgement retry used due to weak/incomplete ending: {'yes' if retry_used else 'no'}",
+                f"Task final AI acknowledgement banned-prefix rejection occurred: {'yes' if rejected_banned_prefix else 'no'}",
+                level="DEBUG",
+            )
+            self.log_diagnostic(
+                f"Task final AI acknowledgement retry used: {'yes' if retry_used else 'no'}",
                 level="DEBUG",
             )
         if event_name == "task_due":
@@ -4868,8 +4880,13 @@ class GrimveilDeck(QMainWindow):
         if not line:
             line = self._task_commentary_fallback_line(event_name, compact_facts, fallback)
             if is_task_final_ack:
+                self.log_diagnostic("Task final AI acknowledgement fallback rendered after failed retry/validation.", level="WARN")
                 self._append_chat("SYSTEM", "Task action confirmed.")
         self._append_chat("GRIMVEILE", line)
+        self.log_diagnostic(
+            f"Task acknowledgement final rendered line: {self._preview_text(line, max_chars=240) or '[empty]'}",
+            level="DEBUG",
+        )
         if is_task_final_ack:
             self.log_diagnostic("Task final AI acknowledgement completed.", level="INFO")
 
@@ -4883,59 +4900,17 @@ class GrimveilDeck(QMainWindow):
             raw = re.split(r"<\|im_end\|>", raw, maxsplit=1, flags=re.IGNORECASE)[0].strip()
         raw = re.sub(r"^assistant\s*:\s*", "", raw, flags=re.IGNORECASE).strip()
         cleaned = re.sub(r"\s+", " ", raw).strip()
-        if cleaned.startswith("{") and cleaned.endswith("}"):
-            try:
-                parsed = json.loads(cleaned)
-                if isinstance(parsed, dict):
-                    for key in ("acknowledgement", "acknowledgment", "message", "response", "text", "line"):
-                        value = parsed.get(key)
-                        if isinstance(value, str) and value.strip():
-                            cleaned = value.strip()
-                            break
-            except Exception:
-                pass
         cleaned = cleaned.strip("`").strip()
         cleaned = cleaned.strip("\"'").strip()
         if "\n" in cleaned:
             lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
-            cleaned = " ".join(lines[:2]) if lines else cleaned
-        cleaned = re.sub(r"^[\-\*\•]\s*", "", cleaned).strip()
-        cleaned = re.sub(r"^(?:tactical\s*record\s*:|explanation\s*:)\s*", "", cleaned, flags=re.IGNORECASE).strip()
-        cleaned = re.sub(r'^[^A-Za-z0-9"\']*(?=[A-Za-z0-9"\'])', "", cleaned).strip()
+            cleaned = " ".join(lines[:2]) if lines else ""
         cleaned = self._trim_to_complete_sentence(cleaned, max_sentences=2)
-        disallowed_patterns = [
-            r"<\|im_start\|>",
-            r"<\|im_end\|>",
-            r"^\s*[\{\[]",
-            r"payload\"\s*:",
-            r"\bevent_name\s*=",
-            r"\bevent_facts\s*=",
-            r"\btask_id\s*[:=]",
-            r"\bevent_id\s*[:=]",
-            r"\bgoogle_event_id\s*[:=]",
-        ]
-        for pattern in disallowed_patterns:
-            if re.search(pattern, cleaned, flags=re.IGNORECASE):
-                return ""
-        generic_prefixes = (
-            "task completed",
-            "task cancelled",
-            "task canceled",
-            "task acknowledged",
-            "reminder acknowledged",
-            "status:",
-            "assistant:",
-        )
-        low = cleaned.lower()
-        if low in generic_prefixes or any(low.startswith(f"{p}.") for p in generic_prefixes):
+        if not cleaned:
             return ""
-        clipped_patterns = (
-            r'^task\s+"[^"]+"\.?$',
-            r'^task\s+(?:canceled|cancelled|completed)\s*:\s*.+$',
-            r'^reminder\s+(?:set|saved|acknowledged)\s*[:.]?.*$',
-            r'^task\s*:\s*.+$',
-        )
-        if any(re.match(p, cleaned, flags=re.IGNORECASE) for p in clipped_patterns):
+        if self._starts_with_banned_task_ack_prefix(cleaned):
+            return ""
+        if re.search(r"<\|im_start\|>|<\|im_end\|>|\b(task_id|event_id|google_event_id)\s*[:=]", cleaned, flags=re.IGNORECASE):
             return ""
         if cleaned and cleaned[-1] not in ".!?":
             cleaned = f"{cleaned}."
@@ -4946,28 +4921,20 @@ class GrimveilDeck(QMainWindow):
             return ""
         return cleaned
 
-    def _is_weak_task_ack_output(self, text: str):
-        cleaned = re.sub(r"\s+", " ", (text or "").strip()).strip().lower()
+    def _starts_with_banned_task_ack_prefix(self, text: str):
+        cleaned = re.sub(r"\s+", " ", (text or "").strip()).strip()
         if not cleaned:
             return True
-        weak_exact = {
-            "ah, i see.",
-            "i see.",
-            "noted.",
-            "understood.",
-            "done.",
-            "failed.",
-            "failed",
-        }
-        if cleaned in weak_exact:
-            return True
-        weak_patterns = (
-            r"^task\s*:\s*.+$",
-            r"^task\s+[^.?!]+[.?!]?$",
-            r"^reminder\s*:\s*.+$",
-            r"^(okay|ok|sure)[.?!]?$",
+        banned_prefixes = (
+            "task:",
+            "factual confirmation",
+            "sentence",
+            "result:",
+            "action type:",
+            "1.",
         )
-        return any(re.match(p, cleaned, flags=re.IGNORECASE) for p in weak_patterns)
+        low = cleaned.lower()
+        return any(low.startswith(prefix) for prefix in banned_prefixes)
 
     def _is_unhelpful_parse_failure_line(self, text: str):
         cleaned = re.sub(r"\s+", " ", (text or "").strip()).strip().lower()
