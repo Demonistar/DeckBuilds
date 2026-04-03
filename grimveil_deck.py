@@ -1,11 +1,13 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.13.1
-# Build Date: 2026-04-03-r2
+# Version: 1.13.2
+# Build Date: 2026-04-03-r3
 # Summary:
-#   Refactored deterministic task/reminder scheduling pipeline with AI-only final acknowledgement handoff.
+#   Fixed E-42 mode/state desynchronization for autonomous/idle AI handoff by using canonical live state.
 # Changelog:
+#   - fixed E-42 state desynchronization in autonomous/idle AI handoff
+#   - idle outputs now use canonical current E-42 mode instead of stale cached state
 #   - expanded task intent classification to include alarm phrasing
 #   - added scheduling-command safety guard to prevent false-positive chat confirmations when scheduling was not executed
 #   - cleaned remaining truncation/temperature generation warnings where applicable
@@ -130,8 +132,8 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.13.1"
-VERSION_DATE = "2026-04-03-r2"
+APP_VERSION = "1.13.2"
+VERSION_DATE = "2026-04-03-r3"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
 
@@ -2193,11 +2195,20 @@ class GrimveilDeck(QMainWindow):
         self.blink_state = True
         self.emotion_history = []
         self.anchor_state = 1.0
+        self.e42_canonical_state = "connected"
+        self.e42_state_last_transition_ts = local_now_iso()
+        self.e42_state_last_source = "boot_default"
         self.current_face = "neutral"
         self.session_id = f"sess_{uuid.uuid4().hex[:10]}"
         self.memory = MemoryManager(MEMORY_DIR, "GrimVeil")
         self.state = self.memory.load_state()
         self.narrative = self._load_internal_narrative_state(self.state.get("internal_narrative"))
+        boot_anchor = float(self.state.get("anchor_state", self.anchor_state) or self.anchor_state)
+        self._set_canonical_e42_state(
+            self._derive_e42_state_from_anchor(boot_anchor),
+            source="boot_state_load",
+            anchor_value=boot_anchor,
+        )
         self.last_user_activity_ts = time.time()
         self.user_delay_commentary_enabled = USER_DELAY_COMMENTARY_ENABLED
         self.user_delay_commentary_threshold_minutes = USER_DELAY_COMMENTARY_THRESHOLD_MINUTES
@@ -2281,7 +2292,13 @@ class GrimveilDeck(QMainWindow):
 
         self._append_chat("SYSTEM", f"{APP_NAME} v{APP_VERSION} INITIALIZING...")
         self._append_chat("SYSTEM", f"▣ {RUNES} ▣")
-        self._append_chat("SYSTEM", "Anchor state: CONNECTED. E-42 docked.")
+        boot_mode = self._get_canonical_e42_state()
+        if boot_mode == "connected":
+            self._append_chat("SYSTEM", "Anchor state: CONNECTED. E-42 docked.")
+        elif boot_mode == "nearby":
+            self._append_chat("SYSTEM", "Anchor state: NEARBY. E-42 in partial proximity.")
+        else:
+            self._append_chat("SYSTEM", "Anchor state: ABSENT. E-42 not docked.")
         self._append_chat("SYSTEM", "Persistent memory namespace linked.")
         self.log_diagnostic("Diagnostics panel active and receiving backend/system events.")
         self.log_diagnostic(
@@ -2298,12 +2315,54 @@ class GrimveilDeck(QMainWindow):
         load_thread = threading.Thread(target=self._load_model, daemon=True)
         load_thread.start()
 
-    def _get_narrative_mode(self):
-        if self.anchor_state >= 0.85:
+    def _derive_e42_state_from_anchor(self, anchor_state=None):
+        value = self.anchor_state if anchor_state is None else float(anchor_state)
+        if value >= 0.85:
             return "connected"
-        if self.anchor_state >= 0.45:
+        if value >= 0.45:
             return "nearby"
         return "absent"
+
+    def _get_canonical_e42_state(self):
+        current = (getattr(self, "e42_canonical_state", "") or "").strip().lower()
+        if current in {"connected", "nearby", "absent"}:
+            return current
+        derived = self._derive_e42_state_from_anchor()
+        self.e42_canonical_state = derived
+        self.e42_state_last_source = "auto_derived_fallback"
+        self.e42_state_last_transition_ts = local_now_iso()
+        self.log_diagnostic(
+            f"E-42 canonical state recovered from anchor fallback: {derived}.",
+            level="WARN",
+        )
+        return derived
+
+    def _set_canonical_e42_state(self, new_state: str, source: str, anchor_value=None):
+        if anchor_value is not None:
+            self.anchor_state = max(0.0, min(1.0, float(anchor_value)))
+        normalized = (new_state or "").strip().lower()
+        if normalized not in {"connected", "nearby", "absent"}:
+            normalized = self._derive_e42_state_from_anchor()
+        old_state = self._get_canonical_e42_state()
+        transition_ts = local_now_iso()
+        self.e42_canonical_state = normalized
+        self.e42_state_last_source = source or "unspecified"
+        if old_state != normalized:
+            self.e42_state_last_transition_ts = transition_ts
+        self.narrative["last_e42_state"] = normalized
+        self.narrative["last_e42_state_transition_ts"] = self.e42_state_last_transition_ts
+        self.log_diagnostic(
+            (
+                f"E-42 canonical transition | old={old_state} -> new={normalized} | "
+                f"source={self.e42_state_last_source} | transition_ts={self.e42_state_last_transition_ts} | "
+                f"anchor_state={self.anchor_state:.2f}"
+            ),
+            level="INFO" if old_state != normalized else "DEBUG",
+        )
+        return normalized
+
+    def _get_narrative_mode(self):
+        return self._get_canonical_e42_state()
 
     def _load_internal_narrative_state(self, stored):
         now_iso = local_now_iso()
@@ -2327,9 +2386,12 @@ class GrimveilDeck(QMainWindow):
             "idle_turn_count": legacy_idle_count,
             "idle_thread_active": bool(state.get("idle_thread_active", False)),
             "last_idle_mode": state.get("last_idle_mode", "starter"),
+            "last_idle_e42_state": state.get("last_idle_e42_state", state.get("mode", "connected")),
             "last_user_message_timestamp": state.get("last_user_message_timestamp", now_iso),
             "user_interrupted_idle_thread": bool(state.get("user_interrupted_idle_thread", True)),
             "idle_thread_was_active_before_user_return": bool(state.get("idle_thread_was_active_before_user_return", False)),
+            "last_e42_state": state.get("last_e42_state", state.get("mode", "connected")),
+            "last_e42_state_transition_ts": state.get("last_e42_state_transition_ts", now_iso),
         }
 
     def _persist_internal_narrative_state(self):
@@ -2417,7 +2479,10 @@ class GrimveilDeck(QMainWindow):
             "idle_turn_count": 0,
             "idle_thread_active": False,
             "last_idle_mode": "starter",
+            "last_idle_e42_state": mode,
             "user_interrupted_idle_thread": True,
+            "last_e42_state": mode,
+            "last_e42_state_transition_ts": now_iso,
         })
 
     def _build_autonomous_prompt(
@@ -2675,13 +2740,40 @@ class GrimveilDeck(QMainWindow):
         if last_update and (now_for_compare() - last_update) > timedelta(hours=8):
             self._seed_narrative_thread(self._get_narrative_mode())
         norm = self._normalize_autonomous_thread_state()
-        current_mode = norm["mode"]
+        canonical_mode = self._get_canonical_e42_state()
+        current_mode = canonical_mode
         turns = int(self.narrative.get("idle_turn_count", self.narrative.get("unsolicited_turn_count", 0)))
         level = int(self.narrative.get("escalation_level", 0))
         prior_summary = self.narrative.get("idle_thread_summary", self.narrative.get("thread_summary", ""))
         prior_output = self.narrative.get("last_idle_output", self.narrative.get("last_unsolicited_output", ""))
-        idle_mode = "continuation" if (self.narrative.get("idle_thread_active") and not self.narrative.get("user_interrupted_idle_thread")) else "starter"
+        cached_thread_mode = (self.narrative.get("last_idle_e42_state", self.narrative.get("mode", "")) or "").strip().lower()
+        mode_source = "live_canonical"
+        mode_changed_since_last_idle = bool(cached_thread_mode and cached_thread_mode != canonical_mode)
+        if mode_changed_since_last_idle:
+            idle_mode = "starter"
+            mode_source = "live_canonical_mode_shift"
+            prior_output = ""
+            self.log_diagnostic(
+                (
+                    f"E-42 idle thread mode shift detected | cached_idle_mode={cached_thread_mode} | "
+                    f"canonical_mode={canonical_mode} | forcing idle_mode=starter for fresh handoff."
+                ),
+                level="INFO",
+            )
+        else:
+            idle_mode = "continuation" if (self.narrative.get("idle_thread_active") and not self.narrative.get("user_interrupted_idle_thread")) else "starter"
+            if cached_thread_mode and cached_thread_mode != canonical_mode:
+                mode_source = "cached_thread_fallback"
         self.log_diagnostic(f"Idle autonomous mode selected: {idle_mode}.", level="INFO")
+        self.log_diagnostic(
+            (
+                "E-42 idle handoff diagnostics | "
+                f"canonical_state={canonical_mode} | prompt_state={current_mode} | state_source={mode_source} | "
+                f"cached_thread_state={cached_thread_mode or 'none'} | "
+                f"last_transition_ts={self.e42_state_last_transition_ts}"
+            ),
+            level="INFO",
+        )
         self.log_diagnostic(
             (
                 f"Autonomous normalized pre-gen | prior_mode={norm['prior_mode']} | mode={current_mode} | "
@@ -2772,6 +2864,7 @@ class GrimveilDeck(QMainWindow):
         self.narrative["idle_thread_summary"] = self.narrative.get("thread_summary", "")
         self.narrative["idle_thread_active"] = True
         self.narrative["last_idle_mode"] = idle_mode
+        self.narrative["last_idle_e42_state"] = current_mode
         self.narrative["user_interrupted_idle_thread"] = False
         self.log_diagnostic(
             (
@@ -2803,7 +2896,7 @@ class GrimveilDeck(QMainWindow):
         self._restart_idle_timer()
 
     def _build_internal_narrative_block(self):
-        mode = self.narrative.get("mode", self._get_narrative_mode())
+        mode = self._get_canonical_e42_state()
         history_tail = self.narrative.get("history", [])[-3:]
         joined = "\n".join(history_tail) if history_tail else "No unsolicited thread turns yet."
         return (
@@ -2818,7 +2911,7 @@ class GrimveilDeck(QMainWindow):
 
     def _flavor_with_narrative(self, text: str):
         base = (text or "").strip()
-        mode = self.narrative.get("mode", self._get_narrative_mode())
+        mode = self._get_canonical_e42_state()
         if mode == "connected":
             flavor = "E-42 remains docked; command stack stable."
         elif mode == "nearby":
@@ -3661,10 +3754,13 @@ class GrimveilDeck(QMainWindow):
         self._emit_wake_mode()
 
     def _restore_startup_state(self):
-        self.anchor_state = float(self.state.get("anchor_state", 1.0) or 1.0)
+        restored_anchor = float(self.state.get("anchor_state", 1.0) or 1.0)
+        restored_state = self._derive_e42_state_from_anchor(restored_anchor)
+        self._set_canonical_e42_state(restored_state, source="startup_restore", anchor_value=restored_anchor)
         self._refresh_anchor_ui()
         self.narrative = self._load_internal_narrative_state(self.state.get("internal_narrative"))
-        self._transition_narrative_mode(self._get_narrative_mode())
+        self._set_canonical_e42_state(self._derive_e42_state_from_anchor(), source="startup_narrative_sync")
+        self._transition_narrative_mode(self._get_canonical_e42_state())
         if not self.narrative.get("last_user_message_timestamp"):
             self.narrative["last_user_message_timestamp"] = local_now_iso()
         recent_messages = self.memory.load_recent_messages(limit=12)
@@ -4157,13 +4253,14 @@ class GrimveilDeck(QMainWindow):
         return "panicked"
 
     def _set_anchor_state(self, value):
-        self.anchor_state = max(0.0, min(1.0, value))
+        next_mode = self._derive_e42_state_from_anchor(value)
+        self._set_canonical_e42_state(next_mode, source="ui_anchor_button", anchor_value=value)
         self._refresh_anchor_ui()
-        self._transition_narrative_mode(self._get_narrative_mode())
+        self._transition_narrative_mode(self._get_canonical_e42_state())
         self._persist_internal_narrative_state()
-        if self.anchor_state >= 0.85:
+        if self._get_canonical_e42_state() == "connected":
             self._append_chat("SYSTEM", "E-42 docked. GRIMVEILE-42 stabilized.")
-        elif self.anchor_state >= 0.45:
+        elif self._get_canonical_e42_state() == "nearby":
             self._append_chat("SYSTEM", "E-42 nearby. Comfort subroutine active.")
         else:
             self._append_chat("SYSTEM", "E-42 absent. GRIMVEIL operating incomplete.")
