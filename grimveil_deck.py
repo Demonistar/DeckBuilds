@@ -1,11 +1,13 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.14.0
-# Build Date: 2026-04-03-r5
+# Version: 1.14.1
+# Build Date: 2026-04-03-r6
 # Summary:
-#   Added Google-first task editor workspace, multi-select batch task actions, and task registry date-range filtering.
+#   Added Self output tab for autonomous dialogue routing and hardened natural-language task acknowledgements.
 # Changelog:
+#   - added Self tab for autonomous/internal dialogue and routed idle output there
+#   - fixed task acknowledgement output so visible responses are plain natural-language GrimVeile lines instead of coded/template fragments
 #   - added full upper-right Google-first Task Editor workflow
 #   - added multi-select task complete/cancel actions
 #   - added task/event date-range filtering to reduce long-horizon clutter
@@ -137,8 +139,8 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.14.0"
-VERSION_DATE = "2026-04-03-r5"
+APP_VERSION = "1.14.1"
+VERSION_DATE = "2026-04-03-r6"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
 
@@ -2533,7 +2535,7 @@ class GrimveilDeck(QMainWindow):
         return (
             "<|im_start|>system\n"
             f"{self.system_prompt}\n"
-            "This turn is autonomous idle output for Tactical Record.\n"
+            "This turn is autonomous idle output for the Self channel.\n"
             f"Autonomous mode={idle_mode}. Persona fact: {mode_brief}.\n"
             "Write concise in-character autonomous speech (1-2 sentences, one complete thought).\n"
             f"{seed_rule}\n"
@@ -2901,12 +2903,15 @@ class GrimveilDeck(QMainWindow):
         )
         self.narrative.setdefault("history", []).append(history_entry)
         self.narrative["history"] = self.narrative["history"][-30:]
-        self._append_chat("SYSTEM", "[ UNSOLICITED TRANSMISSION ]")
-        self._append_chat("GRIMVEILE", line)
+        self._append_self_dialogue("SYSTEM", "[ UNSOLICITED TRANSMISSION ]")
+        self._append_self_dialogue("GRIMVEILE", line)
+        self.log_diagnostic("Autonomous output routed to Self tab.", level="INFO")
+        self._switch_output_view("self")
+        self.log_diagnostic("Auto-switch to Self tab triggered by autonomous output.", level="INFO")
         self.history.append({"role": "assistant", "content": line})
         self._store_message("system", history_entry)
         self._persist_internal_narrative_state()
-        self.log_diagnostic("Unsolicited transmission appended to Tactical Record and persisted.", level="DEBUG")
+        self.log_diagnostic("Unsolicited transmission appended to Self view and persisted to session history.", level="DEBUG")
         self._restart_idle_timer()
 
     def _build_internal_narrative_block(self):
@@ -2994,9 +2999,10 @@ class GrimveilDeck(QMainWindow):
         record_header_row.setContentsMargins(0, 0, 0, 0)
 
         self.btn_view_tactical = QPushButton("TACTICAL RECORD")
+        self.btn_view_self = QPushButton("SELF")
         self.btn_view_diagnostics = QPushButton("DIAGNOSTICS")
         self.btn_view_memory_trace = QPushButton("MEMORY TRACE")
-        for btn in (self.btn_view_tactical, self.btn_view_diagnostics, self.btn_view_memory_trace):
+        for btn in (self.btn_view_tactical, self.btn_view_self, self.btn_view_diagnostics, self.btn_view_memory_trace):
             btn.setCheckable(True)
             btn.setStyleSheet(
                 f"QPushButton {{ background-color: {C_BG3}; color: {C_GOLD}; border: 1px solid {C_CYAN_DIM}; "
@@ -3004,9 +3010,11 @@ class GrimveilDeck(QMainWindow):
                 f"QPushButton:checked {{ background-color: {C_CYAN_DIM}; color: {C_TEXT}; border-color: {C_CYAN}; }}"
             )
         self.btn_view_tactical.clicked.connect(lambda: self._switch_output_view("tactical"))
+        self.btn_view_self.clicked.connect(lambda: self._switch_output_view("self"))
         self.btn_view_diagnostics.clicked.connect(lambda: self._switch_output_view("diagnostics"))
         self.btn_view_memory_trace.clicked.connect(lambda: self._switch_output_view("memory_trace"))
         record_header_row.addWidget(self.btn_view_tactical)
+        record_header_row.addWidget(self.btn_view_self)
         record_header_row.addWidget(self.btn_view_diagnostics)
         record_header_row.addWidget(self.btn_view_memory_trace)
         record_header_row.addStretch()
@@ -3017,6 +3025,21 @@ class GrimveilDeck(QMainWindow):
         self.chat_display.setReadOnly(True)
         self.chat_display.setMinimumWidth(580)
         self.output_stack.addWidget(self.chat_display)
+
+        self.self_display = QTextEdit()
+        self.self_display.setReadOnly(True)
+        self.self_display.setMinimumWidth(580)
+        self.self_display.setStyleSheet(f"""
+            background-color: {C_MONITOR};
+            color: {C_CYAN};
+            border: 1px solid {C_CYAN_DIM};
+            border-radius: 2px;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 11px;
+            padding: 8px;
+            selection-background-color: {C_CYAN_DIM};
+        """)
+        self.output_stack.addWidget(self.self_display)
 
         self.diagnostics_display = QTextEdit()
         self.diagnostics_display.setReadOnly(True)
@@ -4005,18 +4028,44 @@ class GrimveilDeck(QMainWindow):
         self.chat_display.append("")
         self.chat_display.verticalScrollBar().setValue(self.chat_display.verticalScrollBar().maximum())
 
+    def _append_self_dialogue(self, speaker, text):
+        if not hasattr(self, "self_display"):
+            self._append_chat(speaker, text)
+            return
+        colors = {
+            "GRIMVEILE": C_CYAN,
+            "SYSTEM": C_PURPLE,
+        }
+        color = colors.get(speaker, C_TEXT)
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        if speaker == "SYSTEM":
+            self.self_display.append(
+                f'<span style="color:{C_TEXT_DIM}; font-size:10px;">[{timestamp}] </span>'
+                f'<span style="color:{color};">✦ {text}</span>'
+            )
+        else:
+            self.self_display.append(
+                f'<span style="color:{C_TEXT_DIM}; font-size:10px;">[{timestamp}] </span>'
+                f'<span style="color:{color}; font-weight:bold;">{speaker} ❧</span> '
+                f'<span style="color:{C_TEXT};">{text}</span>'
+            )
+        self.self_display.append("")
+        self.self_display.verticalScrollBar().setValue(self.self_display.verticalScrollBar().maximum())
+
     def _switch_output_view(self, view_name: str):
         normalized = (view_name or "").strip().lower()
         target = "tactical"
-        if normalized in {"diagnostics", "memory_trace"}:
+        if normalized in {"self", "diagnostics", "memory_trace"}:
             target = normalized
 
         self.btn_view_tactical.setChecked(target == "tactical")
+        self.btn_view_self.setChecked(target == "self")
         self.btn_view_diagnostics.setChecked(target == "diagnostics")
         self.btn_view_memory_trace.setChecked(target == "memory_trace")
 
         widget_map = {
             "tactical": self.chat_display,
+            "self": self.self_display,
             "diagnostics": self.diagnostics_display,
             "memory_trace": self.memory_trace_display,
         }
@@ -4730,6 +4779,8 @@ class GrimveilDeck(QMainWindow):
                 self._pending_user_delay_idle_thread_active = False
             self._stop_idle_timer(reason="prompt-submitted")
             self.log_diagnostic("Idle thread reset due to user prompt.", level="INFO")
+            self._switch_output_view("tactical")
+            self.log_diagnostic("Auto-switch back to Tactical Record triggered by user prompt.", level="INFO")
 
             self.input_field.clear()
             self._append_chat("YOU", text)
@@ -5080,33 +5131,33 @@ class GrimveilDeck(QMainWindow):
         compact_facts = compact_facts if isinstance(compact_facts, dict) else {}
         lines = []
         action = (compact_facts.get("action") or "updated").strip()
-        lines.append(f"The task action result is {action}.")
+        lines.append(f"The action performed was {action}.")
         task_text = (compact_facts.get("task_text") or "").strip()
         if task_text:
-            lines.append(f'The task text is "{task_text}".')
+            lines.append(f'The affected task text is "{task_text}".')
         due = (compact_facts.get("due") or "").strip()
         if due:
-            lines.append(f"The resolved due time is {due}.")
+            lines.append(f"The resolved due time was {due}.")
         schedule_type = (compact_facts.get("schedule_type") or "").strip()
         if schedule_type:
-            lines.append(f"The schedule type is {schedule_type}.")
+            lines.append(f"The schedule type was {schedule_type}.")
         status = (compact_facts.get("status") or "").strip()
         if status:
-            lines.append(f"The result status is {status}.")
+            lines.append(f"The outcome status was {status}.")
         task_count = compact_facts.get("task_count")
         if isinstance(task_count, int) and task_count > 0:
-            lines.append(f"The number of affected tasks is {task_count}.")
+            lines.append(f"The number of affected tasks was {task_count}.")
         sync_status = (compact_facts.get("google_sync_status") or "").strip()
         if sync_status:
-            lines.append(f"Google Calendar sync status is {sync_status}.")
+            lines.append(f"Google Calendar sync status was {sync_status}.")
         if event_name == "task_parse_failed" or (compact_facts.get("parse_reason") and sync_status == "failed"):
             reason = (compact_facts.get("parse_reason") or "Could not confidently determine the requested schedule").strip()
-            lines.append(f"The parse reason is: {reason}.")
+            lines.append(f"Parse reason: {reason}.")
             if event_name == "task_parse_failed":
                 lines.append("No task was created.")
         mode = (compact_facts.get("anchor_mode") or "").strip()
         if mode:
-            lines.append(f"Anchor mode is {mode}.")
+            lines.append(f"Anchor mode was {mode}.")
         return "\n".join(lines)
 
     def _emit_ai_task_commentary(self, event_name: str, facts: dict, fallback: str):
@@ -5116,14 +5167,15 @@ class GrimveilDeck(QMainWindow):
         prompt = (
             "<|im_start|>system\n"
             "You are GrimVeile acknowledging a task/reminder action.\n"
-            "Write plain natural language only.\n"
+            "Write only plain natural language dialogue.\n"
             "Preserve factual correctness from the fact packet.\n"
             "Stay concise and in-character: dry superiority, restrained sarcasm, command presence, contempt for disorder.\n"
-            "Respond with 1 or 2 complete sentences maximum.\n"
-            "Sentence 1 must confirm the actual task result.\n"
-            "Sentence 2 is optional flavor.\n"
-            "Do not use numbering, labels, prefixes, headings, field names, templates, or raw IDs.\n"
-            "Never output fragments or pseudo-structured text.\n"
+            "Respond with exactly 1 complete sentence by default.\n"
+            "Use a second sentence only if truly necessary for clarity.\n"
+            "The first sentence must confirm the concrete task outcome.\n"
+            "Do not use numbering, labels, prefixes, headings, field names, categories, placeholders, codes, abbreviations as result markers, templates, or raw IDs.\n"
+            "Never output meta wording, clipped fragments, or pseudo-structured text.\n"
+            "Forbidden starts include: Task action result, Task completed, Sentence, Factual confirmation, Result.\n"
             "<|im_end|>\n"
             "<|im_start|>user\n"
             "Fact packet:\n"
@@ -5164,10 +5216,13 @@ class GrimveilDeck(QMainWindow):
                 f"Due-alert raw decoded text: {self._preview_text(generated, max_chars=240) or '[empty]'}",
                 level="DEBUG",
             )
+        raw_meta_rejected = self._is_meta_task_ack_output(generated)
+        if raw_meta_rejected:
+            self.log_diagnostic("Task acknowledgement raw decoded output rejected as meta/template fragment.", level="WARN")
         line = self._sanitize_task_commentary_output(generated)
         retry_used = False
         rejected_banned_prefix = self._starts_with_banned_task_ack_prefix(line)
-        needs_retry = (not line) or rejected_banned_prefix or self._looks_incomplete_fragment(line)
+        needs_retry = raw_meta_rejected or (not line) or rejected_banned_prefix or self._looks_incomplete_fragment(line)
         if rejected_banned_prefix:
             self.log_diagnostic("Task acknowledgement rejected for banned prefix/meta label.", level="WARN")
         if needs_retry:
@@ -5177,9 +5232,10 @@ class GrimveilDeck(QMainWindow):
                 prompt
                 + "<|im_start|>system\n"
                   "Retry once now.\n"
-                  "Output only plain natural language in 1-2 complete sentences.\n"
-                  "First sentence confirms the concrete task result.\n"
-                  "No numbering. No labels. No prefixes like Task:, Factual confirmation:, Sentence, Result:, or action type:.\n"
+                  "Output one complete natural in-character sentence only; a second sentence is allowed only if required for clarity.\n"
+                  "First sentence must confirm the concrete task outcome.\n"
+                  "Reject meta text and templates entirely.\n"
+                  "No numbering. No labels. No prefixes like Task:, Task action result, Task completed, Factual confirmation:, Sentence, Result:, action type:, or single-letter result codes.\n"
                   "<|im_end|>\n"
                   "<|im_start|>assistant\n"
             )
@@ -5194,11 +5250,14 @@ class GrimveilDeck(QMainWindow):
                 f"{'Due-alert' if event_name == 'task_due' else 'Task final AI acknowledgement'} raw decoded text (retry): {self._preview_text(retry_generated, max_chars=240) or '[empty]'}",
                 level="DEBUG",
             )
+            retry_raw_meta_rejected = self._is_meta_task_ack_output(retry_generated)
+            if retry_raw_meta_rejected:
+                self.log_diagnostic("Task acknowledgement retry raw output rejected as meta/template fragment.", level="WARN")
             retry_line = self._sanitize_task_commentary_output(retry_generated)
             retry_rejected_banned_prefix = self._starts_with_banned_task_ack_prefix(retry_line)
             if retry_rejected_banned_prefix:
                 self.log_diagnostic("Task acknowledgement retry rejected for banned prefix/meta label.", level="WARN")
-            if retry_line and not retry_rejected_banned_prefix and not self._looks_incomplete_fragment(retry_line):
+            if retry_line and not retry_raw_meta_rejected and not retry_rejected_banned_prefix and not self._looks_incomplete_fragment(retry_line):
                 line = retry_line
             else:
                 line = ""
@@ -5214,6 +5273,10 @@ class GrimveilDeck(QMainWindow):
             )
             self.log_diagnostic(
                 f"Task final AI acknowledgement banned-prefix rejection occurred: {'yes' if rejected_banned_prefix else 'no'}",
+                level="DEBUG",
+            )
+            self.log_diagnostic(
+                f"Task final AI acknowledgement banned/meta-output rejection occurred: {'yes' if (raw_meta_rejected or rejected_banned_prefix) else 'no'}",
                 level="DEBUG",
             )
             self.log_diagnostic(
@@ -5275,19 +5338,51 @@ class GrimveilDeck(QMainWindow):
             return ""
         return cleaned
 
+    def _is_meta_task_ack_output(self, text: str):
+        cleaned = re.sub(r"\s+", " ", (text or "").strip()).strip()
+        if not cleaned:
+            return True
+        normalized = cleaned.lower().strip(" .:;!-")
+        if re.fullmatch(r"[a-z]", normalized):
+            return True
+        meta_starts = (
+            "task action result",
+            "task completed",
+            "sentence",
+            "factual confirmation",
+            "result",
+        )
+        if any(normalized.startswith(prefix) for prefix in meta_starts):
+            return True
+        meta_equals = {
+            "task action result",
+            "task completed",
+            "sentence",
+            "factual confirmation",
+            "result",
+        }
+        if normalized in meta_equals:
+            return True
+        return False
+
     def _starts_with_banned_task_ack_prefix(self, text: str):
         cleaned = re.sub(r"\s+", " ", (text or "").strip()).strip()
         if not cleaned:
             return True
         banned_prefixes = (
             "task:",
+            "task action result",
+            "task completed",
             "factual confirmation",
             "sentence",
             "result:",
+            "result",
             "action type:",
             "1.",
         )
         low = cleaned.lower()
+        if re.fullmatch(r"[a-z]\.?", low.strip()):
+            return True
         return any(low.startswith(prefix) for prefix in banned_prefixes)
 
     def _is_unhelpful_parse_failure_line(self, text: str):
