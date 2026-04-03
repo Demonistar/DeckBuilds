@@ -67,7 +67,7 @@
 #   - normalized autonomous thread mode/escalation state before generation
 #   - added Phase 1 Google Calendar outbound sync helper for local tasks
 #   - local task creation now attempts Google Calendar event creation after local save
-#   - added desktop OAuth token reuse cache at C:\AI\Models\Morganna_Memories\google\token.json
+#   - added desktop OAuth token reuse cache at D:\AI\Models\Morganna_Memories\google\token.json
 #   - improved Google Calendar outbound sync diagnostics
 #   - now surfaces actual push failure reason
 #   - fixed Google Calendar timed event payload timezone formatting
@@ -133,7 +133,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QSizePolicy, QComboBox, QCheckBox, QFileDialog,
     QMessageBox, QDateEdit, QDialog, QFormLayout
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QDate, QSize
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QDate
 from PyQt6.QtGui import (
     QFont, QColor, QPainter, QLinearGradient,
     QPixmap, QPen, QPainterPath, QTextCharFormat, QIcon
@@ -201,13 +201,13 @@ C_BLUE        = "#6a0a6a"
 RUNES = "▣ ▤ ▣ ▤ ▣ ▤ ▣ ▤ ▣"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-AI_MODELS_DIR = SCRIPT_DIR / "AI" / "Models"
-if SCRIPT_DIR.name.lower() == "models" and SCRIPT_DIR.parent.name.lower() == "ai":
-    AI_MODELS_DIR = SCRIPT_DIR
+AI_MODELS_DIR = SCRIPT_DIR
 MEMORY_DIR = AI_MODELS_DIR / "Morganna_Memories"
+FACES_DIR = MEMORY_DIR / "Faces"
+MODEL_PATH = AI_MODELS_DIR / "dolphin-8b"
 GOOGLE_CREDENTIALS_PATH = Path(r"C:\AI\config\google_credentials.json")
-GOOGLE_TOKEN_PATH = Path(r"C:\AI\Models\Morganna_Memories\google\token.json")
-GOOGLE_EXPORTS_DIR = Path(r"C:\AI\Models\Morganna_Memories\exports")
+GOOGLE_TOKEN_PATH = MEMORY_DIR / "google" / "token.json"
+GOOGLE_EXPORTS_DIR = MEMORY_DIR / "exports"
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/drive",
@@ -228,14 +228,7 @@ WINDOWS_TZ_TO_IANA = {
     "Pacific Standard Time": "America/Los_Angeles",
     "Mountain Standard Time": "America/Denver",
 }
-FACES_DIR = r"C:\AI\Models\Faces"
-MODEL_PATH = str(AI_MODELS_DIR / "dolphin-2.6-7b")
 FACE_FALLBACK_FILENAME = "Morganna_Neutral.png"
-E42_ICON_FILES = {
-    "attuned": "E42_Docked.png",
-    "watchful": "E42_Nearby.png",
-    "veiled": "E42_Absent.png",
-}
 _PIXMAP_CACHE = {}
 _MISSING_ASSET_WARNED = set()
 
@@ -248,24 +241,25 @@ def safe_tokenizer_max_length(tokenizer, fallback: int = 2048) -> int:
 
 
 def load_faces_pixmap(filename: str, use_fallback: bool = True) -> QPixmap:
-    path = os.path.join(FACES_DIR, filename)
-    if path in _PIXMAP_CACHE:
-        return _PIXMAP_CACHE[path]
+    path = FACES_DIR / filename
+    key = str(path)
+    if key in _PIXMAP_CACHE:
+        return _PIXMAP_CACHE[key]
 
-    pixmap = QPixmap(path)
+    pixmap = QPixmap(str(path))
     if not pixmap.isNull():
-        _PIXMAP_CACHE[path] = pixmap
+        _PIXMAP_CACHE[key] = pixmap
         return pixmap
 
-    if path not in _MISSING_ASSET_WARNED:
+    if key not in _MISSING_ASSET_WARNED:
         print(f"[WARN] Missing face asset at path: {path}")
-        _MISSING_ASSET_WARNED.add(path)
+        _MISSING_ASSET_WARNED.add(key)
 
     if use_fallback and filename != FACE_FALLBACK_FILENAME:
         return load_faces_pixmap(FACE_FALLBACK_FILENAME, use_fallback=False)
 
-    _PIXMAP_CACHE[path] = QPixmap()
-    return _PIXMAP_CACHE[path]
+    _PIXMAP_CACHE[key] = QPixmap()
+    return _PIXMAP_CACHE[key]
 
 FACE_FILES = {
     "neutral":    "Morganna_Neutral.png",
@@ -3154,43 +3148,11 @@ class MorgannaDeck(QMainWindow):
         self.face_widget.setFixedSize(180, 160)
         face_kb_row.addWidget(self.face_widget)
 
-        self.nocturne_control_block = QWidget()
-        self.nocturne_control_block.setStyleSheet("background: transparent; border: none;")
-        nocturne_controls_layout = QGridLayout(self.nocturne_control_block)
-        nocturne_controls_layout.setContentsMargins(0, 0, 0, 0)
-        nocturne_controls_layout.setHorizontalSpacing(4)
-        nocturne_controls_layout.setVerticalSpacing(4)
-
-        self.btn_attuned = QPushButton("")
-        self.btn_attuned.setToolTip("Dock Nocturne")
-        self.btn_attuned.clicked.connect(lambda: self._set_anchor_state(1.0))
-
-        self.btn_watchful = QPushButton("")
-        self.btn_watchful.setToolTip("Nocturne Nearby")
-        self.btn_watchful.clicked.connect(lambda: self._set_anchor_state(0.65))
-
-        self.btn_veiled = QPushButton("")
-        self.btn_veiled.setToolTip("Nocturne Absent")
-        self.btn_veiled.clicked.connect(lambda: self._set_anchor_state(0.15))
-
-        for btn in (self.btn_attuned, self.btn_watchful, self.btn_veiled):
-            btn.setFixedSize(44, 44)
-            btn.setIconSize(QSize(36, 36))
-            btn.setStyleSheet(
-                f"background: transparent; border: 1px solid {C_CYAN_DIM}; border-radius: 2px; padding: 0px;"
-            )
-
-        nocturne_controls_layout.addWidget(self.btn_attuned, 0, 0)
-        nocturne_controls_layout.addWidget(self.btn_watchful, 0, 1)
-        nocturne_controls_layout.addWidget(self.btn_veiled, 1, 0, 1, 2, Qt.AlignmentFlag.AlignHCenter)
-
-        face_kb_row.addWidget(self.nocturne_control_block, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.anchor_panel = AnchorStatusPanel()
         self.anchor_panel.setMinimumSize(320, 160)
         face_kb_row.addWidget(self.anchor_panel, 1)
         left_panel.addLayout(face_kb_row)
-        self._apply_nocturne_icons()
 
         input_row = QHBoxLayout()
         input_row.setSpacing(6)
@@ -4701,19 +4663,6 @@ class MorgannaDeck(QMainWindow):
         else:
             self.lbl_anchor.setText("✦ ANCHOR: ABSENT / MORGANNA")
             self.lbl_anchor.setStyleSheet(f"color: {C_RED}; font-size: 10px; border: none;")
-
-    def _apply_nocturne_icons(self):
-        icon_map = {
-            self.btn_attuned: E42_ICON_FILES["attuned"],
-            self.btn_watchful: E42_ICON_FILES["watchful"],
-            self.btn_veiled: E42_ICON_FILES["veiled"],
-        }
-        for button, filename in icon_map.items():
-            px = load_faces_pixmap(filename)
-            if px.isNull():
-                continue
-            button.setIcon(QIcon(px))
-            button.setIconSize(QSize(36, 36))
 
     def _anchor_baseline_face(self):
         if self.anchor_state >= 0.85:
