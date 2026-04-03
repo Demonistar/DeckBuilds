@@ -1,11 +1,14 @@
 
 # Deck Name: ECHO DECK — GRIMVEILE-42 EDITION
 # Filename: grimveil_deck.py
-# Version: 1.12.8
-# Build Date: 2026-04-02-r8
+# Version: 1.13.0
+# Build Date: 2026-04-03-r1
 # Summary:
-#   Restored clean final task acknowledgement rendering with diagnostics-safe extraction cleanup.
+#   Refactored deterministic task/reminder scheduling pipeline with AI-only final acknowledgement handoff.
 # Changelog:
+#   - refactored task/reminder handling into deterministic schedule resolution + AI acknowledgement pipeline
+#   - fixed relative/same-day scheduling regressions
+#   - improved GrimVeile task acknowledgements while preserving fast bounded generation
 #   - fixed malformed task acknowledgement rendering caused by broken response extraction/cleanup
 #   - improved GrimVeile task acknowledgements to concise 1–2 sentence in-character responses while preserving fast bounded generation
 #   - fixed clipped idle and due-alert outputs so visible commentary completes cleanly
@@ -124,8 +127,8 @@ from PyQt6.QtGui import (
 )
 
 APP_NAME = "ECHO DECK — GRIMVEILE-42 EDITION"
-APP_VERSION = "1.12.8"
-VERSION_DATE = "2026-04-02-r8"
+APP_VERSION = "1.13.0"
+VERSION_DATE = "2026-04-03-r1"
 APP_BUILD_DATE = VERSION_DATE
 APP_FILENAME = "grimveil_deck.py"
 
@@ -392,6 +395,8 @@ ACK_PHRASES = {
     "dismiss", "dismissed", "stop reminder", "cancel reminder", "got it",
     "handled", "all set", "okay", "ok"
 }
+
+TASK_INTENT_TYPES = ("timer", "reminder", "task", "chat")
 
 
 def utc_now_iso():
@@ -672,16 +677,7 @@ def answer_datetime_query(text: str) -> str:
 
 
 def has_reminder_intent(text: str) -> bool:
-    lowered = normalize_persona_prefixed_input(text).lower()
-    patterns = (
-        r"\bremind me\b",
-        r"\b(?:please\s+)?set(?:\s+a)?\s+reminder\b",
-        r"\badd(?:\s+a)?\s+reminder\b",
-        r"\bi want(?:\s+a)?\s+reminder\b",
-        r"\bwant(?:\s+a)?\s+reminder\b",
-        r"\b(?:grim[\s,]+)?(?:please\s+)?(?:set|add)(?:\s+a)?\s+reminder\b",
-    )
-    return any(re.search(p, lowered) for p in patterns)
+    return classify_task_intent(text).get("intent") in {"reminder", "timer", "task"}
 
 
 def normalize_persona_prefixed_input(text: str) -> str:
@@ -691,6 +687,64 @@ def normalize_persona_prefixed_input(text: str) -> str:
     persona_prefix = r"^\s*(?:grim|grimveil|grimveile|grimveile-42)\s*,?\s*[:\-]?\s*"
     normalized = re.sub(persona_prefix, "", t, flags=re.I)
     return normalized.strip() or t
+
+
+def strip_leading_invocation_fluff(text: str) -> str:
+    cleaned = normalize_persona_prefixed_input(text)
+    if not cleaned:
+        return ""
+    patterns = [
+        r"^\s*hey\s+grim(?:veile|veil)?\s*,?\s*",
+        r"^\s*grim(?:veile|veil)?\s*,?\s*",
+        r"^\s*do\s+me\s+a\s+favor(?:\s+and)?\s+",
+        r"^\s*please\s+",
+        r"^\s*can\s+you\s+",
+        r"^\s*could\s+you\s+",
+        r"^\s*would\s+you\s+",
+        r"^\s*kindly\s+",
+        r"^\s*just\s+",
+    ]
+    prior = None
+    current = cleaned
+    while prior != current:
+        prior = current
+        for pattern in patterns:
+            current = re.sub(pattern, "", current, flags=re.I)
+        current = re.sub(r"\s+", " ", current).strip(" ,.-")
+    return current or cleaned
+
+
+def classify_task_intent(text: str) -> dict:
+    cleaned = strip_leading_invocation_fluff(text)
+    low = cleaned.lower()
+    timer_patterns = (
+        r"\bset(?:\s+a)?\s+timer\b",
+        r"\bstart(?:\s+a)?\s+timer\b",
+        r"\btimer\s+for\b",
+    )
+    reminder_patterns = (
+        r"\bremind me\b",
+        r"\bset(?:\s+a)?\s+reminder\b",
+        r"\badd(?:\s+a)?\s+reminder\b",
+        r"\bwant(?:\s+a)?\s+reminder\b",
+    )
+    task_patterns = (
+        r"\badd(?:\s+a)?\s+task\b",
+        r"\bcreate(?:\s+a)?\s+task\b",
+        r"\bnew\s+task\b",
+    )
+    if any(re.search(p, low) for p in timer_patterns):
+        intent = "timer"
+    elif any(re.search(p, low) for p in reminder_patterns):
+        intent = "reminder"
+    elif any(re.search(p, low) for p in task_patterns):
+        intent = "task"
+    else:
+        intent = "chat"
+    return {
+        "intent": intent,
+        "cleaned_input": cleaned,
+    }
 
 
 def parse_duration_phrase(phrase: str):
@@ -4232,15 +4286,18 @@ class GrimveilDeck(QMainWindow):
                 self._restart_idle_timer()
                 return
 
-            task_action_result = self._try_create_task(normalized_text, force_intent=has_reminder_intent(normalized_text))
-            if task_action_result:
+            intent_info = classify_task_intent(normalized_text)
+            task_intent = intent_info.get("intent", "chat")
+            task_action_result = self._try_create_task(normalized_text, force_intent=task_intent in {"timer", "reminder", "task"})
+            if task_action_result and task_action_result.get("result") == "created":
                 parsed_task = task_action_result.get("task") or {}
-                due_obj = parse_iso(parsed_task.get("due_at") or parsed_task.get("due"))
+                due_obj = parse_iso_for_compare(parsed_task.get("due_at") or parsed_task.get("due"), context="send_message_due")
                 due_str = due_obj.strftime("%m/%d/%Y at %I:%M %p") if due_obj else parsed_task.get("due_at", "scheduled time")
                 sync_packet = task_action_result.get("google_sync") or {}
                 sync_status = (sync_packet.get("status") or "not_attempted").strip().lower()
                 local_ok = bool(task_action_result.get("local_created"))
                 google_ok = sync_status == "synced"
+                schedule_type = task_action_result.get("schedule_type", "unknown")
                 if sync_status == "failed":
                     status_line = "Local reminder saved; Google Calendar sync failed."
                 elif sync_status == "synced":
@@ -4255,6 +4312,7 @@ class GrimveilDeck(QMainWindow):
                         "local_create_success": local_ok,
                         "google_sync_success": google_ok,
                         "google_sync_status": sync_status,
+                        "schedule_type": schedule_type,
                         "status": status_line,
                     },
                     fallback=f"Reminder set for {due_str}. {status_line}"
@@ -4264,13 +4322,13 @@ class GrimveilDeck(QMainWindow):
                 self.history.append({"role": "user", "content": text})
                 self._restart_idle_timer()
                 return
-            if has_reminder_intent(normalized_text):
+            if task_action_result and task_action_result.get("result") == "parse_failed":
                 self.log_diagnostic("Task parse-failure acknowledgement handoff started.", level="INFO")
                 self._emit_ai_task_commentary(
                     event_name="task_parse_failed",
                     facts={
-                        "parse_reason": "could not confidently determine schedule",
-                        "intent": "reminder_create",
+                        "parse_reason": task_action_result.get("reason") or "Could not confidently determine the requested schedule",
+                        "intent": task_action_result.get("intent") or "reminder",
                     },
                     fallback=(
                         "Reminder request intercepted, but no valid schedule could be parsed. Try formats like "
@@ -4445,7 +4503,7 @@ class GrimveilDeck(QMainWindow):
 
     def _task_acknowledgement_facts(self, event_name: str, facts: dict):
         facts = facts if isinstance(facts, dict) else {}
-        include_keys = ["task_text", "due", "status", "google_sync_status", "google_sync_success"]
+        include_keys = ["task_text", "due", "status", "google_sync_status", "google_sync_success", "schedule_type", "parse_reason", "intent"]
         compact = {k: facts.get(k) for k in include_keys if facts.get(k) not in (None, "", [])}
         mode = self._get_narrative_mode()
         action_map = {
@@ -4483,23 +4541,32 @@ class GrimveilDeck(QMainWindow):
 
     def _build_task_ack_handoff_payload(self, event_name: str, compact_facts: dict):
         compact_facts = compact_facts if isinstance(compact_facts, dict) else {}
+        lines = []
+        action = (compact_facts.get("action") or "updated").strip()
+        lines.append(f"action type: {action}")
+        task_text = (compact_facts.get("task_text") or "").strip()
+        if task_text:
+            lines.append(f"task title: {task_text}")
+        due = (compact_facts.get("due") or "").strip()
+        if due:
+            lines.append(f"resolved due datetime: {due}")
+        schedule_type = (compact_facts.get("schedule_type") or "").strip()
+        if schedule_type:
+            lines.append(f"schedule type: {schedule_type}")
+        status = (compact_facts.get("status") or "").strip()
+        if status:
+            lines.append(f"result: {status}")
+        sync_status = (compact_facts.get("google_sync_status") or "").strip()
+        if sync_status:
+            lines.append(f"google sync status: {sync_status}")
         if event_name == "task_parse_failed":
-            lines = [
-                "task action: reminder creation request",
-                "result: failed",
-                "task created: no",
-            ]
-            reason = (compact_facts.get("parse_reason") or "could not confidently determine schedule").strip()
-            if reason:
-                lines.append(f"reason: {reason}")
-            mode = (compact_facts.get("anchor_mode") or "").strip()
-            if mode:
-                lines.append(f"anchor mode: {mode}")
-            delay_minutes = compact_facts.get("user_delay_minutes")
-            if isinstance(delay_minutes, int):
-                lines.append(f"user delay minutes: {delay_minutes}")
-            return "\n".join(lines)
-        return json.dumps(compact_facts, ensure_ascii=False)
+            reason = (compact_facts.get("parse_reason") or "Could not confidently determine the requested schedule").strip()
+            lines.append(f"reason: {reason}")
+            lines.append("task created: no")
+        mode = (compact_facts.get("anchor_mode") or "").strip()
+        if mode:
+            lines.append(f"anchor mode: {mode}")
+        return "\n".join(lines)
 
     def _emit_ai_task_commentary(self, event_name: str, facts: dict, fallback: str):
         facts = facts if isinstance(facts, dict) else {}
@@ -4838,31 +4905,55 @@ class GrimveilDeck(QMainWindow):
 
     def _try_create_task(self, text: str, force_intent: bool = False):
         self.log_diagnostic("Task action started.", level="INFO")
+        classification = classify_task_intent(text)
+        intent = classification.get("intent", "chat")
+        cleaned_input = classification.get("cleaned_input") or normalize_persona_prefixed_input(text)
+        self.log_diagnostic(f"Task intent classification: {intent}.", level="INFO")
         self.log_diagnostic(
-            f"Task parse attempt started: \"{self._preview_text(text, max_chars=140)}\"",
+            f"Task parse attempt started: \"{self._preview_text(cleaned_input, max_chars=160)}\"",
             level="DEBUG"
         )
-        parsed = self._parse_reminder_command(text, force_intent=force_intent)
-        if not parsed:
-            self.log_diagnostic("Task action aborted: schedule parse failed.", level="WARN")
-            self.log_diagnostic(
-                "Task parse failure reason: could not confidently determine schedule.",
-                level="DEBUG"
-            )
-            self.log_diagnostic("Task interaction cycle complete.", level="INFO")
+        if not force_intent and intent not in {"timer", "reminder", "task"}:
+            self.log_diagnostic("Task action skipped: non-task intent.", level="DEBUG")
             return None
-        task_text, due_dt = parsed
+
+        parsed = self._parse_reminder_command(cleaned_input, force_intent=True, intent=intent)
+        if not parsed or not parsed.get("ok"):
+            reason = (parsed or {}).get("reason") or "Could not confidently determine the requested schedule"
+            self.log_diagnostic("Task action aborted: schedule parse failed.", level="WARN")
+            self.log_diagnostic(f"Task parse failure reason: {reason}", level="DEBUG")
+            self.log_diagnostic("Task interaction cycle complete.", level="INFO")
+            return {
+                "result": "parse_failed",
+                "intent": intent,
+                "reason": reason,
+                "cleaned_input": cleaned_input,
+            }
+
+        task_text = parsed["task_text"]
+        due_dt = normalize_datetime_for_compare(parsed["due_dt"], context="task_create_due_dt")
+        schedule_type = parsed.get("schedule_type", "unknown")
+        self.log_diagnostic(f"Task schedule type resolved: {schedule_type}.", level="INFO")
+        self.log_diagnostic(f"Task final due datetime: {due_dt.isoformat(timespec='seconds')}.", level="INFO")
+
         task = self.memory.add_task(task_text, due_dt, text)
         reloaded = self.memory.load_tasks()
         if not any((t.get("id") == task.get("id")) for t in reloaded):
             self.log_diagnostic("Local task create failed verification check.", level="ERROR")
             self.log_diagnostic("Task interaction cycle complete.", level="INFO")
-            return None
+            return {
+                "result": "local_create_failed",
+                "intent": intent,
+                "reason": "Local task create failed verification check",
+            }
         self.log_diagnostic("Local task create succeeded.", level="INFO")
         self.log_diagnostic("Task parse attempt succeeded.", level="INFO")
         google_sync_result = self._push_task_to_google_calendar(task)
         self._refresh_task_registry_panel()
         return {
+            "result": "created",
+            "intent": intent,
+            "schedule_type": schedule_type,
             "task": task,
             "local_created": True,
             "google_sync": google_sync_result,
@@ -4884,7 +4975,6 @@ class GrimveilDeck(QMainWindow):
                 last_synced_at=local_now_iso(),
             )
             if link_established and not self._google_link_announced:
-                self._append_chat("SYSTEM", "Google Calendar link established.")
                 self._google_link_announced = True
                 self.log_diagnostic("Google Calendar auth/link established.", level="INFO")
             self.log_diagnostic("Google sync succeeded for task action.", level="INFO")
@@ -4921,191 +5011,202 @@ class GrimveilDeck(QMainWindow):
             self.log_diagnostic("Google sync failed for task action.", level="WARN")
             return {"status": "failed", "error": user_error}
 
-    def _parse_reminder_command(self, text: str, force_intent: bool = False):
-        t = normalize_persona_prefixed_input(text).strip()
-        lower = t.lower()
-        if not force_intent and not has_reminder_intent(lower):
-            return None
+    def _parse_reminder_command(self, text: str, force_intent: bool = False, intent: str = None):
+        intent_info = classify_task_intent(text)
+        resolved_intent = intent or intent_info.get("intent", "chat")
+        cleaned_input = intent_info.get("cleaned_input") or normalize_persona_prefixed_input(text).strip()
+        if not force_intent and resolved_intent not in {"timer", "reminder", "task"}:
+            return {"ok": False, "reason": "No task/reminder/timer intent detected"}
 
-        normalized = t
-        normalized = re.sub(r"^\s*(?:do\s+me\s+a\s+favor(?:\s+and)?|can\s+you|could\s+you)\s+", "", normalized, flags=re.I)
-        normalized = re.sub(r"^\s*(?:please\s+)+", "", normalized, flags=re.I)
-        normalized = re.sub(r"\s+", " ", normalized).strip(" ,.-")
-
-        lead_noise = r"^\s*(?:please\s+|just\s+|kindly\s+|would\s+you\s+|can\s+you\s+|could\s+you\s+|do\s+me\s+a\s+favor(?:\s+and)?\s+)*"
+        normalized = re.sub(r"\s+", " ", cleaned_input).strip(" ,.-")
         lead_prefix = (
-            lead_noise
-            + r"(?:"
-              r"remind me"
-              r"|set(?:\s+a)?\s+reminder"
-              r"|set a reminder"
-              r"|add(?:\s+a)?\s+reminder"
-              r"|add reminder"
-              r"|(?:i\s+)?want(?:\s+a)?\s+reminder"
+            r"^\s*(?:"
+            r"remind me"
+            r"|set(?:\s+a)?\s+reminder"
+            r"|add(?:\s+a)?\s+reminder"
+            r"|set(?:\s+a)?\s+timer"
+            r"|start(?:\s+a)?\s+timer"
+            r"|timer\s+for"
+            r"|add(?:\s+a)?\s+task"
+            r"|create(?:\s+a)?\s+task"
+            r"|new\s+task"
             r")\b"
         )
         payload = re.sub(lead_prefix, "", normalized, flags=re.I).strip(" ,.-")
         if not payload:
-            anywhere_match = re.search(
-                r"\b(remind me|set(?:\s+a)?\s+reminder|add(?:\s+a)?\s+reminder|set reminder|add reminder)\b",
-                normalized,
-                re.I
-            )
-            if anywhere_match:
-                payload = normalized[anywhere_match.end():].strip(" ,.-")
-        if not payload:
-            return None
+            payload = normalized
 
         def clean_task_text(task_text: str):
             cleaned = (task_text or "").strip().rstrip(".!?")
-            return cleaned if cleaned else "Reminder"
+            return cleaned if cleaned else ("Timer" if resolved_intent == "timer" else "Reminder")
 
         def normalize_task_tail(task_tail: str):
             tail = (task_tail or "").strip(" ,.-")
             tail = re.sub(r"^(?:to|that)\s+", "", tail, flags=re.I)
             return clean_task_text(tail)
 
-        def split_time_and_task(raw_tail: str):
-            tail = (raw_tail or "").strip(" ,.-")
-            if not tail:
-                return "", "Reminder"
-            m = re.match(
-                r"^(?P<time>\d{1,2}(?::\d{2})?\s*(?:am|pm)?)(?:\s*(?:to|,)\s+|\s+)(?P<task>.+)$",
-                tail,
-                flags=re.I,
-            )
+        def build_due(year: int, month: int, day: int, hour: int, minute: int):
+            local_tz = _local_tzinfo()
+            return datetime(year, month, day, hour, minute, 0, 0, tzinfo=local_tz)
+
+        def parse_clock(hour_s: str, minute_s: str = None, ampm_s: str = ""):
+            hour = int(hour_s)
+            minute = int(minute_s or 0)
+            if minute < 0 or minute > 59:
+                return None
+            ampm = (ampm_s or "").lower()
+            if ampm:
+                if hour < 1 or hour > 12:
+                    return None
+                if hour == 12:
+                    hour = 0
+                if ampm == "pm":
+                    hour += 12
+            elif hour < 0 or hour > 23:
+                return None
+            return hour, minute
+
+        now_local = now_for_compare().replace(second=0, microsecond=0)
+
+        # 1) Relative time expressions (deterministic).
+        relative_patterns = [
+            r"\bin\s+(?P<dur>(?:\d+\s*(?:d|day|days|h|hr|hour|hours|m|min|minute|minutes|s|sec|second|seconds)\s*)+)(?:\s+(?:from\s+now))?(?:\s+(?:to|,)\s+(?P<task>.+))?$",
+            r"^(?P<dur>(?:\d+\s*(?:d|day|days|h|hr|hour|hours|m|min|minute|minutes|s|sec|second|seconds)\s*)+)\s+from\s+now(?:\s+(?P<task>.+))?$",
+        ]
+        for pattern in relative_patterns:
+            m = re.search(pattern, payload, flags=re.I)
             if m:
-                return m.group("time").strip(), normalize_task_tail(m.group("task"))
-            if re.match(r"^\d{1,2}(?::\d{2})?\s*(?:am|pm)?$", tail, flags=re.I):
-                return tail, "Reminder"
-            return "", normalize_task_tail(tail)
+                delta = parse_duration_phrase(m.group("dur") or "")
+                if delta and delta.total_seconds() > 0:
+                    task_text = normalize_task_tail(m.groupdict().get("task") or "")
+                    if task_text in {"Reminder", "Timer"}:
+                        remainder = re.sub(pattern, "", payload, flags=re.I).strip(" ,.-")
+                        if remainder:
+                            task_text = normalize_task_tail(remainder)
+                    return {
+                        "ok": True,
+                        "task_text": task_text,
+                        "due_dt": now_local + delta,
+                        "schedule_type": "relative",
+                        "cleaned_input": cleaned_input,
+                    }
 
-        in_only_match = re.search(r"^in\s+(.+)$", payload, re.I)
-        if in_only_match:
-            rest = in_only_match.group(1).strip()
-            in_with_task = re.search(r"^(.+?)(?:\s+(?:to|,)\s+(.+))?$", rest, re.I)
-            delta_phrase = in_with_task.group(1).strip() if in_with_task else rest
-            delta = parse_duration_phrase(delta_phrase)
-            if delta:
-                task_text = in_with_task.group(2) if in_with_task and in_with_task.lastindex and in_with_task.group(2) else None
-                if not task_text:
-                    compact = re.match(
-                        r"^((?:\d+\s*(?:d|day|days|h|hr|hour|hours|m|min|minute|minutes|s|sec|second|seconds)\s*)+)(.*)$",
-                        rest,
-                        re.I,
-                    )
-                    if compact:
-                        compact_delta = parse_duration_phrase(compact.group(1))
-                        if compact_delta:
-                            delta = compact_delta
-                            remainder = (compact.group(2) or "").strip(" ,.-")
-                            task_text = remainder if remainder else "Reminder"
-                return clean_task_text(task_text), datetime.now() + delta
+        # 2) Same-day clock times.
+        same_day_match = re.search(
+            r"(?:^|\b)(?:at\s+|for\s+)?(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ampm>am|pm)\b(?:\s*(?:to|,)?\s*(?P<task>.+))?$",
+            payload,
+            flags=re.I,
+        )
+        if same_day_match:
+            parsed_clock = parse_clock(same_day_match.group("h"), same_day_match.group("m"), same_day_match.group("ampm"))
+            if parsed_clock:
+                hour, minute = parsed_clock
+                due = now_local.replace(hour=hour, minute=minute)
+                if due <= now_local:
+                    due += timedelta(days=1)
+                return {
+                    "ok": True,
+                    "task_text": normalize_task_tail(same_day_match.group("task") or "Reminder"),
+                    "due_dt": due,
+                    "schedule_type": "same_day_time",
+                    "cleaned_input": cleaned_input,
+                }
 
+        # 3) Explicit date + time.
         tomorrow_match = re.search(
-            r"^(?:for\s+)?tomorrow(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*(?:to|,)?\s*(.*))?$",
+            r"^(?:for\s+)?tomorrow(?:\s+at)?\s+(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ampm>am|pm)?(?:\s*(?:to|,)?\s*(?P<task>.+))?$",
             payload,
             re.I,
         )
         if tomorrow_match:
-            hour = int(tomorrow_match.group(1))
-            minute = int(tomorrow_match.group(2) or 0)
-            meridiem = (tomorrow_match.group(3) or "").lower()
-            if meridiem:
-                if hour == 12:
-                    hour = 0
-                if meridiem == "pm":
-                    hour += 12
-            due_date = datetime.now() + timedelta(days=1)
-            due = due_date.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
-            return normalize_task_tail(tomorrow_match.group(4) or "Reminder"), due
+            parsed_clock = parse_clock(tomorrow_match.group("h"), tomorrow_match.group("m"), tomorrow_match.group("ampm"))
+            if parsed_clock:
+                hour, minute = parsed_clock
+                tomorrow = now_local + timedelta(days=1)
+                due = build_due(tomorrow.year, tomorrow.month, tomorrow.day, hour, minute)
+                return {
+                    "ok": True,
+                    "task_text": normalize_task_tail(tomorrow_match.group("task") or "Reminder"),
+                    "due_dt": due,
+                    "schedule_type": "explicit_date_time",
+                    "cleaned_input": cleaned_input,
+                }
 
         dt_match = re.search(
-            r"^(?:on\s+|for\s+)?(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*(?:to|,)?\s*(.*))?$",
+            r"^(?:on\s+|for\s+)?(?P<d>\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})\s+at\s+(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ampm>am|pm)?(?:\s*(?:to|,)?\s*(?P<task>.+))?$",
             payload,
             re.I,
         )
         if dt_match:
-            date_token = dt_match.group(1)
+            date_token = dt_match.group("d")
             try:
-                if "/" in date_token:
-                    d = datetime.strptime(date_token, "%m/%d/%Y")
-                else:
-                    d = datetime.strptime(date_token, "%Y-%m-%d")
+                parsed_date = datetime.strptime(date_token, "%m/%d/%Y") if "/" in date_token else datetime.strptime(date_token, "%Y-%m-%d")
             except ValueError:
-                d = None
-            if d is None:
-                return None
-            hour = int(dt_match.group(2))
-            minute = int(dt_match.group(3) or 0)
-            meridiem = (dt_match.group(4) or "").lower()
-            if meridiem:
-                if hour == 12:
-                    hour = 0
-                if meridiem == "pm":
-                    hour += 12
-            return normalize_task_tail(dt_match.group(5) or "Reminder"), d.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
+                parsed_date = None
+            parsed_clock = parse_clock(dt_match.group("h"), dt_match.group("m"), dt_match.group("ampm"))
+            if parsed_date and parsed_clock:
+                hour, minute = parsed_clock
+                due = build_due(parsed_date.year, parsed_date.month, parsed_date.day, hour, minute)
+                return {
+                    "ok": True,
+                    "task_text": normalize_task_tail(dt_match.group("task") or "Reminder"),
+                    "due_dt": due,
+                    "schedule_type": "explicit_date_time",
+                    "cleaned_input": cleaned_input,
+                }
 
-        at_match = re.search(
-            r"^(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b(?:\s*(?:to|,)?\s*(.*))?$",
+        weekday_match = re.search(
+            r"^(?:for\s+|on\s+)?(?P<weekday>monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:\s+at)?\s+(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ampm>am|pm)?(?:\s*(?:to|,)?\s*(?P<task>.+))?$",
             payload,
-            re.I
+            re.I,
         )
-        if at_match:
-            hour = int(at_match.group(1))
-            minute = int(at_match.group(2) or 0)
-            meridiem = (at_match.group(3) or "").lower()
-            if hour == 12:
-                hour = 0
-            if meridiem == "pm":
-                hour += 12
-            now = datetime.now()
-            due = now.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
-            if due <= now:
-                due += timedelta(days=1)
-            return normalize_task_tail(at_match.group(4) or "Reminder"), due
+        if weekday_match:
+            weekday_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+            target_idx = weekday_names.index(weekday_match.group("weekday").lower())
+            parsed_clock = parse_clock(weekday_match.group("h"), weekday_match.group("m"), weekday_match.group("ampm"))
+            if parsed_clock:
+                hour, minute = parsed_clock
+                days_ahead = (target_idx - now_local.weekday()) % 7
+                if days_ahead == 0:
+                    candidate = now_local.replace(hour=hour, minute=minute)
+                    if candidate <= now_local:
+                        days_ahead = 7
+                target_day = now_local + timedelta(days=days_ahead)
+                due = build_due(target_day.year, target_day.month, target_day.day, hour, minute)
+                return {
+                    "ok": True,
+                    "task_text": normalize_task_tail(weekday_match.group("task") or "Reminder"),
+                    "due_dt": due,
+                    "schedule_type": "explicit_date_time",
+                    "cleaned_input": cleaned_input,
+                }
 
-        no_meridiem_match = re.search(
-            r"^(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))\b(?:\s*(?:to|,)?\s*(.*))?$",
+        # 4) Fallback fuzzy parsing (confidence gated).
+        fuzzy = re.search(
+            r"^(?P<h>\d{1,2})(?::(?P<m>\d{2}))?(?:\s*(?P<ampm>am|pm))?\s+(?P<task>.+)$",
             payload,
-            re.I
+            flags=re.I,
         )
-        if no_meridiem_match:
-            hour = int(no_meridiem_match.group(1))
-            minute = int(no_meridiem_match.group(2) or 0)
-            if 0 <= hour <= 23 and 0 <= minute <= 59:
-                now = datetime.now()
-                due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                if due <= now:
+        if fuzzy:
+            parsed_clock = parse_clock(fuzzy.group("h"), fuzzy.group("m"), fuzzy.group("ampm"))
+            if parsed_clock:
+                hour, minute = parsed_clock
+                due = now_local.replace(hour=hour, minute=minute)
+                if due <= now_local:
                     due += timedelta(days=1)
-                return normalize_task_tail(no_meridiem_match.group(3) or "Reminder"), due
+                return {
+                    "ok": True,
+                    "task_text": normalize_task_tail(fuzzy.group("task")),
+                    "due_dt": due,
+                    "schedule_type": "fallback_fuzzy",
+                    "cleaned_input": cleaned_input,
+                }
 
-        for_time_tail, for_task_tail = split_time_and_task(payload)
-        if for_time_tail:
-            compact_time_match = re.match(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$", for_time_tail, flags=re.I)
-            if compact_time_match:
-                hour = int(compact_time_match.group(1))
-                minute = int(compact_time_match.group(2) or 0)
-                meridiem = (compact_time_match.group(3) or "").lower()
-                if meridiem:
-                    if hour == 12:
-                        hour = 0
-                    if meridiem == "pm":
-                        hour += 12
-                elif hour > 23:
-                    return None
-                now = datetime.now()
-                due = now.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
-                if due <= now:
-                    due += timedelta(days=1)
-                return for_task_tail, due
-
-        fallback_match = re.search(r"^(.+?)\s+to\s+(.+)$", payload, re.I)
-        if fallback_match:
-            maybe_duration = parse_duration_phrase(fallback_match.group(1))
-            if maybe_duration:
-                return clean_task_text(fallback_match.group(2)), datetime.now() + maybe_duration
-        return None
+        return {
+            "ok": False,
+            "reason": "Could not confidently determine the requested schedule",
+            "cleaned_input": cleaned_input,
+        }
 
     def _google_event_due_datetime(self, event: dict):
         start = (event or {}).get("start") or {}
