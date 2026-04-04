@@ -177,26 +177,26 @@ try:
 except ImportError:
     TORCH_OK = False
 
-C_BG          = "#080508"
-C_BG2         = "#0d080d"
-C_BG3         = "#120a12"
-C_PANEL       = "#100810"
-C_BORDER      = "#3a1020"
-C_CYAN        = "#cc1a33"
-C_CYAN_DIM    = "#4a0a15"
-C_GOLD        = "#d3b25e"
-C_GOLD_DIM    = "#4f3c15"
-C_SILVER      = "#b4c0cf"
-C_SILVER_DIM  = "#435061"
-C_RED         = "#cc1a33"
-C_RED_DIM     = "#4a0a15"
+C_BG          = "#0b0b0f"
+C_BG2         = "#0f0f17"
+C_BG3         = "#1a1a26"
+C_PANEL       = "#12121a"
+C_BORDER      = "#1c1c28"
+C_CYAN        = "#c43a4a"
+C_CYAN_DIM    = "#8b1e2d"
+C_GOLD        = "#e6e6eb"
+C_GOLD_DIM    = "#b8b8c2"
+C_SILVER      = "#e6e6eb"
+C_SILVER_DIM  = "#b8b8c2"
+C_RED         = "#c43a4a"
+C_RED_DIM     = "#8b1e2d"
 C_PURPLE      = "#9a87ff"
 C_PURPLE_DIM  = "#352c58"
 C_GREEN       = "#68d39a"
-C_TEXT        = "#e7edf3"
-C_TEXT_DIM    = "#7f8fa0"
-C_MONITOR     = "#060306"
-C_BLUE        = "#6a0a6a"
+C_TEXT        = "#e6e6eb"
+C_TEXT_DIM    = "#b8b8c2"
+C_MONITOR     = "#0f0f17"
+C_BLUE        = "#25253a"
 
 RUNES = "▣ ▤ ▣ ▤ ▣ ▤ ▣ ▤ ▣"
 
@@ -241,6 +241,7 @@ GOOGLE_INBOUND_SYNC_INTERVAL_MS = 5 * 60 * 1000
 GOOGLE_INBOUND_LOOKBACK_DAYS = 30
 USER_DELAY_COMMENTARY_ENABLED = True
 USER_DELAY_COMMENTARY_THRESHOLD_MINUTES = 30
+IDLE_TIMER_ENABLED = False
 WINDOWS_TZ_TO_IANA = {
     "Central Standard Time": "America/Chicago",
     "Eastern Standard Time": "America/New_York",
@@ -367,7 +368,7 @@ QLineEdit:focus {{
 }}
 QPushButton {{
     background-color: {C_CYAN_DIM};
-    color: {C_CYAN};
+    color: {C_TEXT};
     border: 1px solid {C_CYAN};
     border-radius: 2px;
     font-family: 'Georgia', serif;
@@ -377,8 +378,8 @@ QPushButton {{
     letter-spacing: 2px;
 }}
 QPushButton:hover {{
-    background-color: {C_CYAN};
-    color: {C_BG};
+    background-color: {C_BLUE};
+    color: {C_TEXT};
 }}
 QPushButton:pressed {{
     background-color: {C_BLUE};
@@ -404,6 +405,19 @@ QScrollBar::handle:vertical:hover {{
 }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
     height: 0px;
+}}
+QTableWidget {{
+    background-color: #0f0f17;
+    color: #e6e6eb;
+    gridline-color: #1c1c28;
+    selection-background-color: #2a2a3d;
+    selection-color: #f0f0f5;
+}}
+QHeaderView::section {{
+    background-color: #1c1c28;
+    color: #e6e6eb;
+    border: 1px solid #25253a;
+    padding: 5px;
 }}
 """
 
@@ -2135,6 +2149,8 @@ class MorgannaDeck(QMainWindow):
         self.idle_timer.setSingleShot(True)
         self.idle_timer.timeout.connect(self._emit_unsolicited_transmission)
         self._idle_fire_at = 0.0
+        self.idle_timer_enabled = bool(IDLE_TIMER_ENABLED)
+        self._refresh_idle_toggle_ui()
 
         self._countdown_tick = QTimer()
         self._countdown_tick.timeout.connect(self._update_countdown)
@@ -2142,7 +2158,11 @@ class MorgannaDeck(QMainWindow):
         self.generation_watchdog = QTimer()
         self.generation_watchdog.timeout.connect(self._check_generation_watchdog)
         self.generation_watchdog.start(15000)
-        self._restart_idle_timer()
+        if self.idle_timer_enabled:
+            self._restart_idle_timer()
+        else:
+            self._stop_idle_timer(reason="startup-disabled")
+            self.log_diagnostic("[IDLE][INFO] Idle timer disabled at startup.", level="INFO")
 
         self._append_chat("SYSTEM", f"{APP_NAME} v{APP_VERSION} INITIALIZING...")
         self._append_chat("SYSTEM", f"▣ {RUNES} ▣")
@@ -2255,6 +2275,11 @@ class MorgannaDeck(QMainWindow):
         self.memory.save_state(self.state)
 
     def _restart_idle_timer(self):
+        if not getattr(self, "idle_timer_enabled", True):
+            self._idle_fire_at = 0.0
+            self._update_countdown()
+            self.log_diagnostic("Idle timer restart skipped (disabled).", level="DEBUG")
+            return
         if self.idle_timer.isActive():
             self.idle_timer.stop()
             self.log_diagnostic("Idle timer stopped before restart.", level="DEBUG")
@@ -2274,6 +2299,9 @@ class MorgannaDeck(QMainWindow):
 
     def _update_countdown(self):
         if not hasattr(self, "countdown_lbl"):
+            return
+        if not getattr(self, "idle_timer_enabled", True):
+            self.countdown_lbl.setText("IDLE OFF")
             return
         if getattr(self, "status", "") == "GENERATING":
             self.countdown_lbl.setText("⏱ --:--")
@@ -2583,6 +2611,9 @@ class MorgannaDeck(QMainWindow):
         return combined[-700:]
 
     def _emit_unsolicited_transmission(self):
+        if not getattr(self, "idle_timer_enabled", True):
+            self.log_diagnostic("Unsolicited transmission skipped because idle timer is disabled.", level="DEBUG")
+            return
         if not self.model_loaded or self.status == "GENERATING":
             why = "model not loaded" if not self.model_loaded else "generation in progress"
             self.log_diagnostic(f"Unsolicited transmission aborted: {why}.", level="WARN")
@@ -2805,15 +2836,20 @@ class MorgannaDeck(QMainWindow):
         self.countdown_lbl.setStyleSheet(f"color: {C_GOLD}; font-size: 11px; font-weight: bold; border: none;")
         self.countdown_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
 
+        self.idle_toggle_btn = QPushButton("IDLE OFF")
+        self.idle_toggle_btn.setFixedSize(72, 22)
+        self.idle_toggle_btn.setToolTip("Toggle idle/autonomous timer")
+        self.idle_toggle_btn.clicked.connect(self._toggle_idle_timer_enabled)
+
         self.fs_btn = QPushButton("FS")
         self.fs_btn.setFixedSize(32, 22)
-        self.fs_btn.setStyleSheet(f"background: {C_BG3}; color: {C_CYAN_DIM}; border: 1px solid {C_CYAN_DIM}; font-size: 9px; font-weight: bold; padding: 0px; letter-spacing: 1px;")
+        self.fs_btn.setStyleSheet(f"background: {C_BG3}; color: {C_TEXT}; border: 1px solid {C_CYAN_DIM}; font-size: 9px; font-weight: bold; padding: 0px; letter-spacing: 1px;")
         self.fs_btn.setToolTip("Fullscreen (F11)")
         self.fs_btn.clicked.connect(self._toggle_fullscreen)
 
         self.bl_btn = QPushButton("BL")
         self.bl_btn.setFixedSize(32, 22)
-        self.bl_btn.setStyleSheet(f"background: {C_BG3}; color: {C_CYAN_DIM}; border: 1px solid {C_CYAN_DIM}; font-size: 9px; font-weight: bold; padding: 0px; letter-spacing: 1px;")
+        self.bl_btn.setStyleSheet(f"background: {C_BG3}; color: {C_TEXT}; border: 1px solid {C_CYAN_DIM}; font-size: 9px; font-weight: bold; padding: 0px; letter-spacing: 1px;")
         self.bl_btn.setToolTip("Borderless (F10)")
         self.bl_btn.clicked.connect(self._toggle_borderless)
 
@@ -2822,6 +2858,7 @@ class MorgannaDeck(QMainWindow):
         tl.addWidget(self.status_label)
         tl.addWidget(self.countdown_lbl)
         tl.addSpacing(8)
+        tl.addWidget(self.idle_toggle_btn)
         tl.addWidget(self.fs_btn)
         tl.addWidget(self.bl_btn)
         root.addWidget(title_bar)
@@ -5852,6 +5889,30 @@ class MorgannaDeck(QMainWindow):
             char = "◉" if self.blink_state else "◎"
             self.status_label.setText(f"{char} GENERATING")
 
+    def _refresh_idle_toggle_ui(self):
+        if not hasattr(self, "idle_toggle_btn"):
+            return
+        if getattr(self, "idle_timer_enabled", True):
+            self.idle_toggle_btn.setText("IDLE ON")
+            self.idle_toggle_btn.setStyleSheet(
+                f"background: {C_CYAN_DIM}; color: {C_TEXT}; border: 1px solid {C_CYAN}; font-size: 9px; font-weight: bold; padding: 0px;"
+            )
+        else:
+            self.idle_toggle_btn.setText("IDLE OFF")
+            self.idle_toggle_btn.setStyleSheet(
+                f"background: {C_BG3}; color: {C_TEXT_DIM}; border: 1px solid {C_BORDER}; font-size: 9px; font-weight: bold; padding: 0px;"
+            )
+
+    def _toggle_idle_timer_enabled(self):
+        self.idle_timer_enabled = not bool(getattr(self, "idle_timer_enabled", True))
+        if self.idle_timer_enabled:
+            self.log_diagnostic("[IDLE][INFO] Idle timer enabled by user.", level="INFO")
+            self._restart_idle_timer()
+        else:
+            self.log_diagnostic("[IDLE][INFO] Idle timer disabled by user.", level="INFO")
+            self._stop_idle_timer(reason="user-disabled")
+        self._refresh_idle_toggle_ui()
+
     def _toggle_fullscreen(self):
         if self.isFullScreen():
             self.showNormal()
@@ -5913,7 +5974,7 @@ class SLScansTab(QWidget):
         super().__init__()
         self.store = JsonlStore(SL_SCANS_PATH)
         self.records = []
-        self.current_id = None
+        self.current_record_id = None
         root = QVBoxLayout(self)
         bar = QHBoxLayout()
         for t,fn in (("Add",self.show_add),("Display",self.show_display),("Modify",self.show_modify),("Refresh",self.refresh)):
@@ -5921,12 +5982,22 @@ class SLScansTab(QWidget):
         root.addLayout(bar)
         self.stack = QStackedWidget(); root.addWidget(self.stack,1)
         self.table = QTableWidget(0,4); self.table.setHorizontalHeaderLabels(["Name","Description","Item Count","Date Saved"])
-        self.table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.verticalHeader().setDefaultSectionSize(28)
+        self.table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(0, 260)
         self.table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2,QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(2, 100)
+        self.table.horizontalHeader().setSectionResizeMode(3,QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(3, 140)
         self.table.itemSelectionChanged.connect(self._sync_selected)
         p0=QWidget(); l0=QVBoxLayout(p0); l0.addWidget(self.table); self.stack.addWidget(p0)
-        self.name_edit=QLineEdit(); self.desc_edit=QLineEdit(); self.raw_edit=QTextEdit()
-        p1=QWidget(); l1=QVBoxLayout(p1); l1.addWidget(QLabel("Name")); l1.addWidget(self.name_edit); l1.addWidget(QLabel("Description")); l1.addWidget(self.desc_edit); l1.addWidget(QLabel("Raw Scan")); l1.addWidget(self.raw_edit)
+        self.desc_edit=QTextEdit(); self.tags_edit=QLineEdit(); self.raw_edit=QTextEdit(); self.hide_selected_list = QListWidget()
+        self.hide_selected_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.raw_edit.textChanged.connect(self._refresh_hide_selected_entries)
+        p1=QWidget(); l1=QVBoxLayout(p1); l1.addWidget(QLabel("Description")); l1.addWidget(self.desc_edit); l1.addWidget(QLabel("Tags (optional)")); l1.addWidget(self.tags_edit); l1.addWidget(QLabel("Raw Scan")); l1.addWidget(self.raw_edit); l1.addWidget(QLabel("Hide selected entries")); l1.addWidget(self.hide_selected_list)
         sb=QHBoxLayout(); s=QPushButton("Save"); c=QPushButton("Cancel"); s.clicked.connect(self.save_add); c.clicked.connect(lambda:self.stack.setCurrentIndex(0)); sb.addWidget(s); sb.addWidget(c); l1.addLayout(sb); self.stack.addWidget(p1)
         self.detail_name=QLabel(); self.detail_desc=QLabel(); self.detail_items=QTableWidget(0,2); self.detail_items.setHorizontalHeaderLabels(["Item","Creator"])
         self.detail_items.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.Stretch); self.detail_items.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.Stretch)
@@ -5938,27 +6009,74 @@ class SLScansTab(QWidget):
         self.refresh()
     def _sync_selected(self):
         rows=self.table.selectionModel().selectedRows()
-        if rows: self.current_id=self.records[rows[0].row()].get("id")
+        if rows:
+            self.current_record_id=self.records[rows[0].row()].get("record_id")
+        else:
+            self.current_record_id=None
     def _selected(self):
-        return next((r for r in self.records if r.get("id")==self.current_id),None)
+        return next((r for r in self.records if r.get("record_id")==self.current_record_id),None)
+    def _sl_scan_items_for_record(self, selected_record_id):
+        current_records = self.store.load()
+        for rec in current_records:
+            if rec.get("record_id") == selected_record_id:
+                return rec.get("items", [])
+        return []
+    def _refresh_hide_selected_entries(self):
+        inferred, items, _ = parse_sl_scan_text(self.raw_edit.toPlainText())
+        self.hide_selected_list.clear()
+        for idx, it in enumerate(items):
+            item_name = (it.get("item") or "UNKNOWN").strip() or "UNKNOWN"
+            creator = (it.get("creator") or "UNKNOWN").strip() or "UNKNOWN"
+            text = f"{item_name} — {creator}"
+            widget_item = QListWidgetItem(text)
+            widget_item.setData(Qt.ItemDataRole.UserRole, idx)
+            self.hide_selected_list.addItem(widget_item)
     def refresh(self):
         self.records=self.store.load(); self.table.setRowCount(0)
+        normalized = False
+        for rec in self.records:
+            if not rec.get("record_id"):
+                rec["record_id"] = rec.get("id") or str(uuid.uuid4())
+                normalized = True
+        if normalized:
+            self.store.save_all(self.records)
+        self.current_record_id = None
         for rec in self.records:
             r=self.table.rowCount(); self.table.insertRow(r)
             self.table.setItem(r,0,QTableWidgetItem(rec.get("name",""))); self.table.setItem(r,1,QTableWidgetItem(rec.get("description","")))
             self.table.setItem(r,2,QTableWidgetItem(str(len(rec.get("items",[]))))); self.table.setItem(r,3,QTableWidgetItem((rec.get("created_at","") or "")[:10]))
         self.stack.setCurrentIndex(0)
-    def show_add(self): self.name_edit.clear(); self.desc_edit.clear(); self.raw_edit.clear(); self.stack.setCurrentIndex(1)
+    def show_add(self):
+        self.desc_edit.clear(); self.tags_edit.clear(); self.raw_edit.clear(); self.hide_selected_list.clear(); self.stack.setCurrentIndex(1)
     def save_add(self):
         raw=self.raw_edit.toPlainText(); inferred, items, _ = parse_sl_scan_text(raw); now=datetime.now(timezone.utc).isoformat()
-        self.records.append({"id":str(uuid.uuid4()),"name":(self.name_edit.text().strip() or inferred),"description":(self.desc_edit.text() or "")[:244],"items":items,"raw_text":raw,"created_at":now,"updated_at":now})
+        hidden_indexes = {it.data(Qt.ItemDataRole.UserRole) for it in self.hide_selected_list.selectedItems()}
+        visible_items = [it for idx, it in enumerate(items) if idx not in hidden_indexes]
+        record_name = (inferred or "UNKNOWN").strip() or "UNKNOWN"
+        self.records.append({
+            "id": str(uuid.uuid4()),
+            "record_id": str(uuid.uuid4()),
+            "name": record_name,
+            "description": (self.desc_edit.toPlainText() or "")[:244],
+            "tags": (self.tags_edit.text() or "")[:244],
+            "items": visible_items,
+            "raw_text": raw,
+            "created_at": now,
+            "updated_at": now
+        })
+        print(f"[SL][INFO] Scan saved: {record_name} ({len(visible_items)} items)")
         self.store.save_all(self.records); self.refresh()
     def show_display(self):
         rec=self._selected();
-        if not rec: return
+        if not rec:
+            QMessageBox.information(self, "SL Scans", "Select a scan record to display.")
+            return
+        selected_record_id = rec.get("record_id")
+        items = self._sl_scan_items_for_record(selected_record_id)
         self.detail_name.setText(f"Name: {rec.get('name','')}"); self.detail_desc.setText(f"Description: {rec.get('description','')}"); self.detail_items.setRowCount(0)
-        for it in rec.get("items",[]):
+        for it in items:
             r=self.detail_items.rowCount(); self.detail_items.insertRow(r); self.detail_items.setItem(r,0,QTableWidgetItem(it.get("item",""))); self.detail_items.setItem(r,1,QTableWidgetItem(it.get("creator","UNKNOWN")))
+        print(f"[SL][INFO] Displaying scan: {rec.get('name','')}")
         self.stack.setCurrentIndex(2)
     def show_modify(self):
         rec=self._selected();
