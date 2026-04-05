@@ -7338,7 +7338,9 @@ class MorgannaDeck(QMainWindow):
         self._records_cache: list[dict] = []
         self._records_initialized = False
         self._records_current_folder_id = "root"
+        self._google_auth_ready = False
         self._google_inbound_timer: Optional[QTimer] = None
+        self._google_records_refresh_timer: Optional[QTimer] = None
         self._records_tab_index = -1
         self._tasks_tab_index = -1
         self._task_show_completed = False
@@ -7402,6 +7404,14 @@ class MorgannaDeck(QMainWindow):
         self._state_strip_timer = QTimer()
         self._state_strip_timer.timeout.connect(self._vamp_strip.refresh)
         self._state_strip_timer.start(60000)
+
+        self._google_inbound_timer = QTimer(self)
+        self._google_inbound_timer.timeout.connect(self._on_google_inbound_timer_tick)
+        self._google_inbound_timer.start(60000)
+
+        self._google_records_refresh_timer = QTimer(self)
+        self._google_records_refresh_timer.timeout.connect(self._on_google_records_refresh_timer_tick)
+        self._google_records_refresh_timer.start(60000)
 
         # ── Scheduler and startup deferred until after window.show() ───
         # Do NOT call _setup_scheduler() or _startup_sequence() here.
@@ -7997,9 +8007,10 @@ class MorgannaDeck(QMainWindow):
 
             self._gdrive.ensure_services()
             self._diag_tab.log("[GOOGLE][STARTUP] Drive/Docs auth ready.", "OK")
+            self._google_auth_ready = True
 
-            self._diag_tab.log("[GOOGLE][STARTUP] Records refresh triggered after auth.", "INFO")
-            self._refresh_records_docs()
+            self._diag_tab.log("[GOOGLE][STARTUP] Scheduling initial Records refresh after auth.", "INFO")
+            QTimer.singleShot(300, self._refresh_records_docs)
 
             self._diag_tab.log("[GOOGLE][STARTUP] Post-auth task refresh triggered.", "INFO")
             self._refresh_task_registry_panel()
@@ -8010,8 +8021,6 @@ class MorgannaDeck(QMainWindow):
                 f"[GOOGLE][STARTUP] Google Calendar task import count: {int(imported_count)}.",
                 "INFO"
             )
-
-            self._start_google_inbound_timer_if_enabled()
         except Exception as ex:
             self._diag_tab.log(f"[GOOGLE][STARTUP][ERROR] {ex}", "ERROR")
 
@@ -8024,6 +8033,19 @@ class MorgannaDeck(QMainWindow):
         self._records_cache = files
         self._records_initialized = True
         self._records_tab.set_items(files, path_text="My Drive")
+
+    def _on_google_inbound_timer_tick(self) -> None:
+        if not self._google_auth_ready:
+            return
+        self._poll_google_calendar_inbound_sync()
+
+    def _on_google_records_refresh_timer_tick(self) -> None:
+        if not self._google_auth_ready:
+            return
+        try:
+            self._refresh_records_docs()
+        except Exception as ex:
+            self._diag_tab.log(f"[GOOGLE][DRIVE][SYNC][ERROR] records refresh failed: {ex}", "ERROR")
 
     def _filtered_tasks_for_registry(self) -> list[dict]:
         tasks = self._tasks.load_all()
@@ -8337,20 +8359,6 @@ class MorgannaDeck(QMainWindow):
                 f"[CALENDAR] mini calendar click routed: date={date_text}, target={routed_target}.",
                 "INFO"
             )
-
-    def _start_google_inbound_timer_if_enabled(self) -> None:
-        enabled = bool(CFG.get("settings", {}).get("google_sync_enabled", True))
-        interval_ms = int(CFG.get("settings", {}).get("google_inbound_interval_ms", 300000))
-        interval_ms = max(10000, interval_ms)
-        if self._google_inbound_timer is None:
-            self._google_inbound_timer = QTimer(self)
-            self._google_inbound_timer.timeout.connect(self._poll_google_calendar_inbound_sync)
-        if enabled and not self._google_inbound_timer.isActive():
-            self._google_inbound_timer.start(interval_ms)
-            self._diag_tab.log(f"[GOOGLE][SYNC] Repeating inbound sync timer enabled ({interval_ms} ms).", "INFO")
-        elif not enabled and self._google_inbound_timer.isActive():
-            self._google_inbound_timer.stop()
-            self._diag_tab.log("[GOOGLE][SYNC] Repeating inbound sync timer disabled by config.", "INFO")
 
     def _poll_google_calendar_inbound_sync(self, force_once: bool = False):
         if not force_once and not bool(CFG.get("settings", {}).get("google_sync_enabled", True)):
