@@ -5640,6 +5640,267 @@ class JobTrackerTab(QWidget):
 
 
 # ── SELF TAB ──────────────────────────────────────────────────────────────────
+class RecordsTab(QWidget):
+    """Google Drive/Docs records browser tab."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(4)
+
+        self.status_label = QLabel("Records are not loaded yet.")
+        self.status_label.setStyleSheet(
+            f"color: {C_TEXT_DIM}; font-family: Georgia, serif; font-size: 10px;"
+        )
+        root.addWidget(self.status_label)
+
+        self.path_label = QLabel("Path: My Drive")
+        self.path_label.setStyleSheet(
+            f"color: {C_GOLD_DIM}; font-family: Georgia, serif; font-size: 10px;"
+        )
+        root.addWidget(self.path_label)
+
+        self.records_list = QListWidget()
+        self.records_list.setStyleSheet(
+            f"background: {C_BG2}; color: {C_GOLD}; border: 1px solid {C_BORDER};"
+        )
+        root.addWidget(self.records_list, 1)
+
+    def set_items(self, files: list[dict], path_text: str = "My Drive") -> None:
+        self.path_label.setText(f"Path: {path_text}")
+        self.records_list.clear()
+        for file_info in files:
+            title = (file_info.get("name") or "Untitled").strip() or "Untitled"
+            mime = (file_info.get("mimeType") or "").strip()
+            if mime == "application/vnd.google-apps.folder":
+                prefix = "📁"
+            elif mime == "application/vnd.google-apps.document":
+                prefix = "📝"
+            else:
+                prefix = "📄"
+            modified = (file_info.get("modifiedTime") or "").replace("T", " ").replace("Z", " UTC")
+            text = f"{prefix} {title}" + (f"    [{modified}]" if modified else "")
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, file_info)
+            self.records_list.addItem(item)
+        self.status_label.setText(f"Loaded {len(files)} Google Drive item(s).")
+
+
+class TasksTab(QWidget):
+    """Task registry + Google-first editor workflow tab."""
+
+    def __init__(
+        self,
+        tasks_provider,
+        on_add_editor_open,
+        on_complete_selected,
+        on_cancel_selected,
+        on_toggle_completed,
+        on_purge_completed,
+        on_filter_changed,
+        on_editor_save,
+        on_editor_cancel,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._tasks_provider = tasks_provider
+        self._on_add_editor_open = on_add_editor_open
+        self._on_complete_selected = on_complete_selected
+        self._on_cancel_selected = on_cancel_selected
+        self._on_toggle_completed = on_toggle_completed
+        self._on_purge_completed = on_purge_completed
+        self._on_filter_changed = on_filter_changed
+        self._on_editor_save = on_editor_save
+        self._on_editor_cancel = on_editor_cancel
+        self._show_completed = False
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(4)
+        self.workspace_stack = QStackedWidget()
+        root.addWidget(self.workspace_stack, 1)
+
+        normal = QWidget()
+        normal_layout = QVBoxLayout(normal)
+        normal_layout.setContentsMargins(0, 0, 0, 0)
+        normal_layout.setSpacing(4)
+
+        self.status_label = QLabel("Task registry is not loaded yet.")
+        self.status_label.setStyleSheet(
+            f"color: {C_TEXT_DIM}; font-family: Georgia, serif; font-size: 10px;"
+        )
+        normal_layout.addWidget(self.status_label)
+
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(_section_lbl("❧ DATE RANGE"))
+        self.task_filter_combo = QComboBox()
+        self.task_filter_combo.addItem("WEEK", "week")
+        self.task_filter_combo.addItem("MONTH", "month")
+        self.task_filter_combo.addItem("NEXT 3 MONTHS", "next_3_months")
+        self.task_filter_combo.addItem("YEAR", "year")
+        self.task_filter_combo.setCurrentIndex(2)
+        self.task_filter_combo.currentIndexChanged.connect(
+            lambda _: self._on_filter_changed(self.task_filter_combo.currentData() or "next_3_months")
+        )
+        filter_row.addWidget(self.task_filter_combo)
+        filter_row.addStretch(1)
+        normal_layout.addLayout(filter_row)
+
+        self.task_table = QTableWidget(0, 4)
+        self.task_table.setHorizontalHeaderLabels(["Status", "Due", "Task", "Source"])
+        self.task_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.task_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.task_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.task_table.verticalHeader().setVisible(False)
+        self.task_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.task_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.task_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.task_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.task_table.setStyleSheet(_gothic_table_style())
+        self.task_table.itemSelectionChanged.connect(self._update_action_button_state)
+        normal_layout.addWidget(self.task_table, 1)
+
+        actions = QHBoxLayout()
+        self.btn_add_task_workspace = _gothic_btn("ADD TASK")
+        self.btn_complete_task = _gothic_btn("COMPLETE SELECTED")
+        self.btn_cancel_task = _gothic_btn("CANCEL SELECTED")
+        self.btn_toggle_completed = _gothic_btn("SHOW COMPLETED")
+        self.btn_purge_completed = _gothic_btn("PURGE COMPLETED")
+        self.btn_add_task_workspace.clicked.connect(self._on_add_editor_open)
+        self.btn_complete_task.clicked.connect(self._on_complete_selected)
+        self.btn_cancel_task.clicked.connect(self._on_cancel_selected)
+        self.btn_toggle_completed.clicked.connect(self._on_toggle_completed)
+        self.btn_purge_completed.clicked.connect(self._on_purge_completed)
+        self.btn_complete_task.setEnabled(False)
+        self.btn_cancel_task.setEnabled(False)
+        for btn in (
+            self.btn_add_task_workspace,
+            self.btn_complete_task,
+            self.btn_cancel_task,
+            self.btn_toggle_completed,
+            self.btn_purge_completed,
+        ):
+            actions.addWidget(btn)
+        normal_layout.addLayout(actions)
+        self.workspace_stack.addWidget(normal)
+
+        editor = QWidget()
+        editor_layout = QVBoxLayout(editor)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(4)
+        editor_layout.addWidget(_section_lbl("❧ TASK EDITOR — GOOGLE-FIRST"))
+        self.task_editor_status_label = QLabel("Configure task details, then save to Google Calendar.")
+        self.task_editor_status_label.setStyleSheet(
+            f"background: {C_BG3}; color: {C_TEXT_DIM}; border: 1px solid {C_BORDER}; padding: 6px;"
+        )
+        editor_layout.addWidget(self.task_editor_status_label)
+        self.task_editor_name = QLineEdit()
+        self.task_editor_name.setPlaceholderText("Task Name")
+        self.task_editor_start_date = QLineEdit()
+        self.task_editor_start_date.setPlaceholderText("Start Date (YYYY-MM-DD)")
+        self.task_editor_start_time = QLineEdit()
+        self.task_editor_start_time.setPlaceholderText("Start Time (HH:MM)")
+        self.task_editor_end_date = QLineEdit()
+        self.task_editor_end_date.setPlaceholderText("End Date (YYYY-MM-DD)")
+        self.task_editor_end_time = QLineEdit()
+        self.task_editor_end_time.setPlaceholderText("End Time (HH:MM)")
+        self.task_editor_location = QLineEdit()
+        self.task_editor_location.setPlaceholderText("Location (optional)")
+        self.task_editor_recurrence = QLineEdit()
+        self.task_editor_recurrence.setPlaceholderText("Recurrence RRULE (optional)")
+        self.task_editor_all_day = QCheckBox("All-day")
+        self.task_editor_notes = QTextEdit()
+        self.task_editor_notes.setPlaceholderText("Notes")
+        self.task_editor_notes.setMaximumHeight(90)
+        for widget in (
+            self.task_editor_name,
+            self.task_editor_start_date,
+            self.task_editor_start_time,
+            self.task_editor_end_date,
+            self.task_editor_end_time,
+            self.task_editor_location,
+            self.task_editor_recurrence,
+        ):
+            editor_layout.addWidget(widget)
+        editor_layout.addWidget(self.task_editor_all_day)
+        editor_layout.addWidget(self.task_editor_notes, 1)
+        editor_actions = QHBoxLayout()
+        btn_save = _gothic_btn("SAVE")
+        btn_cancel = _gothic_btn("CANCEL")
+        btn_save.clicked.connect(self._on_editor_save)
+        btn_cancel.clicked.connect(self._on_editor_cancel)
+        editor_actions.addWidget(btn_save)
+        editor_actions.addWidget(btn_cancel)
+        editor_actions.addStretch(1)
+        editor_layout.addLayout(editor_actions)
+        self.workspace_stack.addWidget(editor)
+
+        self.normal_workspace = normal
+        self.editor_workspace = editor
+        self.workspace_stack.setCurrentWidget(self.normal_workspace)
+
+    def _update_action_button_state(self) -> None:
+        enabled = bool(self.selected_task_ids())
+        self.btn_complete_task.setEnabled(enabled)
+        self.btn_cancel_task.setEnabled(enabled)
+
+    def selected_task_ids(self) -> list[str]:
+        ids: list[str] = []
+        for r in range(self.task_table.rowCount()):
+            status_item = self.task_table.item(r, 0)
+            if status_item is None:
+                continue
+            if not status_item.isSelected():
+                continue
+            task_id = status_item.data(Qt.ItemDataRole.UserRole)
+            if task_id and task_id not in ids:
+                ids.append(task_id)
+        return ids
+
+    def load_tasks(self, tasks: list[dict]) -> None:
+        self.task_table.setRowCount(0)
+        for task in tasks:
+            row = self.task_table.rowCount()
+            self.task_table.insertRow(row)
+            status = (task.get("status") or "pending").lower()
+            status_icon = "☑" if status in {"completed", "cancelled"} else "•"
+            due = (task.get("due_at") or "").replace("T", " ")
+            text = (task.get("text") or "Reminder").strip() or "Reminder"
+            source = (task.get("source") or "local").lower()
+            status_item = QTableWidgetItem(f"{status_icon} {status}")
+            status_item.setData(Qt.ItemDataRole.UserRole, task.get("id"))
+            self.task_table.setItem(row, 0, status_item)
+            self.task_table.setItem(row, 1, QTableWidgetItem(due))
+            self.task_table.setItem(row, 2, QTableWidgetItem(text))
+            self.task_table.setItem(row, 3, QTableWidgetItem(source))
+        self.status_label.setText(f"Loaded {len(tasks)} task(s).")
+        self._update_action_button_state()
+
+    def refresh(self) -> None:
+        if callable(self._tasks_provider):
+            self.load_tasks(self._tasks_provider())
+
+    def set_show_completed(self, enabled: bool) -> None:
+        self._show_completed = bool(enabled)
+        self.btn_toggle_completed.setText("HIDE COMPLETED" if self._show_completed else "SHOW COMPLETED")
+
+    def set_status(self, text: str, ok: bool = False) -> None:
+        color = C_GREEN if ok else C_TEXT_DIM
+        self.task_editor_status_label.setStyleSheet(
+            f"background: {C_BG3}; color: {color}; border: 1px solid {C_BORDER}; padding: 6px;"
+        )
+        self.task_editor_status_label.setText(text)
+
+    def open_editor(self) -> None:
+        self.workspace_stack.setCurrentWidget(self.editor_workspace)
+
+    def close_editor(self) -> None:
+        self.workspace_stack.setCurrentWidget(self.normal_workspace)
+
+
 class SelfTab(QWidget):
     """
     Morganna's internal dialogue space.
@@ -6995,6 +7256,8 @@ class MorgannaDeck(QMainWindow):
         self._google_inbound_timer: Optional[QTimer] = None
         self._records_tab_index = -1
         self._tasks_tab_index = -1
+        self._task_show_completed = False
+        self._task_date_filter = "next_3_months"
 
         # ── Google Services ────────────────────────────────────────────
         # Instantiate service wrappers up-front; auth is forced later
@@ -7352,25 +7615,26 @@ class MorgannaDeck(QMainWindow):
         self._hw_panel = HardwarePanel()
         self._spell_tabs.addTab(self._hw_panel, "Instruments")
 
-        # ── Records tab ────────────────────────────────────────────────
-        self._records_placeholder = QLabel(
-            "❧ Google Drive / Docs\n\nConnect Google to\naccess your records."
-        )
-        self._records_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._records_placeholder.setStyleSheet(
-            f"color: {C_TEXT_DIM}; font-family: Georgia, serif; font-size: 11px;"
-        )
-        self._records_tab_index = self._spell_tabs.addTab(self._records_placeholder, "Records")
+        # ── Records tab (real) ────────────────────────────────────────
+        self._records_tab = RecordsTab()
+        self._records_tab_index = self._spell_tabs.addTab(self._records_tab, "Records")
+        self._diag_tab.log("[SPELLBOOK] real RecordsTab attached.", "INFO")
 
-        # ── Tasks tab ─────────────────────────────────────────────────
-        self._tasks_placeholder = QLabel(
-            "❧ Task Registry\n\nTasks and reminders\nwill appear here."
+        # ── Tasks tab (real) ──────────────────────────────────────────
+        self._tasks_tab = TasksTab(
+            tasks_provider=self._filtered_tasks_for_registry,
+            on_add_editor_open=self._open_task_editor_workspace,
+            on_complete_selected=self._complete_selected_task,
+            on_cancel_selected=self._cancel_selected_task,
+            on_toggle_completed=self._toggle_show_completed_tasks,
+            on_purge_completed=self._purge_completed_tasks,
+            on_filter_changed=self._on_task_filter_changed,
+            on_editor_save=self._save_task_editor_google_first,
+            on_editor_cancel=self._cancel_task_editor_workspace,
         )
-        self._tasks_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._tasks_placeholder.setStyleSheet(
-            f"color: {C_TEXT_DIM}; font-family: Georgia, serif; font-size: 11px;"
-        )
-        self._tasks_tab_index = self._spell_tabs.addTab(self._tasks_placeholder, "Tasks")
+        self._tasks_tab.set_show_completed(self._task_show_completed)
+        self._tasks_tab_index = self._spell_tabs.addTab(self._tasks_tab, "Tasks")
+        self._diag_tab.log("[SPELLBOOK] real TasksTab attached.", "INFO")
 
         # ── SL Scans tab ───────────────────────────────────────────────
         self._sl_scans = SLScansTab(cfg_path("sl"))
@@ -7429,6 +7693,10 @@ class MorgannaDeck(QMainWindow):
         layout.addWidget(right_workspace, 1)
         self._diag_tab.log(
             "[LAYOUT] right-side calendar restored (persistent lower-right section).",
+            "INFO"
+        )
+        self._diag_tab.log(
+            "[LAYOUT] persistent mini calendar restored/confirmed (always visible lower-right).",
             "INFO"
         )
         return layout
@@ -7659,86 +7927,41 @@ class MorgannaDeck(QMainWindow):
             self._diag_tab.log(f"[GOOGLE][STARTUP][ERROR] {ex}", "ERROR")
 
 
-    def _ensure_records_tab_ui(self) -> None:
-        if getattr(self, "_records_tab_widget", None) is not None:
-            return
-        tab = QWidget()
-        root = QVBoxLayout(tab)
-        root.setContentsMargins(6, 6, 6, 6)
-        root.setSpacing(4)
-
-        self._records_status_label = QLabel("Records are not loaded yet.")
-        self._records_status_label.setStyleSheet(
-            f"color: {C_TEXT_DIM}; font-family: Georgia, serif; font-size: 10px;"
-        )
-        root.addWidget(self._records_status_label)
-
-        self._records_path_label = QLabel("Path: My Drive")
-        self._records_path_label.setStyleSheet(
-            f"color: {C_GOLD_DIM}; font-family: Georgia, serif; font-size: 10px;"
-        )
-        root.addWidget(self._records_path_label)
-
-        self._records_list = QListWidget()
-        self._records_list.setStyleSheet(
-            f"background: {C_BG2}; color: {C_GOLD}; border: 1px solid {C_BORDER};"
-        )
-        root.addWidget(self._records_list, 1)
-
-        self._records_tab_widget = tab
-        if 0 <= self._records_tab_index < self._spell_tabs.count():
-            self._spell_tabs.removeTab(self._records_tab_index)
-            self._spell_tabs.insertTab(self._records_tab_index, tab, "Records")
-
-    def _ensure_tasks_tab_ui(self) -> None:
-        if getattr(self, "_tasks_tab_widget", None) is not None:
-            return
-        tab = QWidget()
-        root = QVBoxLayout(tab)
-        root.setContentsMargins(6, 6, 6, 6)
-        root.setSpacing(4)
-
-        self._tasks_status_label = QLabel("Task registry is not loaded yet.")
-        self._tasks_status_label.setStyleSheet(
-            f"color: {C_TEXT_DIM}; font-family: Georgia, serif; font-size: 10px;"
-        )
-        root.addWidget(self._tasks_status_label)
-
-        self._tasks_list = QListWidget()
-        self._tasks_list.setStyleSheet(
-            f"background: {C_BG2}; color: {C_GOLD}; border: 1px solid {C_BORDER};"
-        )
-        root.addWidget(self._tasks_list, 1)
-
-        self._tasks_tab_widget = tab
-        if 0 <= self._tasks_tab_index < self._spell_tabs.count():
-            self._spell_tabs.removeTab(self._tasks_tab_index)
-            self._spell_tabs.insertTab(self._tasks_tab_index, tab, "Tasks")
-
     def _refresh_records_docs(self) -> None:
-        self._ensure_records_tab_ui()
         self._records_current_folder_id = "root"
-        self._records_status_label.setText("Loading Google Drive records...")
-        self._records_path_label.setText("Path: My Drive")
+        self._records_tab.status_label.setText("Loading Google Drive records...")
+        self._records_tab.path_label.setText("Path: My Drive")
         files = self._gdrive.list_folder_items(folder_id=self._records_current_folder_id, page_size=200)
         self._records_cache = files
         self._records_initialized = True
-        self._records_list.clear()
-        for file_info in files:
-            title = (file_info.get("name") or "Untitled").strip() or "Untitled"
-            mime = (file_info.get("mimeType") or "").strip()
-            if mime == "application/vnd.google-apps.folder":
-                prefix = "📁"
-            elif mime == "application/vnd.google-apps.document":
-                prefix = "📝"
-            else:
-                prefix = "📄"
-            modified = (file_info.get("modifiedTime") or "").replace("T", " ").replace("Z", " UTC")
-            text = f"{prefix} {title}" + (f"    [{modified}]" if modified else "")
-            item = QListWidgetItem(text)
-            item.setData(Qt.ItemDataRole.UserRole, file_info)
-            self._records_list.addItem(item)
-        self._records_status_label.setText(f"Loaded {len(files)} Google Drive item(s).")
+        self._records_tab.set_items(files, path_text="My Drive")
+
+    def _filtered_tasks_for_registry(self) -> list[dict]:
+        tasks = self._tasks.load_all()
+        now = datetime.now()
+        if self._task_date_filter == "week":
+            end = now + timedelta(days=7)
+        elif self._task_date_filter == "month":
+            end = now + timedelta(days=31)
+        elif self._task_date_filter == "year":
+            end = now + timedelta(days=366)
+        else:
+            end = now + timedelta(days=92)
+
+        filtered: list[dict] = []
+        for task in tasks:
+            status = (task.get("status") or "pending").lower()
+            if not self._task_show_completed and status in {"completed", "cancelled"}:
+                continue
+            due_dt = parse_iso_for_compare(task.get("due_at") or task.get("due"), context="tasks_tab_due_filter")
+            if due_dt is None:
+                filtered.append(task)
+                continue
+            if now <= due_dt <= end or status in {"completed", "cancelled"}:
+                filtered.append(task)
+
+        filtered.sort(key=lambda t: (t.get("due_at") or "", t.get("text") or ""))
+        return filtered
 
     def _google_event_due_datetime(self, event: dict):
         start = (event or {}).get("start") or {}
@@ -7755,19 +7978,195 @@ class MorgannaDeck(QMainWindow):
         return None
 
     def _refresh_task_registry_panel(self) -> None:
-        self._ensure_tasks_tab_ui()
-        tasks = self._tasks.load_all()
-        self._tasks_list.clear()
-        for task in sorted(tasks, key=lambda t: t.get("due_at") or ""):
-            text = (task.get("text") or "Reminder").strip() or "Reminder"
-            due = (task.get("due_at") or "").replace("T", " ")
-            status = (task.get("status") or "pending").lower()
-            source = (task.get("source") or "local").lower()
-            icon = "☑" if status in {"completed", "cancelled"} else "•"
-            row = QListWidgetItem(f"{icon} {text}  [{due}]  ({status}/{source})")
-            row.setData(Qt.ItemDataRole.UserRole, task)
-            self._tasks_list.addItem(row)
-        self._tasks_status_label.setText(f"Loaded {len(tasks)} task(s).")
+        if getattr(self, "_tasks_tab", None) is None:
+            return
+        self._tasks_tab.refresh()
+
+    def _on_task_filter_changed(self, filter_key: str) -> None:
+        self._task_date_filter = str(filter_key or "next_3_months")
+        self._diag_tab.log(f"[TASKS] Task registry date filter changed to {self._task_date_filter}.", "INFO")
+        self._refresh_task_registry_panel()
+
+    def _toggle_show_completed_tasks(self) -> None:
+        self._task_show_completed = not self._task_show_completed
+        self._tasks_tab.set_show_completed(self._task_show_completed)
+        self._refresh_task_registry_panel()
+
+    def _selected_task_ids(self) -> list[str]:
+        if getattr(self, "_tasks_tab", None) is None:
+            return []
+        return self._tasks_tab.selected_task_ids()
+
+    def _set_task_status(self, task_id: str, status: str) -> Optional[dict]:
+        if status == "completed":
+            updated = self._tasks.complete(task_id)
+        elif status == "cancelled":
+            updated = self._tasks.cancel(task_id)
+        else:
+            updated = self._tasks.update_status(task_id, status)
+
+        if not updated:
+            return None
+
+        google_event_id = (updated.get("google_event_id") or "").strip()
+        if google_event_id:
+            try:
+                self._gcal.delete_event_for_task(google_event_id)
+            except Exception as ex:
+                self._diag_tab.log(
+                    f"[TASKS][WARN] Google event cleanup failed for task_id={task_id}: {ex}",
+                    "WARN",
+                )
+        return updated
+
+    def _complete_selected_task(self) -> None:
+        done = 0
+        for task_id in self._selected_task_ids():
+            if self._set_task_status(task_id, "completed"):
+                done += 1
+        self._diag_tab.log(f"[TASKS] COMPLETE SELECTED applied to {done} task(s).", "INFO")
+        self._refresh_task_registry_panel()
+
+    def _cancel_selected_task(self) -> None:
+        done = 0
+        for task_id in self._selected_task_ids():
+            if self._set_task_status(task_id, "cancelled"):
+                done += 1
+        self._diag_tab.log(f"[TASKS] CANCEL SELECTED applied to {done} task(s).", "INFO")
+        self._refresh_task_registry_panel()
+
+    def _purge_completed_tasks(self) -> None:
+        removed = self._tasks.clear_completed()
+        self._diag_tab.log(f"[TASKS] PURGE COMPLETED removed {removed} task(s).", "INFO")
+        self._refresh_task_registry_panel()
+
+    def _set_task_editor_status(self, text: str, ok: bool = False) -> None:
+        if getattr(self, "_tasks_tab", None) is not None:
+            self._tasks_tab.set_status(text, ok=ok)
+
+    def _open_task_editor_workspace(self) -> None:
+        if getattr(self, "_tasks_tab", None) is None:
+            return
+        now_local = datetime.now()
+        end_local = now_local + timedelta(minutes=30)
+        self._tasks_tab.task_editor_name.setText("")
+        self._tasks_tab.task_editor_start_date.setText(now_local.strftime("%Y-%m-%d"))
+        self._tasks_tab.task_editor_start_time.setText(now_local.strftime("%H:%M"))
+        self._tasks_tab.task_editor_end_date.setText(end_local.strftime("%Y-%m-%d"))
+        self._tasks_tab.task_editor_end_time.setText(end_local.strftime("%H:%M"))
+        self._tasks_tab.task_editor_notes.setPlainText("")
+        self._tasks_tab.task_editor_location.setText("")
+        self._tasks_tab.task_editor_recurrence.setText("")
+        self._tasks_tab.task_editor_all_day.setChecked(False)
+        self._set_task_editor_status("Configure task details, then save to Google Calendar.", ok=False)
+        self._tasks_tab.open_editor()
+
+    def _close_task_editor_workspace(self) -> None:
+        if getattr(self, "_tasks_tab", None) is not None:
+            self._tasks_tab.close_editor()
+
+    def _cancel_task_editor_workspace(self) -> None:
+        self._close_task_editor_workspace()
+
+    def _parse_editor_datetime(self, date_text: str, time_text: str, all_day: bool, is_end: bool = False):
+        date_text = (date_text or "").strip()
+        time_text = (time_text or "").strip()
+        if not date_text:
+            return None
+        if all_day:
+            hour = 23 if is_end else 0
+            minute = 59 if is_end else 0
+            parsed = datetime.strptime(f"{date_text} {hour:02d}:{minute:02d}", "%Y-%m-%d %H:%M")
+        else:
+            parsed = datetime.strptime(f"{date_text} {time_text}", "%Y-%m-%d %H:%M")
+        return normalize_datetime_for_compare(parsed, context="task_editor_parse_dt")
+
+    def _save_task_editor_google_first(self) -> None:
+        tab = getattr(self, "_tasks_tab", None)
+        if tab is None:
+            return
+        title = tab.task_editor_name.text().strip()
+        all_day = tab.task_editor_all_day.isChecked()
+        start_date = tab.task_editor_start_date.text().strip()
+        start_time = tab.task_editor_start_time.text().strip()
+        end_date = tab.task_editor_end_date.text().strip()
+        end_time = tab.task_editor_end_time.text().strip()
+        notes = tab.task_editor_notes.toPlainText().strip()
+        location = tab.task_editor_location.text().strip()
+        recurrence = tab.task_editor_recurrence.text().strip()
+
+        if not title:
+            self._set_task_editor_status("Task Name is required.", ok=False)
+            return
+        if not start_date or not end_date or (not all_day and (not start_time or not end_time)):
+            self._set_task_editor_status("Start/End date and time are required.", ok=False)
+            return
+        try:
+            start_dt = self._parse_editor_datetime(start_date, start_time, all_day, is_end=False)
+            end_dt = self._parse_editor_datetime(end_date, end_time, all_day, is_end=True)
+            if not start_dt or not end_dt:
+                raise ValueError("datetime parse failed")
+            if end_dt < start_dt:
+                self._set_task_editor_status("End datetime must be after start datetime.", ok=False)
+                return
+        except Exception:
+            self._set_task_editor_status("Invalid date/time format. Use YYYY-MM-DD and HH:MM.", ok=False)
+            return
+
+        tz_name = self._gcal._get_google_event_timezone()
+        payload = {"summary": title}
+        if all_day:
+            payload["start"] = {"date": start_dt.date().isoformat()}
+            payload["end"] = {"date": (end_dt.date() + timedelta(days=1)).isoformat()}
+        else:
+            payload["start"] = {"dateTime": start_dt.replace(tzinfo=None).isoformat(timespec="seconds"), "timeZone": tz_name}
+            payload["end"] = {"dateTime": end_dt.replace(tzinfo=None).isoformat(timespec="seconds"), "timeZone": tz_name}
+        if notes:
+            payload["description"] = notes
+        if location:
+            payload["location"] = location
+        if recurrence:
+            rule = recurrence if recurrence.upper().startswith("RRULE:") else f"RRULE:{recurrence}"
+            payload["recurrence"] = [rule]
+
+        try:
+            event_id, _ = self._gcal.create_event_with_payload(payload, calendar_id="primary")
+            tasks = self._tasks.load_all()
+            task = {
+                "id": f"task_{uuid.uuid4().hex[:10]}",
+                "created_at": local_now_iso(),
+                "due_at": start_dt.isoformat(timespec="seconds"),
+                "pre_trigger": (start_dt - timedelta(minutes=1)).isoformat(timespec="seconds"),
+                "text": title,
+                "status": "pending",
+                "acknowledged_at": None,
+                "retry_count": 0,
+                "last_triggered_at": None,
+                "next_retry_at": None,
+                "pre_announced": False,
+                "source": "local",
+                "google_event_id": event_id,
+                "sync_status": "synced",
+                "last_synced_at": local_now_iso(),
+                "metadata": {
+                    "input": "task_editor_google_first",
+                    "notes": notes,
+                    "start_at": start_dt.isoformat(timespec="seconds"),
+                    "end_at": end_dt.isoformat(timespec="seconds"),
+                    "all_day": bool(all_day),
+                    "location": location,
+                    "recurrence": recurrence,
+                },
+            }
+            tasks.append(task)
+            self._tasks.save_all(tasks)
+            self._set_task_editor_status("Google sync succeeded and task registry updated.", ok=True)
+            self._close_task_editor_workspace()
+            self._refresh_task_registry_panel()
+        except Exception as ex:
+            self._set_task_editor_status(f"Google save failed: {ex}", ok=False)
+            self._diag_tab.log(f"[TASKS][ERROR] Google-first save failed: {ex}", "ERROR")
+            self._close_task_editor_workspace()
 
     def _insert_calendar_date(self, qdate: QDate) -> None:
         date_text = qdate.toString("yyyy-MM-dd")
@@ -7775,8 +8174,8 @@ class MorgannaDeck(QMainWindow):
 
         focus_widget = QApplication.focusWidget()
         direct_targets = [
-            ("task_editor_start_date", getattr(self, "task_editor_start_date", None)),
-            ("task_editor_end_date", getattr(self, "task_editor_end_date", None)),
+            ("task_editor_start_date", getattr(getattr(self, "_tasks_tab", None), "task_editor_start_date", None)),
+            ("task_editor_end_date", getattr(getattr(self, "_tasks_tab", None), "task_editor_end_date", None)),
         ]
         for name, widget in direct_targets:
             if widget is not None and focus_widget is widget:
@@ -7793,8 +8192,8 @@ class MorgannaDeck(QMainWindow):
                     self._input_field.setText(date_text)
                     routed_target = "input_field_set"
 
-        if hasattr(self, "_tasks_status_label") and self._tasks_status_label is not None:
-            self._tasks_status_label.setText(f"Calendar date selected: {date_text}")
+        if hasattr(self, "_tasks_tab") and self._tasks_tab is not None:
+            self._tasks_tab.status_label.setText(f"Calendar date selected: {date_text}")
 
         if hasattr(self, "_diag_tab") and self._diag_tab is not None:
             self._diag_tab.log(
@@ -7918,6 +8317,9 @@ class MorgannaDeck(QMainWindow):
         if changed:
             self._tasks.save_all(tasks)
         self._refresh_task_registry_panel()
+        if getattr(self, "_tasks_tab", None) is not None:
+            self._tasks_tab.refresh()
+            self._diag_tab.log("[GOOGLE][SYNC] TasksTab refresh triggered.", "INFO")
         if hasattr(self, "_diag_tab") and self._diag_tab is not None:
             self._diag_tab.log(
                 f"[GOOGLE][SYNC] Google Calendar task import count: {int(imported_count)} (changed={changed}).",
