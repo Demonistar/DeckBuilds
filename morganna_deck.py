@@ -883,6 +883,10 @@ def _local_tzinfo():
     return datetime.now().astimezone().tzinfo or timezone.utc
 
 
+def now_for_compare():
+    return datetime.now(_local_tzinfo())
+
+
 def normalize_datetime_for_compare(dt_value, context: str = ""):
     if dt_value is None:
         return None
@@ -911,6 +915,13 @@ def normalize_datetime_for_compare(dt_value, context: str = ""):
 
 def parse_iso_for_compare(value, context: str = ""):
     return normalize_datetime_for_compare(parse_iso(value), context=context)
+
+
+def _task_due_sort_key(task: dict):
+    due = parse_iso_for_compare((task or {}).get("due_at") or (task or {}).get("due"), context="task_sort")
+    if due is None:
+        return (1, datetime.max.replace(tzinfo=timezone.utc))
+    return (0, due.astimezone(timezone.utc), ((task or {}).get("text") or "").lower())
 
 
 def format_duration(seconds: float) -> str:
@@ -5738,6 +5749,7 @@ class TasksTab(QWidget):
         on_filter_changed,
         on_editor_save,
         on_editor_cancel,
+        diagnostics_logger=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -5750,7 +5762,9 @@ class TasksTab(QWidget):
         self._on_filter_changed = on_filter_changed
         self._on_editor_save = on_editor_save
         self._on_editor_cancel = on_editor_cancel
+        self._diag_logger = diagnostics_logger
         self._show_completed = False
+        self._refresh_thread = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -5916,9 +5930,43 @@ class TasksTab(QWidget):
         self.status_label.setText(f"Loaded {len(tasks)} task(s).")
         self._update_action_button_state()
 
+    def _diag(self, message: str, level: str = "INFO") -> None:
+        try:
+            if self._diag_logger:
+                self._diag_logger(message, level)
+        except Exception:
+            pass
+
+    def stop_refresh_worker(self, reason: str = "") -> None:
+        thread = getattr(self, "_refresh_thread", None)
+        if thread is not None and hasattr(thread, "isRunning") and thread.isRunning():
+            self._diag(
+                f"[TASKS][THREAD][WARN] stop requested for refresh worker reason={reason or 'unspecified'}",
+                "WARN",
+            )
+            try:
+                thread.requestInterruption()
+            except Exception:
+                pass
+            try:
+                thread.quit()
+            except Exception:
+                pass
+            thread.wait(2000)
+        self._refresh_thread = None
+
     def refresh(self) -> None:
-        if callable(self._tasks_provider):
+        if not callable(self._tasks_provider):
+            return
+        try:
             self.load_tasks(self._tasks_provider())
+        except Exception as ex:
+            self._diag(f"[TASKS][TAB][ERROR] refresh failed: {ex}", "ERROR")
+            self.stop_refresh_worker(reason="tasks_tab_refresh_exception")
+
+    def closeEvent(self, event) -> None:
+        self.stop_refresh_worker(reason="tasks_tab_close")
+        super().closeEvent(event)
 
     def set_show_completed(self, enabled: bool) -> None:
         self._show_completed = bool(enabled)
@@ -7672,6 +7720,7 @@ class MorgannaDeck(QMainWindow):
             on_filter_changed=self._on_task_filter_changed,
             on_editor_save=self._save_task_editor_google_first,
             on_editor_cancel=self._cancel_task_editor_workspace,
+            diagnostics_logger=self._diag_tab.log,
         )
         self._tasks_tab.set_show_completed(self._task_show_completed)
         self._tasks_tab_index = self._spell_tabs.addTab(self._tasks_tab, "Tasks")
@@ -7978,7 +8027,7 @@ class MorgannaDeck(QMainWindow):
 
     def _filtered_tasks_for_registry(self) -> list[dict]:
         tasks = self._tasks.load_all()
-        now = datetime.now()
+        now = now_for_compare()
         if self._task_date_filter == "week":
             end = now + timedelta(days=7)
         elif self._task_date_filter == "month":
@@ -7988,19 +8037,41 @@ class MorgannaDeck(QMainWindow):
         else:
             end = now + timedelta(days=92)
 
+        self._diag_tab.log(
+            f"[TASKS][FILTER] start filter={self._task_date_filter} show_completed={self._task_show_completed} total={len(tasks)}",
+            "INFO",
+        )
+        self._diag_tab.log(f"[TASKS][FILTER] now={now.isoformat(timespec='seconds')}", "DEBUG")
+        self._diag_tab.log(f"[TASKS][FILTER] horizon_end={end.isoformat(timespec='seconds')}", "DEBUG")
+
         filtered: list[dict] = []
+        skipped_invalid_due = 0
         for task in tasks:
             status = (task.get("status") or "pending").lower()
             if not self._task_show_completed and status in {"completed", "cancelled"}:
                 continue
-            due_dt = parse_iso_for_compare(task.get("due_at") or task.get("due"), context="tasks_tab_due_filter")
+
+            due_raw = task.get("due_at") or task.get("due")
+            due_dt = parse_iso_for_compare(due_raw, context="tasks_tab_due_filter")
+            if due_raw and due_dt is None:
+                skipped_invalid_due += 1
+                self._diag_tab.log(
+                    f"[TASKS][FILTER][WARN] skipping invalid due datetime task_id={task.get('id','?')} due_raw={due_raw!r}",
+                    "WARN",
+                )
+                continue
+
             if due_dt is None:
                 filtered.append(task)
                 continue
             if now <= due_dt <= end or status in {"completed", "cancelled"}:
                 filtered.append(task)
 
-        filtered.sort(key=lambda t: (t.get("due_at") or "", t.get("text") or ""))
+        filtered.sort(key=_task_due_sort_key)
+        self._diag_tab.log(
+            f"[TASKS][FILTER] done before={len(tasks)} after={len(filtered)} skipped_invalid_due={skipped_invalid_due}",
+            "INFO",
+        )
         return filtered
 
     def _google_event_due_datetime(self, event: dict):
@@ -8020,9 +8091,19 @@ class MorgannaDeck(QMainWindow):
     def _refresh_task_registry_panel(self) -> None:
         if getattr(self, "_tasks_tab", None) is None:
             return
-        self._tasks_tab.refresh()
-        visible_count = len(self._filtered_tasks_for_registry())
-        self._diag_tab.log(f"[TASKS][REGISTRY] refresh count={visible_count}.", "INFO")
+        try:
+            self._tasks_tab.refresh()
+            visible_count = len(self._filtered_tasks_for_registry())
+            self._diag_tab.log(f"[TASKS][REGISTRY] refresh count={visible_count}.", "INFO")
+        except Exception as ex:
+            self._diag_tab.log(f"[TASKS][REGISTRY][ERROR] refresh failed: {ex}", "ERROR")
+            try:
+                self._tasks_tab.stop_refresh_worker(reason="registry_refresh_exception")
+            except Exception as stop_ex:
+                self._diag_tab.log(
+                    f"[TASKS][REGISTRY][WARN] failed to stop refresh worker cleanly: {stop_ex}",
+                    "WARN",
+                )
 
     def _on_task_filter_changed(self, filter_key: str) -> None:
         self._task_date_filter = str(filter_key or "next_3_months")
