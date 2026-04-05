@@ -6822,9 +6822,22 @@ class MorgannaDeck(QMainWindow):
         self._tasks    = TaskManager()
 
         # ── Google Services ────────────────────────────────────────────
-        # Instantiated here, auth triggered via timer after UI is ready
-        self._gcal   = None
-        self._gdrive = None
+        # Instantiate service wrappers up-front; auth is forced later
+        # from main() after window.show() when the event loop is running.
+        g_creds_path = Path(CFG.get("google", {}).get(
+            "credentials",
+            str(cfg_path("config") / "google_credentials.json")
+        ))
+        g_token_path = Path(CFG.get("google", {}).get(
+            "token",
+            str(cfg_path("google") / "token.json")
+        ))
+        self._gcal = GoogleCalendarService(g_creds_path, g_token_path)
+        self._gdrive = GoogleDocsDriveService(
+            g_creds_path,
+            g_token_path,
+            logger=lambda msg, level="INFO": self._diag_tab.log(f"[GDRIVE] {msg}", level)
+        )
 
         # Seed LSL rules on first run
         self._lessons.seed_lsl_rules()
@@ -6866,9 +6879,6 @@ class MorgannaDeck(QMainWindow):
         self._state_strip_timer = QTimer()
         self._state_strip_timer.timeout.connect(self._vamp_strip.refresh)
         self._state_strip_timer.start(60000)
-
-        # ── Google auth — triggered after window is ready ──────────────
-        QTimer.singleShot(500, self._startup_google_auth)
 
         # ── Scheduler and startup deferred until after window.show() ───
         # Do NOT call _setup_scheduler() or _startup_sequence() here.
@@ -7383,60 +7393,52 @@ class MorgannaDeck(QMainWindow):
 
     def _startup_google_auth(self) -> None:
         """
-        Force Google OAuth once at startup.
-        Validates credentials, launches browser OAuth if token is
-        missing or invalid, creates token.json, initializes services.
+        Force Google OAuth once at startup after the event loop is running.
+        If token is missing/invalid, the browser OAuth flow opens naturally.
         """
-        if not GOOGLE_OK:
+        if not GOOGLE_OK or not GOOGLE_API_OK:
             self._diag_tab.log(
-                f"[GOOGLE] Python libraries not available: {GOOGLE_IMPORT_ERROR}", "WARN"
+                "[GOOGLE][STARTUP][WARN] Google auth skipped because dependencies are unavailable.",
+                "WARN"
             )
+            if GOOGLE_IMPORT_ERROR:
+                self._diag_tab.log(f"[GOOGLE][STARTUP][WARN] {GOOGLE_IMPORT_ERROR}", "WARN")
             return
 
         try:
-            creds_path = Path(CFG.get("google", {}).get(
-                "credentials",
-                str(cfg_path("config") / "google_credentials.json")
-            ))
-            token_path = Path(CFG.get("google", {}).get(
-                "token",
-                str(cfg_path("google") / "token.json")
-            ))
-
-            self._diag_tab.log(f"[GOOGLE] credentials = {creds_path}", "INFO")
-            self._diag_tab.log(f"[GOOGLE] token       = {token_path}", "INFO")
-
-            if not creds_path.exists():
+            if not self._gcal or not self._gdrive:
                 self._diag_tab.log(
-                    f"[GOOGLE] credentials.json not found — skipping auth. "
-                    f"Place it at: {creds_path}", "WARN"
+                    "[GOOGLE][STARTUP][WARN] Google auth skipped because service objects are unavailable.",
+                    "WARN"
                 )
                 return
 
-            token_path.parent.mkdir(parents=True, exist_ok=True)
-
-            self._gcal   = GoogleCalendarService(creds_path, token_path)
-            self._gdrive = GoogleDocsDriveService(
-                creds_path, token_path,
-                logger=lambda msg, level="INFO":
-                    self._diag_tab.log(f"[GDRIVE] {msg}", level)
+            self._diag_tab.log("[GOOGLE][STARTUP] Beginning proactive Google auth check.", "INFO")
+            self._diag_tab.log(
+                f"[GOOGLE][STARTUP] credentials={self._gcal.credentials_path}",
+                "INFO"
+            )
+            self._diag_tab.log(
+                f"[GOOGLE][STARTUP] token={self._gcal.token_path}",
+                "INFO"
             )
 
-            # Force auth now — this opens the browser if token is missing/stale
             cal_linked = self._gcal._build_service()
-            self._gdrive.ensure_services()
-
             if cal_linked:
                 self._diag_tab.log(
-                    "[GOOGLE] OAuth completed — token.json created.", "OK"
+                    "[GOOGLE][STARTUP] Calendar auth ready. OAuth completed and token saved.",
+                    "OK"
                 )
             else:
                 self._diag_tab.log(
-                    "[GOOGLE] Existing token valid — no reauth needed.", "OK"
+                    "[GOOGLE][STARTUP] Calendar auth ready.",
+                    "OK"
                 )
 
+            self._gdrive.ensure_services()
+            self._diag_tab.log("[GOOGLE][STARTUP] Drive/Docs auth ready.", "OK")
         except Exception as ex:
-            self._diag_tab.log(f"[GOOGLE] Startup auth error: {ex}", "ERROR")
+            self._diag_tab.log(f"[GOOGLE][STARTUP][ERROR] {ex}", "ERROR")
 
     def _measure_vram_baseline(self) -> None:
         if NVML_OK and gpu_handle:
@@ -8475,6 +8477,7 @@ def main() -> None:
     QTimer.singleShot(200, lambda: (_early_log("[TIMER] _setup_scheduler firing"), window._setup_scheduler()))
     QTimer.singleShot(400, lambda: (_early_log("[TIMER] start_scheduler firing"), window.start_scheduler()))
     QTimer.singleShot(600, lambda: (_early_log("[TIMER] _startup_sequence firing"), window._startup_sequence()))
+    QTimer.singleShot(1000, lambda: (_early_log("[TIMER] _startup_google_auth firing"), window._startup_google_auth()))
 
     # Play startup sound — keep reference to prevent GC while thread runs
     def _play_startup():
