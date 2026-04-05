@@ -3214,9 +3214,23 @@ class GoogleCalendarService:
 
         if not creds or not creds.valid:
             print("[GCal][DEBUG] Starting OAuth flow for Google Calendar.")
-            flow = InstalledAppFlow.from_client_secrets_file(str(self.credentials_path), GOOGLE_SCOPES)
-            creds = flow.run_local_server(port=0)
-            self._persist_token(creds)
+            try:
+                flow = InstalledAppFlow.from_client_secrets_file(str(self.credentials_path), GOOGLE_SCOPES)
+                creds = flow.run_local_server(
+                    port=0,
+                    open_browser=True,
+                    authorization_prompt_message=(
+                        "Open this URL in your browser to authorize this application:\n{url}"
+                    ),
+                    success_message="Authentication complete. You may close this window.",
+                )
+                if not creds:
+                    raise RuntimeError("OAuth flow returned no credentials object.")
+                self._persist_token(creds)
+                print("[GCal][DEBUG] token.json written successfully.")
+            except Exception as ex:
+                print(f"[GCal][ERROR] OAuth flow failed: {type(ex).__name__}: {ex}")
+                raise
             link_established = True
 
         self._service = google_build("calendar", "v3", credentials=creds)
@@ -3394,9 +3408,24 @@ class GoogleDocsDriveService:
                 ) from ex
 
         if not creds or not creds.valid:
-            flow = InstalledAppFlow.from_client_secrets_file(str(self.credentials_path), GOOGLE_SCOPES)
-            creds = flow.run_local_server(port=0)
-            self._persist_token(creds)
+            self._log("Starting OAuth flow for Google Drive/Docs.", level="INFO")
+            try:
+                flow = InstalledAppFlow.from_client_secrets_file(str(self.credentials_path), GOOGLE_SCOPES)
+                creds = flow.run_local_server(
+                    port=0,
+                    open_browser=True,
+                    authorization_prompt_message=(
+                        "Open this URL in your browser to authorize this application:\n{url}"
+                    ),
+                    success_message="Authentication complete. You may close this window.",
+                )
+                if not creds:
+                    raise RuntimeError("OAuth flow returned no credentials object.")
+                self._persist_token(creds)
+                self._log("[GCal][DEBUG] token.json written successfully.", level="INFO")
+            except Exception as ex:
+                self._log(f"OAuth flow failed: {type(ex).__name__}: {ex}", level="ERROR")
+                raise
 
         return creds
 
