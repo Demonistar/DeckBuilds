@@ -394,8 +394,8 @@ def _default_config() -> dict:
             "api_model": "",          # e.g. "claude-sonnet-4-6"
         },
         "google": {
-            "credentials": str(SCRIPT_DIR / "config" / "google_credentials.json"),
-            "token":       str(SCRIPT_DIR / "google"  / "token.json"),
+            "credentials": str(SCRIPT_DIR / "google" / "google_credentials.json"),
+            "token":       str(SCRIPT_DIR / "google" / "token.json"),
             "timezone":    "America/Chicago",
             "scopes": [
                 "https://www.googleapis.com/auth/calendar.events",
@@ -413,6 +413,7 @@ def _default_config() -> dict:
             "logs":     str(SCRIPT_DIR / "logs"),
             "backups":  str(SCRIPT_DIR / "backups"),
             "personas": str(SCRIPT_DIR / "personas"),
+            "google":   str(SCRIPT_DIR / "google"),
         },
         "settings": {
             "idle_enabled":              False,
@@ -449,9 +450,61 @@ def save_config(cfg: dict) -> None:
 CFG = load_config()
 _early_log(f"[INIT] Config loaded — first_run={CFG.get('first_run')}, model_type={CFG.get('model',{}).get('type')}")
 
+_DEFAULT_PATHS: dict[str, Path] = {
+    "faces":    SCRIPT_DIR / "Faces",
+    "sounds":   SCRIPT_DIR / "sounds",
+    "memories": SCRIPT_DIR / "memories",
+    "sessions": SCRIPT_DIR / "sessions",
+    "sl":       SCRIPT_DIR / "sl",
+    "exports":  SCRIPT_DIR / "exports",
+    "logs":     SCRIPT_DIR / "logs",
+    "backups":  SCRIPT_DIR / "backups",
+    "personas": SCRIPT_DIR / "personas",
+    "google":   SCRIPT_DIR / "google",
+}
+
+def _normalize_config_paths() -> None:
+    """
+    Self-heal older config.json files missing required path keys.
+    Adds missing path keys and normalizes google credential/token locations,
+    then persists config.json if anything changed.
+    """
+    changed = False
+    paths = CFG.setdefault("paths", {})
+    for key, default_path in _DEFAULT_PATHS.items():
+        if not paths.get(key):
+            paths[key] = str(default_path)
+            changed = True
+
+    google_cfg = CFG.setdefault("google", {})
+    google_root = Path(paths.get("google", str(_DEFAULT_PATHS["google"])))
+    default_creds = str(google_root / "google_credentials.json")
+    default_token = str(google_root / "token.json")
+    creds_val = str(google_cfg.get("credentials", "")).strip()
+    token_val = str(google_cfg.get("token", "")).strip()
+    if (not creds_val) or ("config" in creds_val and "google_credentials.json" in creds_val):
+        google_cfg["credentials"] = default_creds
+        changed = True
+    if not token_val:
+        google_cfg["token"] = default_token
+        changed = True
+
+    if changed:
+        save_config(CFG)
+
 def cfg_path(key: str) -> Path:
-    """Convenience: get a path from CFG['paths'][key] as a Path object."""
-    return Path(CFG["paths"][key])
+    """Convenience: get a path from CFG['paths'][key] as a Path object with safe fallback defaults."""
+    paths = CFG.get("paths", {})
+    value = paths.get(key)
+    if value:
+        return Path(value)
+    fallback = _DEFAULT_PATHS.get(key)
+    if fallback:
+        paths[key] = str(fallback)
+        return fallback
+    return SCRIPT_DIR / key
+
+_normalize_config_paths()
 
 # ── COLOR CONSTANTS — MORGANNA GOTHIC PALETTE ─────────────────────────────────
 #
@@ -703,8 +756,8 @@ def bootstrap_directories() -> None:
         cfg_path("logs"),
         cfg_path("backups"),
         cfg_path("personas"),
-        Path(CFG["base_dir"]) / "config",
-        Path(CFG["base_dir"]) / "google",
+        cfg_path("google"),
+        cfg_path("google") / "exports",
     ]
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
@@ -3113,7 +3166,7 @@ class FaceTimerManager:
 
 # ── GOOGLE SERVICE CLASSES ───────────────────────────────────────────────────
 # Ported from GrimVeil deck. Handles Calendar and Drive/Docs auth + API.
-# Credentials path: cfg_path("config") / "google_credentials.json"
+# Credentials path: cfg_path("google") / "google_credentials.json"
 # Token path:       cfg_path("google") / "token.json"
 
 class GoogleCalendarService:
@@ -6826,7 +6879,7 @@ class MorgannaDeck(QMainWindow):
         # from main() after window.show() when the event loop is running.
         g_creds_path = Path(CFG.get("google", {}).get(
             "credentials",
-            str(cfg_path("config") / "google_credentials.json")
+            str(cfg_path("google") / "google_credentials.json")
         ))
         g_token_path = Path(CFG.get("google", {}).get(
             "token",
@@ -8351,13 +8404,13 @@ def main() -> None:
             "logs":     str(morganna_home / "logs"),
             "backups":  str(morganna_home / "backups"),
             "personas": str(morganna_home / "personas"),
+            "google":   str(morganna_home / "google"),
         }
         new_cfg["google"] = {
-            "credentials": str(morganna_home / "config" / "google_credentials.json"),
-            "token":       str(morganna_home / "google"  / "token.json"),
+            "credentials": str(morganna_home / "google" / "google_credentials.json"),
+            "token":       str(morganna_home / "google" / "token.json"),
             "timezone":    "America/Chicago",
             "scopes": [
-                "https://www.googleapis.com/auth/calendar",
                 "https://www.googleapis.com/auth/calendar.events",
                 "https://www.googleapis.com/auth/drive",
                 "https://www.googleapis.com/auth/documents",
