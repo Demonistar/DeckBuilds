@@ -3176,7 +3176,6 @@ class GoogleCalendarService:
         self._service = None
 
     def _persist_token(self, creds):
-        ensure_parent(self.token_path)
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
         self.token_path.write_text(creds.to_json(), encoding="utf-8")
 
@@ -3375,7 +3374,6 @@ class GoogleDocsDriveService:
             self._logger(message, level=level)
 
     def _persist_token(self, creds):
-        ensure_parent(self.token_path)
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
         self.token_path.write_text(creds.to_json(), encoding="utf-8")
 
