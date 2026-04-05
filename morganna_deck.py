@@ -7611,6 +7611,10 @@ class MorgannaDeck(QMainWindow):
             QSizePolicy.Policy.Expanding
         )
 
+        # Build DiagnosticsTab early so startup logs are safe even before
+        # the Diagnostics tab is attached to the widget.
+        self._diag_tab = DiagnosticsTab()
+
         # ── Instruments tab ────────────────────────────────────────────
         self._hw_panel = HardwarePanel()
         self._spell_tabs.addTab(self._hw_panel, "Instruments")
@@ -7661,7 +7665,6 @@ class MorgannaDeck(QMainWindow):
         self._spell_tabs.addTab(self._module_tracker, "Modules")
 
         # ── Diagnostics tab ────────────────────────────────────────────
-        self._diag_tab = DiagnosticsTab()
         self._spell_tabs.addTab(self._diag_tab, "Diagnostics")
 
         right_workspace = QWidget()
