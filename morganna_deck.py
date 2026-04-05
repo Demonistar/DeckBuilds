@@ -6900,6 +6900,12 @@ class MorgannaDeck(QMainWindow):
         self._sessions = SessionManager()
         self._lessons  = LessonsLearnedDB()
         self._tasks    = TaskManager()
+        self._records_cache: list[dict] = []
+        self._records_initialized = False
+        self._records_current_folder_id = "root"
+        self._google_inbound_timer: Optional[QTimer] = None
+        self._records_tab_index = -1
+        self._tasks_tab_index = -1
 
         # ── Google Services ────────────────────────────────────────────
         # Instantiate service wrappers up-front; auth is forced later
@@ -7258,24 +7264,24 @@ class MorgannaDeck(QMainWindow):
         self._spell_tabs.addTab(self._hw_panel, "Instruments")
 
         # ── Records tab ────────────────────────────────────────────────
-        records_placeholder = QLabel(
+        self._records_placeholder = QLabel(
             "❧ Google Drive / Docs\n\nConnect Google to\naccess your records."
         )
-        records_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        records_placeholder.setStyleSheet(
+        self._records_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._records_placeholder.setStyleSheet(
             f"color: {C_TEXT_DIM}; font-family: Georgia, serif; font-size: 11px;"
         )
-        self._spell_tabs.addTab(records_placeholder, "Records")
+        self._records_tab_index = self._spell_tabs.addTab(self._records_placeholder, "Records")
 
         # ── Tasks tab ─────────────────────────────────────────────────
-        tasks_placeholder = QLabel(
+        self._tasks_placeholder = QLabel(
             "❧ Task Registry\n\nTasks and reminders\nwill appear here."
         )
-        tasks_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        tasks_placeholder.setStyleSheet(
+        self._tasks_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._tasks_placeholder.setStyleSheet(
             f"color: {C_TEXT_DIM}; font-family: Georgia, serif; font-size: 11px;"
         )
-        self._spell_tabs.addTab(tasks_placeholder, "Tasks")
+        self._tasks_tab_index = self._spell_tabs.addTab(self._tasks_placeholder, "Tasks")
 
         # ── SL Scans tab ───────────────────────────────────────────────
         self._sl_scans = SLScansTab(cfg_path("sl"))
@@ -7510,22 +7516,254 @@ class MorgannaDeck(QMainWindow):
                 "INFO"
             )
 
-            cal_linked = self._gcal._build_service()
-            if cal_linked:
-                self._diag_tab.log(
-                    "[GOOGLE][STARTUP] Calendar auth ready. OAuth completed and token saved.",
-                    "OK"
-                )
-            else:
-                self._diag_tab.log(
-                    "[GOOGLE][STARTUP] Calendar auth ready.",
-                    "OK"
-                )
+            self._gcal._build_service()
+            self._diag_tab.log("[GOOGLE][STARTUP] Calendar auth ready.", "OK")
 
             self._gdrive.ensure_services()
             self._diag_tab.log("[GOOGLE][STARTUP] Drive/Docs auth ready.", "OK")
+
+            self._diag_tab.log("[GOOGLE][STARTUP] Records refresh triggered after auth.", "INFO")
+            self._refresh_records_docs()
+
+            self._diag_tab.log("[GOOGLE][STARTUP] Initial calendar inbound sync triggered after auth.", "INFO")
+            imported_count = self._poll_google_calendar_inbound_sync(force_once=True)
+            self._diag_tab.log(
+                f"[GOOGLE][STARTUP] Imported {int(imported_count)} Google event(s) into local tasks.",
+                "INFO"
+            )
+
+            self._start_google_inbound_timer_if_enabled()
         except Exception as ex:
             self._diag_tab.log(f"[GOOGLE][STARTUP][ERROR] {ex}", "ERROR")
+
+
+    def _ensure_records_tab_ui(self) -> None:
+        if getattr(self, "_records_tab_widget", None) is not None:
+            return
+        tab = QWidget()
+        root = QVBoxLayout(tab)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(4)
+
+        self._records_status_label = QLabel("Records are not loaded yet.")
+        self._records_status_label.setStyleSheet(
+            f"color: {C_TEXT_DIM}; font-family: Georgia, serif; font-size: 10px;"
+        )
+        root.addWidget(self._records_status_label)
+
+        self._records_path_label = QLabel("Path: My Drive")
+        self._records_path_label.setStyleSheet(
+            f"color: {C_GOLD_DIM}; font-family: Georgia, serif; font-size: 10px;"
+        )
+        root.addWidget(self._records_path_label)
+
+        self._records_list = QListWidget()
+        self._records_list.setStyleSheet(
+            f"background: {C_BG2}; color: {C_GOLD}; border: 1px solid {C_BORDER};"
+        )
+        root.addWidget(self._records_list, 1)
+
+        self._records_tab_widget = tab
+        if 0 <= self._records_tab_index < self._spell_tabs.count():
+            self._spell_tabs.removeTab(self._records_tab_index)
+            self._spell_tabs.insertTab(self._records_tab_index, tab, "Records")
+
+    def _ensure_tasks_tab_ui(self) -> None:
+        if getattr(self, "_tasks_tab_widget", None) is not None:
+            return
+        tab = QWidget()
+        root = QVBoxLayout(tab)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(4)
+
+        self._tasks_status_label = QLabel("Task registry is not loaded yet.")
+        self._tasks_status_label.setStyleSheet(
+            f"color: {C_TEXT_DIM}; font-family: Georgia, serif; font-size: 10px;"
+        )
+        root.addWidget(self._tasks_status_label)
+
+        self._tasks_list = QListWidget()
+        self._tasks_list.setStyleSheet(
+            f"background: {C_BG2}; color: {C_GOLD}; border: 1px solid {C_BORDER};"
+        )
+        root.addWidget(self._tasks_list, 1)
+
+        self._tasks_tab_widget = tab
+        if 0 <= self._tasks_tab_index < self._spell_tabs.count():
+            self._spell_tabs.removeTab(self._tasks_tab_index)
+            self._spell_tabs.insertTab(self._tasks_tab_index, tab, "Tasks")
+
+    def _refresh_records_docs(self) -> None:
+        self._ensure_records_tab_ui()
+        self._records_current_folder_id = "root"
+        self._records_status_label.setText("Loading Google Drive records...")
+        self._records_path_label.setText("Path: My Drive")
+        files = self._gdrive.list_folder_items(folder_id=self._records_current_folder_id, page_size=200)
+        self._records_cache = files
+        self._records_initialized = True
+        self._records_list.clear()
+        for file_info in files:
+            title = (file_info.get("name") or "Untitled").strip() or "Untitled"
+            mime = (file_info.get("mimeType") or "").strip()
+            if mime == "application/vnd.google-apps.folder":
+                prefix = "📁"
+            elif mime == "application/vnd.google-apps.document":
+                prefix = "📝"
+            else:
+                prefix = "📄"
+            modified = (file_info.get("modifiedTime") or "").replace("T", " ").replace("Z", " UTC")
+            text = f"{prefix} {title}" + (f"    [{modified}]" if modified else "")
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, file_info)
+            self._records_list.addItem(item)
+        self._records_status_label.setText(f"Loaded {len(files)} Google Drive item(s).")
+
+    def _google_event_due_datetime(self, event: dict):
+        start = (event or {}).get("start") or {}
+        date_time = start.get("dateTime")
+        if date_time:
+            parsed = parse_iso_for_compare(date_time, context="google_event_dateTime")
+            if parsed:
+                return parsed
+        date_only = start.get("date")
+        if date_only:
+            parsed = parse_iso_for_compare(f"{date_only}T09:00:00", context="google_event_date")
+            if parsed:
+                return parsed
+        return None
+
+    def _refresh_task_registry_panel(self) -> None:
+        self._ensure_tasks_tab_ui()
+        tasks = self._tasks.load_all()
+        self._tasks_list.clear()
+        for task in sorted(tasks, key=lambda t: t.get("due_at") or ""):
+            text = (task.get("text") or "Reminder").strip() or "Reminder"
+            due = (task.get("due_at") or "").replace("T", " ")
+            status = (task.get("status") or "pending").lower()
+            source = (task.get("source") or "local").lower()
+            icon = "☑" if status in {"completed", "cancelled"} else "•"
+            row = QListWidgetItem(f"{icon} {text}  [{due}]  ({status}/{source})")
+            row.setData(Qt.ItemDataRole.UserRole, task)
+            self._tasks_list.addItem(row)
+        self._tasks_status_label.setText(f"Loaded {len(tasks)} task(s).")
+
+    def _start_google_inbound_timer_if_enabled(self) -> None:
+        enabled = bool(CFG.get("settings", {}).get("google_sync_enabled", True))
+        interval_ms = int(CFG.get("settings", {}).get("google_inbound_interval_ms", 300000))
+        interval_ms = max(10000, interval_ms)
+        if self._google_inbound_timer is None:
+            self._google_inbound_timer = QTimer(self)
+            self._google_inbound_timer.timeout.connect(self._poll_google_calendar_inbound_sync)
+        if enabled and not self._google_inbound_timer.isActive():
+            self._google_inbound_timer.start(interval_ms)
+            self._diag_tab.log(f"[GOOGLE][SYNC] Repeating inbound sync timer enabled ({interval_ms} ms).", "INFO")
+        elif not enabled and self._google_inbound_timer.isActive():
+            self._google_inbound_timer.stop()
+            self._diag_tab.log("[GOOGLE][SYNC] Repeating inbound sync timer disabled by config.", "INFO")
+
+    def _poll_google_calendar_inbound_sync(self, force_once: bool = False):
+        if not force_once and not bool(CFG.get("settings", {}).get("google_sync_enabled", True)):
+            return 0
+        now_utc = datetime.utcnow().replace(microsecond=0)
+        time_min = (now_utc - timedelta(days=60)).isoformat() + "Z"
+        remote_events = self._gcal.list_primary_events(time_min=time_min, max_results=2500)
+
+        tasks = self._tasks.load_all()
+        tasks_by_event_id = {}
+        for task in tasks:
+            event_id = (task.get("google_event_id") or "").strip()
+            if event_id:
+                tasks_by_event_id[event_id] = task
+
+        remote_by_id = {}
+        for event in remote_events:
+            event_id = (event.get("id") or "").strip()
+            if event_id:
+                remote_by_id[event_id] = event
+
+        changed = False
+        imported_count = 0
+        now_iso = local_now_iso()
+
+        for task in tasks:
+            event_id = (task.get("google_event_id") or "").strip()
+            if not event_id:
+                continue
+            status = (task.get("status") or "pending").lower()
+            if status in {"completed", "cancelled"}:
+                continue
+            remote_event = remote_by_id.get(event_id)
+            if remote_event is None:
+                remote_event = self._gcal.get_event(event_id)
+                if remote_event is not None:
+                    remote_by_id[event_id] = remote_event
+            if remote_event is None:
+                task["status"] = "cancelled"
+                task["acknowledged_at"] = task.get("acknowledged_at") or now_iso
+                task["cancelled_at"] = now_iso
+                task["sync_status"] = "deleted_remote"
+                task["last_synced_at"] = now_iso
+                task.setdefault("metadata", {})
+                task["metadata"]["google_deleted_remote"] = now_iso
+                changed = True
+                continue
+            remote_summary = (remote_event.get("summary") or "Reminder").strip() or "Reminder"
+            remote_due = self._google_event_due_datetime(remote_event)
+            remote_due_iso = remote_due.isoformat(timespec="seconds") if remote_due else None
+            current_due = task.get("due_at") or task.get("due")
+            current_due_dt = parse_iso_for_compare(current_due, context="google_inbound_current_due")
+            task_changed = False
+            if (task.get("text") or "").strip() != remote_summary:
+                task["text"] = remote_summary
+                task_changed = True
+            if remote_due_iso and (current_due_dt is None or current_due_dt != remote_due):
+                task["due_at"] = remote_due_iso
+                task["pre_trigger"] = (remote_due - timedelta(minutes=1)).isoformat(timespec="seconds")
+                task_changed = True
+            if task.get("sync_status") != "synced":
+                task["sync_status"] = "synced"
+                task_changed = True
+            if task_changed:
+                task["last_synced_at"] = now_iso
+                changed = True
+
+        for event_id, event in remote_by_id.items():
+            if event_id in tasks_by_event_id:
+                continue
+            due_at = self._google_event_due_datetime(event)
+            if not due_at:
+                continue
+            summary = (event.get("summary") or "Google Calendar Event").strip() or "Google Calendar Event"
+            imported_task = {
+                "id": f"task_{uuid.uuid4().hex[:10]}",
+                "created_at": now_iso,
+                "due_at": due_at.isoformat(timespec="seconds"),
+                "pre_trigger": (due_at - timedelta(minutes=1)).isoformat(timespec="seconds"),
+                "text": summary,
+                "status": "pending",
+                "acknowledged_at": None,
+                "retry_count": 0,
+                "last_triggered_at": None,
+                "next_retry_at": None,
+                "pre_announced": False,
+                "source": "google",
+                "google_event_id": event_id,
+                "sync_status": "synced",
+                "last_synced_at": now_iso,
+                "metadata": {
+                    "google_imported_at": now_iso,
+                    "google_updated": event.get("updated"),
+                },
+            }
+            tasks.append(imported_task)
+            tasks_by_event_id[event_id] = imported_task
+            imported_count += 1
+            changed = True
+
+        if changed:
+            self._tasks.save_all(tasks)
+        self._refresh_task_registry_panel()
+        return imported_count
 
     def _measure_vram_baseline(self) -> None:
         if NVML_OK and gpu_handle:
