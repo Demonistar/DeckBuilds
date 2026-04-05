@@ -7390,7 +7390,6 @@ class MorgannaDeck(QMainWindow):
 
         # Calculate elapsed time
         try:
-            from datetime import timezone
             shutdown_dt = datetime.fromisoformat(last_shutdown)
             now_dt = datetime.now()
             # Make both naive for comparison
@@ -7430,19 +7429,27 @@ class MorgannaDeck(QMainWindow):
             f"[WAKEUP] Injecting wake-up context ({elapsed_str} elapsed)", "INFO"
         )
 
-        history = self._sessions.get_history()
-        self._wakeup_worker = OllamaWorker(
-            self._adaptor, SYSTEM_PROMPT_BASE, history, wakeup_prompt
-        )
-        self._first_token = True
-        self._wakeup_worker.token_ready.connect(self._on_token)
-        self._wakeup_worker.finished.connect(
-            lambda: self._on_response_done(
-                self._chat_display.toPlainText().split("MORGANNA ❧")[-1].strip()
+        try:
+            history = self._sessions.get_history()
+            history.append({"role": "user", "content": wakeup_prompt})
+            worker = StreamingWorker(
+                self._adaptor, SYSTEM_PROMPT_BASE, history, max_tokens=256
             )
-        )
-        self._wakeup_worker.finished.connect(self._wakeup_worker.deleteLater)
-        self._wakeup_worker.start()
+            self._wakeup_worker = worker
+            self._first_token = True
+            worker.token_ready.connect(self._on_token)
+            worker.response_done.connect(self._on_response_done)
+            worker.error_occurred.connect(
+                lambda e: self._diag_tab.log(f"[WAKEUP][ERROR] {e}", "WARN")
+            )
+            worker.status_changed.connect(self._set_status)
+            worker.finished.connect(worker.deleteLater)
+            worker.start()
+        except Exception as e:
+            self._diag_tab.log(
+                f"[WAKEUP][WARN] Wake-up prompt skipped due to error: {e}",
+                "WARN"
+            )
 
     def _startup_google_auth(self) -> None:
         """
@@ -8260,30 +8267,40 @@ class MorgannaDeck(QMainWindow):
         self._shutdown_farewell_text = ""
 
         try:
-            worker = OllamaWorker(
-                self._adaptor, SYSTEM_PROMPT_BASE,
-                self._sessions.get_history(), farewell_prompt
+            history = self._sessions.get_history()
+            history.append({"role": "user", "content": farewell_prompt})
+            worker = StreamingWorker(
+                self._adaptor, SYSTEM_PROMPT_BASE, history, max_tokens=256
             )
             self._shutdown_worker = worker
+            self._first_token = True
 
-            def _on_token(t: str) -> None:
-                self._shutdown_farewell_text += t
-                if t:
-                    self._append_chat("MORGANNA", t)
-
-            def _on_done() -> None:
+            def _on_done(response: str) -> None:
+                self._shutdown_farewell_text = response
+                self._on_response_done(response)
                 # Small delay to let the text render, then shutdown
                 QTimer.singleShot(2000, lambda: self._do_shutdown(None))
 
-            worker.token_ready.connect(_on_token)
-            worker.finished.connect(_on_done)
+            def _on_error(error: str) -> None:
+                self._diag_tab.log(f"[SHUTDOWN][WARN] Last words failed: {error}", "WARN")
+                self._do_shutdown(None)
+
+            worker.token_ready.connect(self._on_token)
+            worker.response_done.connect(_on_done)
+            worker.error_occurred.connect(_on_error)
+            worker.status_changed.connect(self._set_status)
+            worker.finished.connect(worker.deleteLater)
             worker.start()
 
             # Safety timeout — if AI doesn't respond in 15s, shut down anyway
             QTimer.singleShot(15000, lambda: self._do_shutdown(None)
                               if getattr(self, '_shutdown_in_progress', False) else None)
 
-        except Exception:
+        except Exception as e:
+            self._diag_tab.log(
+                f"[SHUTDOWN][WARN] Last words skipped due to error: {e}",
+                "WARN"
+            )
             # If anything fails, just shut down
             self._do_shutdown(None)
 
