@@ -876,6 +876,43 @@ def parse_iso(value: str) -> Optional[datetime]:
     except Exception:
         return None
 
+_DATETIME_NORMALIZATION_LOGGED: set[tuple] = set()
+
+
+def _local_tzinfo():
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
+def normalize_datetime_for_compare(dt_value, context: str = ""):
+    if dt_value is None:
+        return None
+    if not isinstance(dt_value, datetime):
+        return None
+    local_tz = _local_tzinfo()
+    if dt_value.tzinfo is None:
+        normalized = dt_value.replace(tzinfo=local_tz)
+        key = ("naive", context)
+        if key not in _DATETIME_NORMALIZATION_LOGGED:
+            _early_log(
+                f"[DATETIME][INFO] Normalized naive datetime to local timezone for {context or 'general'} comparisons."
+            )
+            _DATETIME_NORMALIZATION_LOGGED.add(key)
+        return normalized
+    normalized = dt_value.astimezone(local_tz)
+    dt_tz_name = str(dt_value.tzinfo)
+    key = ("aware", context, dt_tz_name)
+    if key not in _DATETIME_NORMALIZATION_LOGGED and dt_tz_name not in {"UTC", str(local_tz)}:
+        _early_log(
+            f"[DATETIME][INFO] Normalized timezone-aware datetime from {dt_tz_name} to local timezone for {context or 'general'} comparisons."
+        )
+        _DATETIME_NORMALIZATION_LOGGED.add(key)
+    return normalized
+
+
+def parse_iso_for_compare(value, context: str = ""):
+    return normalize_datetime_for_compare(parse_iso(value), context=context)
+
+
 def format_duration(seconds: float) -> str:
     total = max(0, int(seconds))
     days, rem = divmod(total, 86400)
@@ -7984,6 +8021,8 @@ class MorgannaDeck(QMainWindow):
         if getattr(self, "_tasks_tab", None) is None:
             return
         self._tasks_tab.refresh()
+        visible_count = len(self._filtered_tasks_for_registry())
+        self._diag_tab.log(f"[TASKS][REGISTRY] refresh count={visible_count}.", "INFO")
 
     def _on_task_filter_changed(self, filter_key: str) -> None:
         self._task_date_filter = str(filter_key or "next_3_months")
@@ -8082,7 +8121,13 @@ class MorgannaDeck(QMainWindow):
             parsed = datetime.strptime(f"{date_text} {hour:02d}:{minute:02d}", "%Y-%m-%d %H:%M")
         else:
             parsed = datetime.strptime(f"{date_text} {time_text}", "%Y-%m-%d %H:%M")
-        return normalize_datetime_for_compare(parsed, context="task_editor_parse_dt")
+        normalized = normalize_datetime_for_compare(parsed, context="task_editor_parse_dt")
+        self._diag_tab.log(
+            f"[TASKS][EDITOR] parsed datetime is_end={is_end}, all_day={all_day}: "
+            f"input='{date_text} {time_text}' -> {normalized.isoformat() if normalized else 'None'}",
+            "INFO",
+        )
+        return normalized
 
     def _save_task_editor_google_first(self) -> None:
         tab = getattr(self, "_tasks_tab", None)
@@ -8132,6 +8177,7 @@ class MorgannaDeck(QMainWindow):
             rule = recurrence if recurrence.upper().startswith("RRULE:") else f"RRULE:{recurrence}"
             payload["recurrence"] = [rule]
 
+        self._diag_tab.log(f"[TASKS][EDITOR] Google save start for title='{title}'.", "INFO")
         try:
             event_id, _ = self._gcal.create_event_with_payload(payload, calendar_id="primary")
             tasks = self._tasks.load_all()
@@ -8164,11 +8210,18 @@ class MorgannaDeck(QMainWindow):
             tasks.append(task)
             self._tasks.save_all(tasks)
             self._set_task_editor_status("Google sync succeeded and task registry updated.", ok=True)
-            self._close_task_editor_workspace()
             self._refresh_task_registry_panel()
+            self._diag_tab.log(
+                f"[TASKS][EDITOR] Google save success for title='{title}', event_id={event_id}.",
+                "OK",
+            )
+            self._close_task_editor_workspace()
         except Exception as ex:
             self._set_task_editor_status(f"Google save failed: {ex}", ok=False)
-            self._diag_tab.log(f"[TASKS][ERROR] Google-first save failed: {ex}", "ERROR")
+            self._diag_tab.log(
+                f"[TASKS][EDITOR][ERROR] Google save failure for title='{title}': {ex}",
+                "ERROR",
+            )
             self._close_task_editor_workspace()
 
     def _insert_calendar_date(self, qdate: QDate) -> None:
@@ -8221,114 +8274,129 @@ class MorgannaDeck(QMainWindow):
     def _poll_google_calendar_inbound_sync(self, force_once: bool = False):
         if not force_once and not bool(CFG.get("settings", {}).get("google_sync_enabled", True)):
             return 0
-        now_utc = datetime.utcnow().replace(microsecond=0)
-        time_min = (now_utc - timedelta(days=60)).isoformat() + "Z"
-        remote_events = self._gcal.list_primary_events(time_min=time_min, max_results=2500)
-
-        tasks = self._tasks.load_all()
-        tasks_by_event_id = {}
-        for task in tasks:
-            event_id = (task.get("google_event_id") or "").strip()
-            if event_id:
-                tasks_by_event_id[event_id] = task
-
-        remote_by_id = {}
-        for event in remote_events:
-            event_id = (event.get("id") or "").strip()
-            if event_id:
-                remote_by_id[event_id] = event
-
-        changed = False
-        imported_count = 0
-        now_iso = local_now_iso()
-
-        for task in tasks:
-            event_id = (task.get("google_event_id") or "").strip()
-            if not event_id:
-                continue
-            status = (task.get("status") or "pending").lower()
-            if status in {"completed", "cancelled"}:
-                continue
-            remote_event = remote_by_id.get(event_id)
-            if remote_event is None:
-                remote_event = self._gcal.get_event(event_id)
-                if remote_event is not None:
-                    remote_by_id[event_id] = remote_event
-            if remote_event is None:
-                task["status"] = "cancelled"
-                task["acknowledged_at"] = task.get("acknowledged_at") or now_iso
-                task["cancelled_at"] = now_iso
-                task["sync_status"] = "deleted_remote"
-                task["last_synced_at"] = now_iso
-                task.setdefault("metadata", {})
-                task["metadata"]["google_deleted_remote"] = now_iso
-                changed = True
-                continue
-            remote_summary = (remote_event.get("summary") or "Reminder").strip() or "Reminder"
-            remote_due = self._google_event_due_datetime(remote_event)
-            remote_due_iso = remote_due.isoformat(timespec="seconds") if remote_due else None
-            current_due = task.get("due_at") or task.get("due")
-            current_due_dt = parse_iso_for_compare(current_due, context="google_inbound_current_due")
-            task_changed = False
-            if (task.get("text") or "").strip() != remote_summary:
-                task["text"] = remote_summary
-                task_changed = True
-            if remote_due_iso and (current_due_dt is None or current_due_dt != remote_due):
-                task["due_at"] = remote_due_iso
-                task["pre_trigger"] = (remote_due - timedelta(minutes=1)).isoformat(timespec="seconds")
-                task_changed = True
-            if task.get("sync_status") != "synced":
-                task["sync_status"] = "synced"
-                task_changed = True
-            if task_changed:
-                task["last_synced_at"] = now_iso
-                changed = True
-
-        for event_id, event in remote_by_id.items():
-            if event_id in tasks_by_event_id:
-                continue
-            due_at = self._google_event_due_datetime(event)
-            if not due_at:
-                continue
-            summary = (event.get("summary") or "Google Calendar Event").strip() or "Google Calendar Event"
-            imported_task = {
-                "id": f"task_{uuid.uuid4().hex[:10]}",
-                "created_at": now_iso,
-                "due_at": due_at.isoformat(timespec="seconds"),
-                "pre_trigger": (due_at - timedelta(minutes=1)).isoformat(timespec="seconds"),
-                "text": summary,
-                "status": "pending",
-                "acknowledged_at": None,
-                "retry_count": 0,
-                "last_triggered_at": None,
-                "next_retry_at": None,
-                "pre_announced": False,
-                "source": "google",
-                "google_event_id": event_id,
-                "sync_status": "synced",
-                "last_synced_at": now_iso,
-                "metadata": {
-                    "google_imported_at": now_iso,
-                    "google_updated": event.get("updated"),
-                },
-            }
-            tasks.append(imported_task)
-            tasks_by_event_id[event_id] = imported_task
-            imported_count += 1
-            changed = True
-
-        if changed:
-            self._tasks.save_all(tasks)
-        self._refresh_task_registry_panel()
-        if getattr(self, "_tasks_tab", None) is not None:
-            self._tasks_tab.refresh()
-            self._diag_tab.log("[GOOGLE][SYNC] TasksTab refresh triggered.", "INFO")
-        if hasattr(self, "_diag_tab") and self._diag_tab is not None:
+        self._diag_tab.log("[GOOGLE][SYNC] Google inbound sync start.", "INFO")
+        try:
+            now_utc = datetime.utcnow().replace(microsecond=0)
+            lookback_days = int(CFG.get("settings", {}).get("google_lookback_days", 60))
+            time_min = (now_utc - timedelta(days=max(1, lookback_days))).isoformat() + "Z"
+            remote_events = self._gcal.list_primary_events(time_min=time_min, max_results=2500)
             self._diag_tab.log(
-                f"[GOOGLE][SYNC] Google Calendar task import count: {int(imported_count)} (changed={changed}).",
-                "INFO"
+                f"[GOOGLE][SYNC] fetched {len(remote_events)} event(s) from primary calendar.",
+                "INFO",
             )
-        return imported_count
+
+            tasks = self._tasks.load_all()
+            tasks_by_event_id = {}
+            for task in tasks:
+                event_id = (task.get("google_event_id") or "").strip()
+                if event_id:
+                    tasks_by_event_id[event_id] = task
+
+            remote_by_id = {}
+            for event in remote_events:
+                event_id = (event.get("id") or "").strip()
+                if event_id:
+                    remote_by_id[event_id] = event
+
+            updated_count = 0
+            removed_count = 0
+            imported_count = 0
+            changed = False
+            now_iso = local_now_iso()
+
+            for task in tasks:
+                event_id = (task.get("google_event_id") or "").strip()
+                if not event_id:
+                    continue
+                status = (task.get("status") or "pending").lower()
+                if status in {"completed", "cancelled"}:
+                    continue
+
+                remote_event = remote_by_id.get(event_id)
+                if remote_event is None:
+                    remote_event = self._gcal.get_event(event_id)
+                    if remote_event is not None:
+                        remote_by_id[event_id] = remote_event
+
+                if remote_event is None:
+                    task["status"] = "cancelled"
+                    task["acknowledged_at"] = task.get("acknowledged_at") or now_iso
+                    task["cancelled_at"] = now_iso
+                    task["sync_status"] = "deleted_remote"
+                    task["last_synced_at"] = now_iso
+                    task.setdefault("metadata", {})
+                    task["metadata"]["google_deleted_remote"] = now_iso
+                    removed_count += 1
+                    changed = True
+                    continue
+
+                remote_summary = (remote_event.get("summary") or "Reminder").strip() or "Reminder"
+                remote_due = self._google_event_due_datetime(remote_event)
+                remote_due_iso = remote_due.isoformat(timespec="seconds") if remote_due else None
+                current_due = task.get("due_at") or task.get("due")
+                current_due_dt = parse_iso_for_compare(current_due, context="google_inbound_current_due")
+                task_changed = False
+                if (task.get("text") or "").strip() != remote_summary:
+                    task["text"] = remote_summary
+                    task_changed = True
+                if remote_due_iso and (current_due_dt is None or current_due_dt != remote_due):
+                    task["due_at"] = remote_due_iso
+                    task["pre_trigger"] = (remote_due - timedelta(minutes=1)).isoformat(timespec="seconds")
+                    task_changed = True
+                if task.get("sync_status") != "synced":
+                    task["sync_status"] = "synced"
+                    task_changed = True
+                if task_changed:
+                    task["last_synced_at"] = now_iso
+                    updated_count += 1
+                    changed = True
+
+            for event_id, event in remote_by_id.items():
+                if event_id in tasks_by_event_id:
+                    continue
+                due_at = self._google_event_due_datetime(event)
+                if not due_at:
+                    continue
+                summary = (event.get("summary") or "Google Calendar Event").strip() or "Google Calendar Event"
+                imported_task = {
+                    "id": f"task_{uuid.uuid4().hex[:10]}",
+                    "created_at": now_iso,
+                    "due_at": due_at.isoformat(timespec="seconds"),
+                    "pre_trigger": (due_at - timedelta(minutes=1)).isoformat(timespec="seconds"),
+                    "text": summary,
+                    "status": "pending",
+                    "acknowledged_at": None,
+                    "retry_count": 0,
+                    "last_triggered_at": None,
+                    "next_retry_at": None,
+                    "pre_announced": False,
+                    "source": "google",
+                    "google_event_id": event_id,
+                    "sync_status": "synced",
+                    "last_synced_at": now_iso,
+                    "metadata": {
+                        "google_imported_at": now_iso,
+                        "google_updated": event.get("updated"),
+                    },
+                }
+                tasks.append(imported_task)
+                tasks_by_event_id[event_id] = imported_task
+                imported_count += 1
+                changed = True
+
+            if changed:
+                self._tasks.save_all(tasks)
+                self._refresh_task_registry_panel()
+            else:
+                self._refresh_task_registry_panel()
+
+            self._diag_tab.log(f"[GOOGLE][SYNC] imported Google event count: {imported_count}.", "INFO")
+            self._diag_tab.log(f"[GOOGLE][SYNC] updated Google event count: {updated_count}.", "INFO")
+            self._diag_tab.log(f"[GOOGLE][SYNC] removed/deactivated missing remote count: {removed_count}.", "INFO")
+            return imported_count
+        except Exception as ex:
+            self._diag_tab.log(f"[GOOGLE][SYNC][ERROR] inbound sync failed: {ex}", "ERROR")
+            return 0
 
     def _measure_vram_baseline(self) -> None:
         if NVML_OK and gpu_handle:
