@@ -2057,6 +2057,95 @@ class VampireStateStrip(QWidget):
         p.end()
 
 
+class MiniCalendarWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        self.prev_btn = QPushButton("<<")
+        self.next_btn = QPushButton(">>")
+        self.month_lbl = QLabel("")
+        self.month_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        for btn in (self.prev_btn, self.next_btn):
+            btn.setFixedWidth(34)
+            btn.setStyleSheet(
+                f"background: {C_BG3}; color: {C_GOLD}; border: 1px solid {C_CRIMSON_DIM}; "
+                f"font-size: 10px; font-weight: bold; padding: 2px;"
+            )
+        self.month_lbl.setStyleSheet(
+            f"color: {C_GOLD}; border: none; font-size: 10px; font-weight: bold;"
+        )
+        header.addWidget(self.prev_btn)
+        header.addWidget(self.month_lbl, 1)
+        header.addWidget(self.next_btn)
+        layout.addLayout(header)
+
+        self.calendar = QCalendarWidget()
+        self.calendar.setGridVisible(True)
+        self.calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+        self.calendar.setNavigationBarVisible(False)
+        self.calendar.setStyleSheet(
+            f"QCalendarWidget QWidget{{alternate-background-color:{C_BG2};}} "
+            f"QToolButton{{color:{C_GOLD};}} "
+            f"QCalendarWidget QAbstractItemView:enabled{{background:{C_BG2}; color:#ffffff; "
+            f"selection-background-color:{C_CRIMSON_DIM}; selection-color:{C_TEXT}; gridline-color:{C_BORDER};}} "
+            f"QCalendarWidget QAbstractItemView:disabled{{color:#8b95a1;}}"
+        )
+        layout.addWidget(self.calendar)
+
+        self.prev_btn.clicked.connect(lambda: self.calendar.showPreviousMonth())
+        self.next_btn.clicked.connect(lambda: self.calendar.showNextMonth())
+        self.calendar.currentPageChanged.connect(self._update_label)
+        self._update_label()
+        self._apply_formats()
+
+    def _update_label(self, *args):
+        year = self.calendar.yearShown()
+        month = self.calendar.monthShown()
+        self.month_lbl.setText(f"{date(year, month, 1).strftime('%B %Y')}")
+        self._apply_formats()
+
+    def _apply_formats(self):
+        base = QTextCharFormat()
+        base.setForeground(QColor("#e7edf3"))
+        saturday = QTextCharFormat()
+        saturday.setForeground(QColor(C_GOLD_DIM))
+        sunday = QTextCharFormat()
+        sunday.setForeground(QColor(C_BLOOD))
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Monday, base)
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Tuesday, base)
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Wednesday, base)
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Thursday, base)
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Friday, base)
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Saturday, saturday)
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Sunday, sunday)
+
+        year = self.calendar.yearShown()
+        month = self.calendar.monthShown()
+        first_day = QDate(year, month, 1)
+        for day in range(1, first_day.daysInMonth() + 1):
+            d = QDate(year, month, day)
+            fmt = QTextCharFormat()
+            weekday = d.dayOfWeek()
+            if weekday == Qt.DayOfWeek.Saturday.value:
+                fmt.setForeground(QColor(C_GOLD_DIM))
+            elif weekday == Qt.DayOfWeek.Sunday.value:
+                fmt.setForeground(QColor(C_BLOOD))
+            else:
+                fmt.setForeground(QColor("#e7edf3"))
+            self.calendar.setDateTextFormat(d, fmt)
+
+        today_fmt = QTextCharFormat()
+        today_fmt.setForeground(QColor("#68d39a"))
+        today_fmt.setBackground(QColor("#163825"))
+        today_fmt.setFontWeight(QFont.Weight.Bold)
+        self.calendar.setDateTextFormat(QDate.currentDate(), today_fmt)
+
+
 # ── COLLAPSIBLE BLOCK ─────────────────────────────────────────────────────────
 class CollapsibleBlock(QWidget):
     """
@@ -7311,7 +7400,37 @@ class MorgannaDeck(QMainWindow):
         self._diag_tab = DiagnosticsTab()
         self._spell_tabs.addTab(self._diag_tab, "Diagnostics")
 
-        layout.addWidget(self._spell_tabs, 1)
+        right_workspace = QWidget()
+        right_workspace_layout = QVBoxLayout(right_workspace)
+        right_workspace_layout.setContentsMargins(0, 0, 0, 0)
+        right_workspace_layout.setSpacing(4)
+
+        right_workspace_layout.addWidget(self._spell_tabs, 1)
+
+        calendar_label = QLabel("❧ CALENDAR")
+        calendar_label.setStyleSheet(
+            f"color: {C_GOLD}; font-size: 10px; letter-spacing: 2px; font-family: Georgia, serif;"
+        )
+        right_workspace_layout.addWidget(calendar_label)
+
+        self.calendar_widget = MiniCalendarWidget()
+        self.calendar_widget.setStyleSheet(
+            f"background: {C_BG2}; border: 1px solid {C_CRIMSON_DIM};"
+        )
+        self.calendar_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Maximum
+        )
+        self.calendar_widget.setMaximumHeight(260)
+        self.calendar_widget.calendar.clicked.connect(self._insert_calendar_date)
+        right_workspace_layout.addWidget(self.calendar_widget, 0)
+        right_workspace_layout.addStretch(0)
+
+        layout.addWidget(right_workspace, 1)
+        self._diag_tab.log(
+            "[LAYOUT] right-side calendar restored (persistent lower-right section).",
+            "INFO"
+        )
         return layout
 
     # ── STARTUP SEQUENCE ───────────────────────────────────────────────────────
@@ -7525,10 +7644,13 @@ class MorgannaDeck(QMainWindow):
             self._diag_tab.log("[GOOGLE][STARTUP] Records refresh triggered after auth.", "INFO")
             self._refresh_records_docs()
 
+            self._diag_tab.log("[GOOGLE][STARTUP] Post-auth task refresh triggered.", "INFO")
+            self._refresh_task_registry_panel()
+
             self._diag_tab.log("[GOOGLE][STARTUP] Initial calendar inbound sync triggered after auth.", "INFO")
             imported_count = self._poll_google_calendar_inbound_sync(force_once=True)
             self._diag_tab.log(
-                f"[GOOGLE][STARTUP] Imported {int(imported_count)} Google event(s) into local tasks.",
+                f"[GOOGLE][STARTUP] Google Calendar task import count: {int(imported_count)}.",
                 "INFO"
             )
 
@@ -7647,6 +7769,39 @@ class MorgannaDeck(QMainWindow):
             self._tasks_list.addItem(row)
         self._tasks_status_label.setText(f"Loaded {len(tasks)} task(s).")
 
+    def _insert_calendar_date(self, qdate: QDate) -> None:
+        date_text = qdate.toString("yyyy-MM-dd")
+        routed_target = "none"
+
+        focus_widget = QApplication.focusWidget()
+        direct_targets = [
+            ("task_editor_start_date", getattr(self, "task_editor_start_date", None)),
+            ("task_editor_end_date", getattr(self, "task_editor_end_date", None)),
+        ]
+        for name, widget in direct_targets:
+            if widget is not None and focus_widget is widget:
+                widget.setText(date_text)
+                routed_target = name
+                break
+
+        if routed_target == "none":
+            if hasattr(self, "_input_field") and self._input_field is not None:
+                if focus_widget is self._input_field:
+                    self._input_field.insert(date_text)
+                    routed_target = "input_field_insert"
+                else:
+                    self._input_field.setText(date_text)
+                    routed_target = "input_field_set"
+
+        if hasattr(self, "_tasks_status_label") and self._tasks_status_label is not None:
+            self._tasks_status_label.setText(f"Calendar date selected: {date_text}")
+
+        if hasattr(self, "_diag_tab") and self._diag_tab is not None:
+            self._diag_tab.log(
+                f"[CALENDAR] mini calendar click routed: date={date_text}, target={routed_target}.",
+                "INFO"
+            )
+
     def _start_google_inbound_timer_if_enabled(self) -> None:
         enabled = bool(CFG.get("settings", {}).get("google_sync_enabled", True))
         interval_ms = int(CFG.get("settings", {}).get("google_inbound_interval_ms", 300000))
@@ -7763,6 +7918,11 @@ class MorgannaDeck(QMainWindow):
         if changed:
             self._tasks.save_all(tasks)
         self._refresh_task_registry_panel()
+        if hasattr(self, "_diag_tab") and self._diag_tab is not None:
+            self._diag_tab.log(
+                f"[GOOGLE][SYNC] Google Calendar task import count: {int(imported_count)} (changed={changed}).",
+                "INFO"
+            )
         return imported_count
 
     def _measure_vram_baseline(self) -> None:
