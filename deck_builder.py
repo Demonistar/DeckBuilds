@@ -50,7 +50,7 @@ try:
         QGridLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox,
         QRadioButton, QButtonGroup, QFileDialog, QTextEdit, QProgressBar,
         QScrollArea, QFrame, QGroupBox, QMessageBox, QTabWidget,
-        QSizePolicy, QSplitter, QToolButton
+        QSizePolicy, QSplitter, QToolButton, QSplitterHandle, QMenu
     )
     from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize
     from PySide6.QtGui import QFont, QColor, QPixmap, QIcon, QPalette
@@ -76,6 +76,7 @@ except ImportError:
 # ── BUILDER CONSTANTS ─────────────────────────────────────────────────────────
 BUILDER_VERSION = "1.0.0"
 SCRIPT_DIR      = Path(__file__).resolve().parent
+BUILDER_UI_STATE_PATH = SCRIPT_DIR / ".deck_builder_ui_state.json"
 DECK_VERSION    = "2.0.0"
 AI_STATE_KEYS   = [
     "WITCHING HOUR",
@@ -8816,6 +8817,95 @@ def primary_btn(text: str) -> QPushButton:
     return btn
 
 
+class PersistedRightSplitterHandle(QSplitterHandle):
+    """Splitter handle with right-click lock/unlock support."""
+
+    def mousePressEvent(self, event) -> None:
+        splitter = self.splitter()
+        if event.button() == Qt.MouseButton.RightButton and isinstance(splitter, PersistedRightSplitter):
+            splitter.show_handle_menu(self.mapToGlobal(event.position().toPoint()))
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.LeftButton and isinstance(splitter, PersistedRightSplitter):
+            if splitter.is_locked():
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        splitter = self.splitter()
+        if isinstance(splitter, PersistedRightSplitter) and splitter.is_locked():
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+
+class PersistedRightSplitter(QSplitter):
+    """QSplitter that persists left-pane size and lock state."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self._locked = False
+        self._loaded_left_width: Optional[int] = None
+        self._load_state()
+        self.splitterMoved.connect(self._on_splitter_moved)
+
+    def createHandle(self) -> QSplitterHandle:
+        return PersistedRightSplitterHandle(self.orientation(), self)
+
+    def is_locked(self) -> bool:
+        return self._locked
+
+    def set_locked(self, locked: bool) -> None:
+        self._locked = bool(locked)
+        self.save_state()
+
+    def show_handle_menu(self, global_pos) -> None:
+        menu = QMenu(self)
+        action_label = "Unlock" if self._locked else "Lock"
+        action = menu.addAction(action_label)
+        chosen = menu.exec(global_pos)
+        if chosen == action:
+            self.set_locked(not self._locked)
+
+    def apply_saved_position(self) -> None:
+        if self._loaded_left_width is None:
+            return
+        total = max(1, self.size().width())
+        left = max(120, min(self._loaded_left_width, total - 120))
+        self.setSizes([left, total - left])
+
+    def _on_splitter_moved(self, _pos: int, _index: int) -> None:
+        self.save_state()
+
+    def _load_state(self) -> None:
+        try:
+            if not BUILDER_UI_STATE_PATH.exists():
+                return
+            data = json.loads(BUILDER_UI_STATE_PATH.read_text(encoding="utf-8"))
+            self._loaded_left_width = int(data.get("right_splitter_left_width", 0)) or None
+            self._locked = bool(data.get("right_splitter_locked", False))
+        except Exception:
+            self._loaded_left_width = None
+            self._locked = False
+
+    def save_state(self) -> None:
+        try:
+            current_left = None
+            sizes = self.sizes()
+            if sizes:
+                current_left = sizes[0]
+            data = {}
+            if BUILDER_UI_STATE_PATH.exists():
+                data = json.loads(BUILDER_UI_STATE_PATH.read_text(encoding="utf-8"))
+            if current_left is not None:
+                data["right_splitter_left_width"] = int(current_left)
+            data["right_splitter_locked"] = self._locked
+            BUILDER_UI_STATE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+
 # ── BUILT-IN PERSONAS ─────────────────────────────────────────────────────────
 
 BUILTIN_PERSONAS: dict[str, dict] = {
@@ -9827,7 +9917,7 @@ class DeckBuilderDialog(QDialog):
         root.addWidget(h_divider())
 
         # ── Splitter: left (config) | right (modules) ─────────────────
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter = PersistedRightSplitter(self)
         splitter.setHandleWidth(8)
 
         # Left side
@@ -9897,6 +9987,7 @@ class DeckBuilderDialog(QDialog):
         splitter.addWidget(left)
         splitter.addWidget(right)
         splitter.setSizes([420, 280])
+        QTimer.singleShot(0, splitter.apply_saved_position)
         root.addWidget(splitter, 1)
 
         root.addWidget(h_divider())
