@@ -8186,6 +8186,109 @@ _DECK_IMPL_B64 = (
 )
 
 
+def _patch_embedded_deck_implementation(source: str, log_fn=None) -> str:
+    """
+    Apply additive runtime patches to the embedded deck implementation text.
+    This keeps deck_builder.py as the single source of truth without manually
+    re-encoding the large embedded implementation blob.
+    """
+
+    def _replace_once(text: str, old: str, new: str, label: str) -> str:
+        if old not in text:
+            if log_fn:
+                log_fn(f"[DECK][WARN] Patch target not found: {label}")
+            return text
+        return text.replace(old, new, 1)
+
+    source = _replace_once(
+        source,
+        '            return [x for x in data if isinstance(x, dict)]',
+        '            return [_normalize_jsonl_record(path, x)\n'
+        '                    for x in data if isinstance(x, dict)]',
+        "read_jsonl array mode fallback",
+    )
+    source = _replace_once(
+        source,
+        '                items.append(obj)',
+        '                items.append(_normalize_jsonl_record(path, obj))',
+        "read_jsonl line mode fallback",
+    )
+    source = _replace_once(
+        source,
+        "def write_jsonl(path: Path, records: list[dict]) -> None:\n"
+        '    """Overwrite a JSONL file with a list of records."""\n'
+        '    path.parent.mkdir(parents=True, exist_ok=True)\n'
+        '    with path.open("w", encoding="utf-8") as f:\n'
+        '        for r in records:\n'
+        '            f.write(json.dumps(r, ensure_ascii=False) + "\\n")\n'
+        "\n"
+        "# ── KEYWORD / MEMORY HELPERS ──────────────────────────────────────────────────\n",
+        "def write_jsonl(path: Path, records: list[dict]) -> None:\n"
+        '    """Overwrite a JSONL file with a list of records."""\n'
+        '    path.parent.mkdir(parents=True, exist_ok=True)\n'
+        '    with path.open("w", encoding="utf-8") as f:\n'
+        '        for r in records:\n'
+        '            f.write(json.dumps(r, ensure_ascii=False) + "\\n")\n'
+        "\n"
+        "_ALLOWED_RUNTIME_MODES = {\"default\", \"persona\", \"rp\"}\n"
+        "\n"
+        "def _normalize_runtime_mode(value: object) -> str:\n"
+        "    mode = str(value or \"\").strip().lower()\n"
+        "    return mode if mode in _ALLOWED_RUNTIME_MODES else \"persona\"\n"
+        "\n"
+        "def _detect_runtime_mode(cfg: Optional[dict] = None) -> str:\n"
+        "    cfg = cfg or CFG\n"
+        "    candidates = [\n"
+        "        cfg.get(\"mode\"),\n"
+        "        cfg.get(\"runtime_mode\"),\n"
+        "        cfg.get(\"chat_mode\"),\n"
+        "        (cfg.get(\"settings\", {}) or {}).get(\"mode\"),\n"
+        "        (cfg.get(\"settings\", {}) or {}).get(\"runtime_mode\"),\n"
+        "        (cfg.get(\"settings\", {}) or {}).get(\"chat_mode\"),\n"
+        "    ]\n"
+        "    for candidate in candidates:\n"
+        "        mode = _normalize_runtime_mode(candidate)\n"
+        "        if candidate is not None and mode in _ALLOWED_RUNTIME_MODES:\n"
+        "            return mode\n"
+        "    return \"persona\"\n"
+        "\n"
+        "def _normalize_jsonl_record(path: Path, record: dict) -> dict:\n"
+        "    if path.name not in (\"messages.jsonl\", \"memories.jsonl\"):\n"
+        "        return record\n"
+        "    normalized = dict(record)\n"
+        "    normalized[\"mode\"] = _normalize_runtime_mode(\n"
+        "        normalized.get(\"mode\", \"persona\")\n"
+        "    )\n"
+        "    return normalized\n"
+        "\n"
+        "# ── KEYWORD / MEMORY HELPERS ──────────────────────────────────────────────────\n",
+        "mode helpers",
+    )
+    source = _replace_once(
+        source,
+        '            "emotion":    emotion,\n'
+        "        }",
+        '            "emotion":    emotion,\n'
+        '            "mode":       _detect_runtime_mode(),\n'
+        "        }",
+        "append_message mode field",
+    )
+    source = _replace_once(
+        source,
+        '            "confidence":       0.70 if record_type in {\n'
+        '                "dream","issue","idea","preference","resolution"\n'
+        '            } else 0.55,\n'
+        "        }",
+        '            "confidence":       0.70 if record_type in {\n'
+        '                "dream","issue","idea","preference","resolution"\n'
+        '            } else 0.55,\n'
+        '            "mode":             _detect_runtime_mode(),\n'
+        "        }",
+        "append_memory mode field",
+    )
+    return source
+
+
 def _get_deck_implementation(log_fn=None) -> str:
     """
     Returns the full embedded deck implementation.
@@ -8199,7 +8302,8 @@ def _get_deck_implementation(log_fn=None) -> str:
     import base64 as _base64
     if log_fn:
         log_fn("[DECK] Using embedded implementation")
-    return _base64.b64decode(_DECK_IMPL_B64).decode("utf-8")
+    decoded = _base64.b64decode(_DECK_IMPL_B64).decode("utf-8")
+    return _patch_embedded_deck_implementation(decoded, log_fn=log_fn)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SECTION 6 — SETUP WORKER
