@@ -324,11 +324,11 @@ MODULES: dict[str, dict] = {
         "default_on":   False,
     },
     "bill_scheduler": {
-        "display_name": "Bill Scheduler + Budget",
+        "display_name": "Financial Planner",
         "category":     "Professional",
-        "status":       "planned",
-        "description":  "Bills, budget, APScheduler reminders. No bank integration.",
-        "tab_name":     "Budget",
+        "status":       "built",
+        "description":  "Dashboard + planner for transactions, recurring bills, goals, exports/imports, and AI reminders.",
+        "tab_name":     "Financial Planner",
         "slot_key":     "MODULE_BILL_SCHEDULER",
         "requires":     [],
         "default_on":   False,
@@ -1574,7 +1574,7 @@ MODULE_CODE: dict[str, Optional[str]] = {
     "meal_planner":       None,
     "project_manager":    None,
     "csm_workspace":      None,
-    "bill_scheduler":     None,
+    "bill_scheduler":     "# [MODULE: bill_scheduler — BUILT — see FinancialPlannerTab class]",
     "dnd_suite":          None,
     "teacher_toolkit":    None,
     "cvr_engine":         "# [MODULE: cvr_engine — BUILT — see CvRTab class]",
@@ -8741,6 +8741,705 @@ def _patch_embedded_deck_implementation(source: str, log_fn=None) -> str:
         "        for mode_key, btn in getattr(self, \"_theme_mode_buttons\", {}).items():\n"
         "            btn.setChecked(mode_key == theme_mode)\n",
         "settings ui section theme controls + sync",
+    )
+    source = _replace_once(
+        source,
+        "class DiceTrayDie(QFrame):\n",
+        """class FinancialPlannerTab(QWidget):
+    \"\"\"Manual-entry Financial Planner module with Dashboard + Planner internal tabs.\"\"\"
+
+    DEFAULT_CATEGORY_BUCKETS = {
+        "Housing": "needs", "Utilities": "needs", "Insurance": "needs", "Groceries": "needs",
+        "Transportation": "needs", "Medical": "needs",
+        "Dining Out": "wants", "Entertainment": "wants", "Subscriptions": "wants",
+        "Shopping": "wants", "Hobbies": "wants",
+        "Emergency Fund": "savings_debt", "Retirement": "savings_debt",
+        "Investments": "savings_debt", "Debt Payment": "savings_debt", "Sinking Fund": "savings_debt",
+    }
+
+    def __init__(self, diagnostics_logger=None):
+        super().__init__()
+        self._log = diagnostics_logger or (lambda *_args, **_kwargs: None)
+        self._path = cfg_path("memories") / "financial_planner.json"
+        self.data = self._load_data()
+        self._bill_last_reminder: dict[str, datetime] = {}
+        self._build_ui()
+        self._refresh_all()
+        self._reminder_timer = QTimer(self)
+        self._reminder_timer.timeout.connect(self._check_bill_reminders)
+        self._reminder_timer.start(60000)
+
+    def _default_data(self) -> dict:
+        return {
+            "transactions": [],
+            "recurring_bills": [],
+            "budget_targets": [],
+            "goals": [],
+            "planner_settings": {
+                "currency": "USD",
+                "guidance_model": "50/30/20",
+                "reminder_repeat_interval": 3600,
+                "google_sync_enabled": True,
+                "view_month": date.today().strftime("%Y-%m"),
+            },
+            "category_buckets": dict(self.DEFAULT_CATEGORY_BUCKETS),
+            "bill_activity": [],
+        }
+
+    def _load_data(self) -> dict:
+        data = self._default_data()
+        try:
+            if self._path.exists():
+                loaded = json.loads(self._path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    for key in ("transactions", "recurring_bills", "budget_targets", "goals", "bill_activity"):
+                        if isinstance(loaded.get(key), list):
+                            data[key] = loaded[key]
+                    if isinstance(loaded.get("planner_settings"), dict):
+                        data["planner_settings"].update(loaded["planner_settings"])
+                    if isinstance(loaded.get("category_buckets"), dict):
+                        data["category_buckets"].update(loaded["category_buckets"])
+        except Exception as e:
+            self._log(f"[FINANCIAL] load failed: {e}", "WARN")
+        return data
+
+    def _save_data(self) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            self._log(f"[FINANCIAL] save failed: {e}", "WARN")
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        top_row = QHBoxLayout()
+        self._btn_export = QPushButton("Export")
+        self._btn_export.clicked.connect(self._export_data)
+        self._btn_import = QPushButton("Import")
+        self._btn_import.clicked.connect(self._import_data)
+        self._btn_review = QPushButton("Generate Monthly AI Review")
+        self._btn_review.clicked.connect(self._generate_monthly_review)
+        top_row.addWidget(self._btn_export)
+        top_row.addWidget(self._btn_import)
+        top_row.addWidget(self._btn_review)
+        top_row.addStretch(1)
+        root.addLayout(top_row)
+
+        self._tabs = QTabWidget()
+        root.addWidget(self._tabs, 1)
+        self._dashboard_tab = QWidget()
+        self._planner_tab = QWidget()
+        self._tabs.addTab(self._dashboard_tab, "Dashboard")
+        self._tabs.addTab(self._planner_tab, "Planner")
+
+        self._build_dashboard_tab()
+        self._build_planner_tab()
+
+    def _all_categories(self) -> list[str]:
+        return sorted(self.data.get("category_buckets", {}).keys())
+
+    def _build_dashboard_tab(self) -> None:
+        lay = QVBoxLayout(self._dashboard_tab)
+        self._monthly_snapshot = QLabel("")
+        self._guidance_snapshot = QLabel("")
+        self._goals_snapshot = QTableWidget(0, 5)
+        self._goals_snapshot.setHorizontalHeaderLabels(["Goal", "Current", "Target", "Progress %", "Projected"])
+        self._recent_snapshot = QTableWidget(0, 5)
+        self._recent_snapshot.setHorizontalHeaderLabels(["Date", "Type", "Category", "Amount", "Note/Payee"])
+        for tbl in (self._goals_snapshot, self._recent_snapshot):
+            tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+            tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        lay.addWidget(QLabel("Monthly Snapshot"))
+        lay.addWidget(self._monthly_snapshot)
+        lay.addWidget(QLabel("50 / 30 / 20 Guidance Monitor"))
+        lay.addWidget(self._guidance_snapshot)
+        lay.addWidget(QLabel("Savings / Debt / Goal Progress"))
+        lay.addWidget(self._goals_snapshot, 1)
+        lay.addWidget(QLabel("Recent Activity Feed"))
+        lay.addWidget(self._recent_snapshot, 1)
+
+    def _build_planner_tab(self) -> None:
+        lay = QVBoxLayout(self._planner_tab)
+        self._planner_sections = QTabWidget()
+        lay.addWidget(self._planner_sections, 1)
+        self._tx_tab = QWidget()
+        self._bill_tab = QWidget()
+        self._budget_tab = QWidget()
+        self._goals_tab = QWidget()
+        self._planner_sections.addTab(self._tx_tab, "Transactions Ledger")
+        self._planner_sections.addTab(self._bill_tab, "Recurring Bills Manager")
+        self._planner_sections.addTab(self._budget_tab, "Budget Targets")
+        self._planner_sections.addTab(self._goals_tab, "Goals")
+        self._build_transactions_section()
+        self._build_bills_section()
+        self._build_budget_section()
+        self._build_goals_section()
+
+    def _build_transactions_section(self) -> None:
+        lay = QVBoxLayout(self._tx_tab)
+        form = QGridLayout()
+        self.tx_date = QDateEdit(QDate.currentDate()); self.tx_date.setCalendarPopup(True)
+        self.tx_type = QComboBox(); self.tx_type.addItems(["income", "expense", "transfer", "refund"])
+        self.tx_category = QComboBox(); self.tx_category.addItems(self._all_categories())
+        self.tx_amount = QLineEdit(); self.tx_payee = QLineEdit(); self.tx_notes = QLineEdit(); self.tx_tags = QLineEdit()
+        labels = ["Date", "Type", "Category", "Amount", "Payee/Source", "Notes", "Tags"]
+        widgets = [self.tx_date, self.tx_type, self.tx_category, self.tx_amount, self.tx_payee, self.tx_notes, self.tx_tags]
+        for i, (lbl, w) in enumerate(zip(labels, widgets)):
+            form.addWidget(QLabel(lbl), i, 0); form.addWidget(w, i, 1)
+        lay.addLayout(form)
+        row = QHBoxLayout()
+        self.tx_add = QPushButton("Add"); self.tx_add.clicked.connect(self._add_transaction)
+        self.tx_edit = QPushButton("Edit Selected"); self.tx_edit.clicked.connect(self._edit_transaction)
+        self.tx_del = QPushButton("Delete Selected"); self.tx_del.clicked.connect(self._delete_transaction)
+        row.addWidget(self.tx_add); row.addWidget(self.tx_edit); row.addWidget(self.tx_del); row.addStretch(1)
+        lay.addLayout(row)
+        self.tx_table = QTableWidget(0, 7)
+        self.tx_table.setHorizontalHeaderLabels(["Date", "Type", "Category", "Amount", "Payee/Source", "Notes", "Tags"])
+        self.tx_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        lay.addWidget(self.tx_table, 1)
+
+    def _build_bills_section(self) -> None:
+        lay = QVBoxLayout(self._bill_tab)
+        form = QGridLayout()
+        self.bill_name = QLineEdit(); self.bill_amount = QLineEdit()
+        self.bill_category = QComboBox(); self.bill_category.addItems(self._all_categories())
+        self.bill_due = QDateEdit(QDate.currentDate()); self.bill_due.setCalendarPopup(True)
+        self.bill_recur = QComboBox(); self.bill_recur.addItems(["weekly", "monthly", "quarterly", "yearly"])
+        self.bill_lead = QSpinBox(); self.bill_lead.setRange(0, 60); self.bill_lead.setValue(3)
+        self.bill_autopay = QCheckBox("Autopay")
+        self.bill_sync = QCheckBox("Google Sync")
+        self.bill_repeat = QSpinBox(); self.bill_repeat.setRange(15, 1440); self.bill_repeat.setValue(60)
+        self.bill_notes = QLineEdit()
+        items = [("Bill Name", self.bill_name), ("Amount", self.bill_amount), ("Category", self.bill_category),
+                 ("Due Date", self.bill_due), ("Recurrence", self.bill_recur), ("Reminder Lead (days)", self.bill_lead),
+                 ("Reminder Repeat (min)", self.bill_repeat), ("Notes", self.bill_notes)]
+        for i, (lbl, w) in enumerate(items):
+            form.addWidget(QLabel(lbl), i, 0); form.addWidget(w, i, 1)
+        form.addWidget(self.bill_autopay, len(items), 0); form.addWidget(self.bill_sync, len(items), 1)
+        lay.addLayout(form)
+        row = QHBoxLayout()
+        for txt, fn in [("Add", self._add_bill), ("Edit Selected", self._edit_bill), ("Delete Selected", self._delete_bill),
+                        ("Mark Paid", self._mark_bill_paid), ("Snooze", self._snooze_bill), ("Reschedule", self._reschedule_bill)]:
+            b = QPushButton(txt); b.clicked.connect(fn); row.addWidget(b)
+        row.addStretch(1); lay.addLayout(row)
+        self.bill_table = QTableWidget(0, 9)
+        self.bill_table.setHorizontalHeaderLabels(["Name", "Amount", "Category", "Due", "Recurrence", "Status", "Autopay", "Google Sync", "Notes"])
+        self.bill_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        lay.addWidget(self.bill_table, 1)
+
+    def _build_budget_section(self) -> None:
+        lay = QVBoxLayout(self._budget_tab)
+        form = QHBoxLayout()
+        self.budget_category = QComboBox(); self.budget_category.addItems(self._all_categories())
+        self.budget_amount = QLineEdit()
+        self.budget_period = QComboBox(); self.budget_period.addItems(["monthly", "quarterly", "yearly"])
+        add_btn = QPushButton("Add/Update"); add_btn.clicked.connect(self._upsert_budget_target)
+        form.addWidget(QLabel("Category")); form.addWidget(self.budget_category)
+        form.addWidget(QLabel("Planned Amount")); form.addWidget(self.budget_amount)
+        form.addWidget(QLabel("Period")); form.addWidget(self.budget_period)
+        form.addWidget(add_btn); form.addStretch(1)
+        lay.addLayout(form)
+        self.budget_table = QTableWidget(0, 5)
+        self.budget_table.setHorizontalHeaderLabels(["Category", "Planned", "Actual", "Variance", "% Used"])
+        self.budget_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        lay.addWidget(self.budget_table, 1)
+
+    def _build_goals_section(self) -> None:
+        lay = QVBoxLayout(self._goals_tab)
+        form = QGridLayout()
+        self.goal_name = QLineEdit(); self.goal_type = QComboBox(); self.goal_type.addItems(["savings goal", "emergency fund", "sinking fund", "debt payoff"])
+        self.goal_target = QLineEdit(); self.goal_current = QLineEdit(); self.goal_monthly = QLineEdit()
+        self.goal_deadline = QDateEdit(QDate.currentDate()); self.goal_deadline.setCalendarPopup(True); self.goal_deadline.setSpecialValueText("None")
+        self.goal_notes = QLineEdit()
+        gitems = [("Goal Name", self.goal_name), ("Goal Type", self.goal_type), ("Target Amount", self.goal_target),
+                  ("Current Amount", self.goal_current), ("Monthly Contribution", self.goal_monthly), ("Deadline", self.goal_deadline), ("Notes", self.goal_notes)]
+        for i, (lbl, w) in enumerate(gitems):
+            form.addWidget(QLabel(lbl), i, 0); form.addWidget(w, i, 1)
+        lay.addLayout(form)
+        row = QHBoxLayout()
+        for txt, fn in [("Add", self._add_goal), ("Edit Selected", self._edit_goal), ("Delete Selected", self._delete_goal)]:
+            b = QPushButton(txt); b.clicked.connect(fn); row.addWidget(b)
+        row.addStretch(1); lay.addLayout(row)
+        self.goal_table = QTableWidget(0, 7)
+        self.goal_table.setHorizontalHeaderLabels(["Name", "Type", "Current", "Target", "Monthly", "Progress %", "Deadline"])
+        self.goal_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        lay.addWidget(self.goal_table, 1)
+
+    def _safe_amount(self, text: str) -> float:
+        try: return float(str(text).replace(",", "").strip())
+        except Exception: return 0.0
+
+    def _month_key(self) -> str:
+        return self.data.get("planner_settings", {}).get("view_month", date.today().strftime("%Y-%m"))
+
+    def _is_current_month(self, value: str) -> bool:
+        return str(value or "").startswith(self._month_key())
+
+    def _add_transaction(self) -> None:
+        row = {"id": str(uuid.uuid4()), "date": self.tx_date.date().toString("yyyy-MM-dd"), "type": self.tx_type.currentText(),
+               "category": self.tx_category.currentText(), "amount": self._safe_amount(self.tx_amount.text()),
+               "payee_or_source": self.tx_payee.text().strip(), "notes": self.tx_notes.text().strip(), "tags": self.tx_tags.text().strip()}
+        self.data["transactions"].append(row); self.data["category_buckets"][row["category"]] = self.data["category_buckets"].get(row["category"], "needs")
+        self._save_data(); self._refresh_all()
+
+    def _edit_transaction(self) -> None:
+        r = self.tx_table.currentRow()
+        if r < 0 or r >= len(self.data["transactions"]): return
+        self.data["transactions"][r].update({"date": self.tx_date.date().toString("yyyy-MM-dd"), "type": self.tx_type.currentText(),
+                                             "category": self.tx_category.currentText(), "amount": self._safe_amount(self.tx_amount.text()),
+                                             "payee_or_source": self.tx_payee.text().strip(), "notes": self.tx_notes.text().strip(), "tags": self.tx_tags.text().strip()})
+        self._save_data(); self._refresh_all()
+
+    def _delete_transaction(self) -> None:
+        r = self.tx_table.currentRow()
+        if r < 0 or r >= len(self.data["transactions"]): return
+        self.data["transactions"].pop(r); self._save_data(); self._refresh_all()
+
+    def _add_bill(self) -> None:
+        bill = {"id": str(uuid.uuid4()), "name": self.bill_name.text().strip(), "amount": self._safe_amount(self.bill_amount.text()),
+                "category": self.bill_category.currentText(), "due_date_or_day": self.bill_due.date().toString("yyyy-MM-dd"),
+                "recurrence": self.bill_recur.currentText(), "reminder_offset": int(self.bill_lead.value()),
+                "reminder_repeat_interval": int(self.bill_repeat.value()) * 60, "autopay_flag": bool(self.bill_autopay.isChecked()),
+                "google_sync_flag": bool(self.bill_sync.isChecked()), "status": "unpaid", "notes": self.bill_notes.text().strip(),
+                "snooze_until": "", "next_due": self.bill_due.date().toString("yyyy-MM-dd")}
+        if bill["google_sync_flag"]:
+            bill["google_sync_descriptor"] = self._build_google_sync_descriptor(bill)
+        self.data["recurring_bills"].append(bill); self._save_data(); self._refresh_all()
+
+    def _edit_bill(self) -> None:
+        r = self.bill_table.currentRow()
+        if r < 0 or r >= len(self.data["recurring_bills"]): return
+        old = self.data["recurring_bills"][r]
+        old.update({"name": self.bill_name.text().strip(), "amount": self._safe_amount(self.bill_amount.text()), "category": self.bill_category.currentText(),
+                    "due_date_or_day": self.bill_due.date().toString("yyyy-MM-dd"), "recurrence": self.bill_recur.currentText(),
+                    "reminder_offset": int(self.bill_lead.value()), "reminder_repeat_interval": int(self.bill_repeat.value()) * 60,
+                    "autopay_flag": bool(self.bill_autopay.isChecked()), "google_sync_flag": bool(self.bill_sync.isChecked()),
+                    "notes": self.bill_notes.text().strip()})
+        if old.get("google_sync_flag"): old["google_sync_descriptor"] = self._build_google_sync_descriptor(old)
+        self._save_data(); self._refresh_all()
+
+    def _delete_bill(self) -> None:
+        r = self.bill_table.currentRow()
+        if r < 0 or r >= len(self.data["recurring_bills"]): return
+        self.data["recurring_bills"].pop(r); self._save_data(); self._refresh_all()
+
+    def _selected_bill(self) -> Optional[dict]:
+        r = self.bill_table.currentRow()
+        if r < 0 or r >= len(self.data["recurring_bills"]): return None
+        return self.data["recurring_bills"][r]
+
+    def _mark_bill_paid(self) -> None:
+        bill = self._selected_bill()
+        if not bill: return
+        bill["status"] = "paid"
+        bill["paid_at"] = local_now_iso()
+        bill["next_due"] = self._advance_due_date(bill.get("next_due") or bill.get("due_date_or_day"), bill.get("recurrence", "monthly"))
+        self.data["bill_activity"].append({"date": date.today().isoformat(), "type": "bill_paid", "category": bill.get("category",""),
+                                           "amount": bill.get("amount",0.0), "note": bill.get("name","")})
+        self._save_data(); self._refresh_all()
+
+    def _snooze_bill(self) -> None:
+        bill = self._selected_bill()
+        if not bill: return
+        mins, ok = QInputDialog.getInt(self, "Snooze Bill Reminder", "Snooze for minutes:", 120, 15, 10080)
+        if not ok: return
+        bill["snooze_until"] = (datetime.now() + timedelta(minutes=mins)).strftime("%Y-%m-%d %H:%M:%S")
+        bill["status"] = "snoozed"
+        self._save_data(); self._refresh_all()
+
+    def _reschedule_bill(self) -> None:
+        bill = self._selected_bill()
+        if not bill: return
+        new_due, ok = QInputDialog.getText(self, "Reschedule Bill", "New due date (YYYY-MM-DD):", text=str(bill.get("next_due") or bill.get("due_date_or_day") or ""))
+        if not ok or not new_due.strip(): return
+        bill["next_due"] = new_due.strip()
+        bill["status"] = "unpaid"
+        bill["snooze_until"] = ""
+        self._save_data(); self._refresh_all()
+
+    def _upsert_budget_target(self) -> None:
+        rec = {"category": self.budget_category.currentText(), "planned_amount": self._safe_amount(self.budget_amount.text()), "period": self.budget_period.currentText()}
+        found = False
+        for idx, row in enumerate(self.data["budget_targets"]):
+            if row.get("category") == rec["category"] and row.get("period", "monthly") == rec["period"]:
+                self.data["budget_targets"][idx] = rec; found = True; break
+        if not found: self.data["budget_targets"].append(rec)
+        self._save_data(); self._refresh_all()
+
+    def _add_goal(self) -> None:
+        rec = {"id": str(uuid.uuid4()), "name": self.goal_name.text().strip(), "type": self.goal_type.currentText(),
+               "target_amount": self._safe_amount(self.goal_target.text()), "current_amount": self._safe_amount(self.goal_current.text()),
+               "monthly_contribution": self._safe_amount(self.goal_monthly.text()), "deadline": self.goal_deadline.date().toString("yyyy-MM-dd"),
+               "notes": self.goal_notes.text().strip()}
+        self.data["goals"].append(rec); self._save_data(); self._refresh_all()
+
+    def _edit_goal(self) -> None:
+        r = self.goal_table.currentRow()
+        if r < 0 or r >= len(self.data["goals"]): return
+        self.data["goals"][r].update({"name": self.goal_name.text().strip(), "type": self.goal_type.currentText(),
+                                      "target_amount": self._safe_amount(self.goal_target.text()), "current_amount": self._safe_amount(self.goal_current.text()),
+                                      "monthly_contribution": self._safe_amount(self.goal_monthly.text()), "deadline": self.goal_deadline.date().toString("yyyy-MM-dd"),
+                                      "notes": self.goal_notes.text().strip()})
+        self._save_data(); self._refresh_all()
+
+    def _delete_goal(self) -> None:
+        r = self.goal_table.currentRow()
+        if r < 0 or r >= len(self.data["goals"]): return
+        self.data["goals"].pop(r); self._save_data(); self._refresh_all()
+
+    def _advance_due_date(self, due_text: str, recurrence: str) -> str:
+        try: d = datetime.strptime(str(due_text), "%Y-%m-%d").date()
+        except Exception: d = date.today()
+        if recurrence == "weekly": d = d + timedelta(days=7)
+        elif recurrence == "monthly": d = d + timedelta(days=30)
+        elif recurrence == "quarterly": d = d + timedelta(days=91)
+        else: d = d + timedelta(days=365)
+        return d.strftime("%Y-%m-%d")
+
+    def _build_google_sync_descriptor(self, bill: dict) -> dict:
+        return {
+            "title": f"Bill Due — {bill.get('name','Unnamed Bill')}",
+            "description": f"Amount: {bill.get('amount',0.0)} | Category: {bill.get('category','')} | Notes: {bill.get('notes','')} | Recurrence: {bill.get('recurrence','monthly')}",
+            "recurring": True,
+            "source_of_truth": "financial_planner_local",
+            "last_synced": local_now_iso(),
+        }
+
+    def _emit_hidden_ai_reminder(self, bill: dict, due_status: str) -> None:
+        payload = {"intent": "financial_bill_reminder", "bill_name": bill.get("name",""), "amount": bill.get("amount", 0.0),
+                   "due_status": due_status, "category": bill.get("category",""), "note": bill.get("notes","")}
+        try:
+            messages_path = cfg_path("memories") / "messages.jsonl"
+            records = read_jsonl(messages_path)
+            records.append({"timestamp": local_now_iso(), "role": "user", "speaker": "internal", "content": "[INTERNAL_EVENT] " + json.dumps(payload, ensure_ascii=False)})
+            write_jsonl(messages_path, records)
+        except Exception as e:
+            self._log(f"[FINANCIAL] hidden AI reminder write failed: {e}", "WARN")
+
+    def _check_bill_reminders(self) -> None:
+        now_dt = datetime.now()
+        for bill in self.data.get("recurring_bills", []):
+            if bill.get("status") == "paid":
+                continue
+            due_text = str(bill.get("next_due") or bill.get("due_date_or_day") or "")
+            try: due_dt = datetime.strptime(due_text, "%Y-%m-%d")
+            except Exception: continue
+            snooze_until = str(bill.get("snooze_until") or "").strip()
+            if snooze_until:
+                try:
+                    if datetime.strptime(snooze_until, "%Y-%m-%d %H:%M:%S") > now_dt:
+                        continue
+                except Exception:
+                    pass
+            lead_days = int(bill.get("reminder_offset", 3) or 3)
+            remind_from = due_dt - timedelta(days=lead_days)
+            if now_dt < remind_from:
+                continue
+            interval = int(bill.get("reminder_repeat_interval") or self.data.get("planner_settings", {}).get("reminder_repeat_interval", 3600))
+            last_fire = self._bill_last_reminder.get(bill.get("id",""))
+            if last_fire and (now_dt - last_fire).total_seconds() < max(60, interval):
+                continue
+            due_status = "overdue" if now_dt.date() > due_dt.date() else "due_soon" if now_dt.date() < due_dt.date() else "due_today"
+            self._bill_last_reminder[bill.get("id","")] = now_dt
+            bill["status"] = "overdue" if due_status == "overdue" else bill.get("status", "unpaid")
+            self._emit_hidden_ai_reminder(bill, due_status)
+            self._log(f"[FINANCIAL] Reminder: {bill.get('name','Bill')} ({due_status})", "INFO")
+        self._save_data()
+        self._refresh_dashboard()
+
+    def _export_data(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Export Financial Planner", str(cfg_path("exports") / f"financial_planner_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"),
+                                              "Text (*.txt);;CSV (*.csv);;Excel (*.xlsx);;PDF (*.pdf)")
+        if not path: return
+        ext = Path(path).suffix.lower()
+        payload = self._export_payload()
+        if ext == ".csv": self._write_csv_export(path, payload)
+        elif ext == ".xlsx": self._write_xlsx_export(path, payload)
+        elif ext == ".pdf": self._write_pdf_export(path, payload)
+        else: Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _export_payload(self) -> dict:
+        return {
+            "generated_at": local_now_iso(),
+            "recurring_bills_list": self.data.get("recurring_bills", []),
+            "monthly_bills_snapshot": self._monthly_bill_snapshot(),
+            "paid_unpaid_snapshot": self._paid_unpaid_snapshot(),
+            "transaction_ledger": self.data.get("transactions", []),
+            "budget_target_vs_actual_summary": self._budget_rows(),
+            "goals_progress_summary": self.data.get("goals", []),
+            "monthly_financial_review_data": self._review_context(),
+        }
+
+    def _write_csv_export(self, path: str, payload: dict) -> None:
+        import csv
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f); w.writerow(["section", "record_json"])
+            for key, val in payload.items():
+                if isinstance(val, list):
+                    for item in val: w.writerow([key, json.dumps(item, ensure_ascii=False)])
+                else:
+                    w.writerow([key, json.dumps(val, ensure_ascii=False)])
+
+    def _write_xlsx_export(self, path: str, payload: dict) -> None:
+        try:
+            from openpyxl import Workbook
+            wb = Workbook(); ws = wb.active; ws.title = "Financial Planner"
+            ws.append(["section", "record_json"])
+            for key, val in payload.items():
+                if isinstance(val, list):
+                    for item in val: ws.append([key, json.dumps(item, ensure_ascii=False)])
+                else:
+                    ws.append([key, json.dumps(val, ensure_ascii=False)])
+            wb.save(path)
+        except Exception:
+            Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _write_pdf_export(self, path: str, payload: dict) -> None:
+        lines = json.dumps(payload, ensure_ascii=False, indent=2).splitlines()[:160]
+        stream = "BT /F1 9 Tf 40 800 Td " + " ".join(f"({ln.replace('(', '[').replace(')', ']')}) Tj T*" for ln in lines) + " ET"
+        pdf = f"%PDF-1.4\\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\\n2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 842]/Resources<</Font<</F1 4 0 R>>>>/Contents 5 0 R>>endobj\\n4 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\\n5 0 obj<</Length {len(stream)}>>stream\\n{stream}\\nendstream endobj\\nxref\\n0 6\\n0000000000 65535 f \\n0000000010 00000 n \\n0000000060 00000 n \\n0000000120 00000 n \\n0000000240 00000 n \\n0000000310 00000 n \\ntrailer<</Root 1 0 R/Size 6>>\\nstartxref\\n420\\n%%EOF"
+        Path(path).write_text(pdf, encoding="latin-1", errors="ignore")
+
+    def _import_data(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Import Financial Planner", str(cfg_path("exports")), "Structured Files (*.txt *.csv *.xlsx)")
+        if not path: return
+        mode, ok = QInputDialog.getItem(self, "Import Mode", "Choose import mode:", ["append", "replace matching", "full replace"], 0, False)
+        if not ok: return
+        records = self._read_import_records(path)
+        if not records:
+            QMessageBox.warning(self, "Financial Planner", "No valid import records found.")
+            return
+        self._apply_import_records(records, mode)
+        self._save_data(); self._refresh_all()
+
+    def _read_import_records(self, path: str) -> list[tuple[str, dict]]:
+        out: list[tuple[str, dict]] = []
+        p = Path(path); ext = p.suffix.lower()
+        try:
+            if ext == ".csv":
+                import csv
+                with p.open("r", encoding="utf-8", newline="") as f:
+                    for row in csv.DictReader(f):
+                        section = row.get("section", "")
+                        raw = row.get("record_json", "")
+                        try: obj = json.loads(raw)
+                        except Exception: continue
+                        if isinstance(obj, dict): out.append((section, obj))
+            elif ext == ".xlsx":
+                from openpyxl import load_workbook
+                wb = load_workbook(p); ws = wb.active
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    if not row or len(row) < 2: continue
+                    section = str(row[0] or ""); raw = str(row[1] or "")
+                    try: obj = json.loads(raw)
+                    except Exception: continue
+                    if isinstance(obj, dict): out.append((section, obj))
+            else:
+                blob = json.loads(p.read_text(encoding="utf-8"))
+                for section, val in blob.items():
+                    if isinstance(val, list):
+                        for item in val:
+                            if isinstance(item, dict): out.append((section, item))
+        except Exception as e:
+            self._log(f"[FINANCIAL] import parse issue: {e}", "WARN")
+        return out
+
+    def _apply_import_records(self, rows: list[tuple[str, dict]], mode: str) -> None:
+        section_map = {"transaction_ledger": "transactions", "recurring_bills_list": "recurring_bills",
+                       "budget_target_vs_actual_summary": "budget_targets", "goals_progress_summary": "goals"}
+        if mode == "full replace":
+            for key in ("transactions", "recurring_bills", "budget_targets", "goals"):
+                self.data[key] = []
+        for sec, rec in rows:
+            key = section_map.get(sec)
+            if not key: continue
+            if mode == "replace matching":
+                rid = rec.get("id")
+                if rid:
+                    replaced = False
+                    for i, old in enumerate(self.data[key]):
+                        if old.get("id") == rid:
+                            self.data[key][i] = rec; replaced = True; break
+                    if not replaced: self.data[key].append(rec)
+                else:
+                    self.data[key].append(rec)
+            else:
+                self.data[key].append(rec)
+
+    def _monthly_bill_snapshot(self) -> dict:
+        month = self._month_key()
+        bills = [b for b in self.data.get("recurring_bills", []) if str(b.get("next_due") or b.get("due_date_or_day") or "").startswith(month)]
+        return {"month": month, "count": len(bills), "total_amount": sum(float(b.get("amount", 0.0) or 0.0) for b in bills)}
+
+    def _paid_unpaid_snapshot(self) -> dict:
+        bills = self.data.get("recurring_bills", [])
+        paid = len([b for b in bills if b.get("status") == "paid"])
+        return {"paid": paid, "unpaid": len(bills) - paid}
+
+    def _review_context(self) -> dict:
+        income = sum(float(t.get("amount", 0.0) or 0.0) for t in self.data.get("transactions", []) if t.get("type") == "income" and self._is_current_month(t.get("date","")))
+        expenses = sum(float(t.get("amount", 0.0) or 0.0) for t in self.data.get("transactions", []) if t.get("type") == "expense" and self._is_current_month(t.get("date","")))
+        cat_totals = {}
+        for t in self.data.get("transactions", []):
+            if t.get("type") != "expense" or not self._is_current_month(t.get("date","")): continue
+            cat = t.get("category", "Uncategorized")
+            cat_totals[cat] = cat_totals.get(cat, 0.0) + float(t.get("amount", 0.0) or 0.0)
+        due = [b.get("name","") for b in self.data.get("recurring_bills", []) if b.get("status") in ("unpaid", "overdue")]
+        goal_progress = [{ "name": g.get("name",""), "progress_pct": round((float(g.get("current_amount",0.0) or 0.0) / max(1.0, float(g.get("target_amount",0.0) or 0.0))) * 100.0, 1)} for g in self.data.get("goals",[])]
+        return {"total_income": round(income, 2), "total_expenses": round(expenses, 2), "net_cash_flow": round(income - expenses, 2),
+                "largest_categories": sorted(cat_totals.items(), key=lambda x: x[1], reverse=True)[:5],
+                "due_or_overdue_bills": due, "goal_progress": goal_progress}
+
+    def _generate_monthly_review(self) -> None:
+        ctx = self._review_context()
+        payload = {"intent": "financial_monthly_review", "context": ctx}
+        summary = (
+            f"Income: {ctx['total_income']:.2f}, Expenses: {ctx['total_expenses']:.2f}, Net: {ctx['net_cash_flow']:.2f}. "
+            f"Largest categories: {', '.join([f'{c} ({a:.2f})' for c, a in ctx['largest_categories'][:3]]) or 'None'}. "
+            f"Due/overdue bills: {len(ctx['due_or_overdue_bills'])}. Keep contributions steady and review high-variance categories."
+        )
+        self._emit_hidden_ai_reminder({"name": "Monthly Review", "amount": ctx["net_cash_flow"], "category": "review", "notes": json.dumps(payload)}, "monthly_review")
+        QMessageBox.information(self, "Monthly AI Review", summary)
+
+    def _budget_rows(self) -> list[dict]:
+        rows = []
+        for b in self.data.get("budget_targets", []):
+            cat = b.get("category", "")
+            planned = float(b.get("planned_amount", 0.0) or 0.0)
+            actual = sum(float(t.get("amount", 0.0) or 0.0) for t in self.data.get("transactions", []) if t.get("type") == "expense" and t.get("category") == cat and self._is_current_month(t.get("date","")))
+            variance = planned - actual
+            pct = (actual / planned * 100.0) if planned > 0 else 0.0
+            rows.append({"category": cat, "planned_amount": round(planned,2), "actual": round(actual,2), "variance": round(variance,2), "pct_used": round(pct,1), "period": b.get("period","monthly")})
+        return rows
+
+    def _refresh_all(self) -> None:
+        self._refresh_transactions()
+        self._refresh_bills()
+        self._refresh_budget()
+        self._refresh_goals()
+        self._refresh_dashboard()
+
+    def _refresh_transactions(self) -> None:
+        rows = self.data.get("transactions", [])
+        self.tx_table.setRowCount(len(rows))
+        for r, item in enumerate(rows):
+            vals = [item.get("date",""), item.get("type",""), item.get("category",""), f"{float(item.get('amount',0.0) or 0.0):.2f}",
+                    item.get("payee_or_source",""), item.get("notes",""), item.get("tags","")]
+            for c, v in enumerate(vals): self.tx_table.setItem(r, c, QTableWidgetItem(str(v)))
+
+    def _refresh_bills(self) -> None:
+        rows = self.data.get("recurring_bills", [])
+        self.bill_table.setRowCount(len(rows))
+        for r, item in enumerate(rows):
+            vals = [item.get("name",""), f"{float(item.get('amount',0.0) or 0.0):.2f}", item.get("category",""),
+                    item.get("next_due") or item.get("due_date_or_day",""), item.get("recurrence",""), item.get("status","unpaid"),
+                    "Yes" if item.get("autopay_flag") else "No", "Yes" if item.get("google_sync_flag") else "No", item.get("notes","")]
+            for c, v in enumerate(vals): self.bill_table.setItem(r, c, QTableWidgetItem(str(v)))
+
+    def _refresh_budget(self) -> None:
+        rows = self._budget_rows()
+        self.budget_table.setRowCount(len(rows))
+        for r, item in enumerate(rows):
+            vals = [item.get("category",""), f"{item.get('planned_amount',0.0):.2f}", f"{item.get('actual',0.0):.2f}",
+                    f"{item.get('variance',0.0):.2f}", f"{item.get('pct_used',0.0):.1f}%"]
+            for c, v in enumerate(vals): self.budget_table.setItem(r, c, QTableWidgetItem(str(v)))
+
+    def _refresh_goals(self) -> None:
+        rows = self.data.get("goals", [])
+        self.goal_table.setRowCount(len(rows))
+        for r, g in enumerate(rows):
+            target = float(g.get("target_amount", 0.0) or 0.0)
+            current = float(g.get("current_amount", 0.0) or 0.0)
+            pct = (current / target * 100.0) if target > 0 else 0.0
+            vals = [g.get("name",""), g.get("type",""), f"{current:.2f}", f"{target:.2f}", f"{float(g.get('monthly_contribution',0.0) or 0.0):.2f}", f"{pct:.1f}", g.get("deadline","")]
+            for c, v in enumerate(vals): self.goal_table.setItem(r, c, QTableWidgetItem(str(v)))
+
+    def _refresh_dashboard(self) -> None:
+        month = self._month_key()
+        tx = [t for t in self.data.get("transactions", []) if self._is_current_month(t.get("date",""))]
+        income = sum(float(t.get("amount",0.0) or 0.0) for t in tx if t.get("type") == "income")
+        expenses = sum(float(t.get("amount",0.0) or 0.0) for t in tx if t.get("type") == "expense")
+        now = date.today()
+        due_soon = 0; overdue = 0; recurring = 0
+        for b in self.data.get("recurring_bills", []):
+            due = str(b.get("next_due") or b.get("due_date_or_day") or "")
+            try: due_d = datetime.strptime(due, "%Y-%m-%d").date()
+            except Exception: continue
+            recurring += 1
+            if b.get("status") == "paid": continue
+            if due_d < now: overdue += 1
+            elif due_d <= now + timedelta(days=7): due_soon += 1
+        self._monthly_snapshot.setText(f"Month: {month} | Total Income: {income:.2f} | Total Expenses: {expenses:.2f} | Net Cash Flow: {income-expenses:.2f} | Bills Due Soon: {due_soon} | Overdue Bills: {overdue} | Upcoming Subscriptions/Recurring Bills: {recurring}")
+
+        buckets = {"needs": 0.0, "wants": 0.0, "savings_debt": 0.0}
+        for t in tx:
+            if t.get("type") != "expense": continue
+            cat = t.get("category", "")
+            bucket = self.data.get("category_buckets", {}).get(cat, "needs")
+            if bucket not in buckets: bucket = "needs"
+            buckets[bucket] += float(t.get("amount", 0.0) or 0.0)
+        total_spend = max(0.01, sum(buckets.values()))
+        pct = {k: round(v / total_spend * 100.0, 1) for k, v in buckets.items()}
+        self._guidance_snapshot.setText(
+            f"Needs: {buckets['needs']:.2f} ({pct['needs']}%, target 50%, {'over' if pct['needs'] > 50 else 'under'}) | "
+            f"Wants: {buckets['wants']:.2f} ({pct['wants']}%, target 30%, {'over' if pct['wants'] > 30 else 'under'}) | "
+            f"Savings/Debt: {buckets['savings_debt']:.2f} ({pct['savings_debt']}%, target 20%, {'over' if pct['savings_debt'] > 20 else 'under'})"
+        )
+
+        goals = self.data.get("goals", [])
+        self._goals_snapshot.setRowCount(len(goals))
+        for r, g in enumerate(goals):
+            cur = float(g.get("current_amount", 0.0) or 0.0); tgt = float(g.get("target_amount", 0.0) or 0.0); mon = float(g.get("monthly_contribution", 0.0) or 0.0)
+            pctg = (cur / tgt * 100.0) if tgt > 0 else 0.0
+            rem = max(0.0, tgt - cur); proj = f\"{int(math.ceil(rem / mon))} mo\" if mon > 0 and rem > 0 else \"n/a\"
+            vals = [g.get("name",""), f"{cur:.2f}", f"{tgt:.2f}", f"{pctg:.1f}", proj]
+            for c, v in enumerate(vals): self._goals_snapshot.setItem(r, c, QTableWidgetItem(str(v)))
+
+        activity = sorted(
+            [{"date": x.get("date",""), "type": x.get("type",""), "category": x.get("category",""), "amount": x.get("amount",0.0), "note": x.get("payee_or_source","") or x.get("notes","")} for x in tx] + self.data.get("bill_activity", []),
+            key=lambda z: z.get("date",""),
+            reverse=True
+        )[:20]
+        self._recent_snapshot.setRowCount(len(activity))
+        for r, a in enumerate(activity):
+            vals = [a.get("date",""), a.get("type",""), a.get("category",""), f"{float(a.get('amount',0.0) or 0.0):.2f}", a.get("note","")]
+            for c, v in enumerate(vals): self._recent_snapshot.setItem(r, c, QTableWidgetItem(str(v)))
+
+
+class DiceTrayDie(QFrame):
+""",
+        "financial planner class injection",
+    )
+    source = _replace_once(
+        source,
+        "        # ── Module Tracker tab ─────────────────────────────────────────\n"
+        "        self._module_tracker = ModuleTrackerTab()\n"
+        "\n"
+        "        # ── Dice Roller tab ────────────────────────────────────────────\n",
+        "        # ── Module Tracker tab ─────────────────────────────────────────\n"
+        "        self._module_tracker = ModuleTrackerTab()\n"
+        "\n"
+        "        # ── Financial Planner tab ──────────────────────────────────────\n"
+        "        self._financial_planner_tab = FinancialPlannerTab(diagnostics_logger=self._diag_tab.log)\n"
+        "\n"
+        "        # ── Dice Roller tab ────────────────────────────────────────────\n",
+        "financial planner tab instantiation",
+    )
+    source = _replace_once(
+        source,
+        '            {"id": "modules", "title": "Modules", "widget": self._module_tracker, "default_order": 7},\n'
+        '            {"id": "dice_roller", "title": "Dice Roller", "widget": self._dice_roller_tab, "default_order": 8},\n'
+        '            {"id": "magic_8_ball", "title": "Magic 8-Ball", "widget": self._magic_8ball_tab, "default_order": 9},\n'
+        '            {"id": "diagnostics", "title": "Diagnostics", "widget": self._diag_tab, "default_order": 10},\n'
+        '            {"id": "settings", "title": "Settings", "widget": self._settings_tab, "default_order": 11},\n',
+        '            {"id": "modules", "title": "Modules", "widget": self._module_tracker, "default_order": 7},\n'
+        '            {"id": "financial_planner", "title": "Financial Planner", "widget": self._financial_planner_tab, "default_order": 8},\n'
+        '            {"id": "dice_roller", "title": "Dice Roller", "widget": self._dice_roller_tab, "default_order": 9},\n'
+        '            {"id": "magic_8_ball", "title": "Magic 8-Ball", "widget": self._magic_8ball_tab, "default_order": 10},\n'
+        '            {"id": "diagnostics", "title": "Diagnostics", "widget": self._diag_tab, "default_order": 11},\n'
+        '            {"id": "settings", "title": "Settings", "widget": self._settings_tab, "default_order": 12},\n',
+        "financial planner tab definition order",
     )
     return source
 
