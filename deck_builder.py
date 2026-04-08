@@ -8261,6 +8261,47 @@ def _patch_embedded_deck_implementation(source: str, log_fn=None) -> str:
         "    )\n"
         "    return normalized\n"
         "\n"
+        "_ALLOWED_THEME_MODES = {\"light\", \"auto\", \"dark\"}\n"
+        "\n"
+        "def _normalize_theme_mode(value: object) -> str:\n"
+        "    mode = str(value or \"\").strip().lower()\n"
+        "    return mode if mode in _ALLOWED_THEME_MODES else \"auto\"\n"
+        "\n"
+        "def _detect_theme_mode(cfg: Optional[dict] = None) -> str:\n"
+        "    cfg = cfg or CFG\n"
+        "    settings = (cfg.get(\"settings\", {}) or {}) if isinstance(cfg, dict) else {}\n"
+        "    candidates = [\n"
+        "        cfg.get(\"theme_mode\") if isinstance(cfg, dict) else None,\n"
+        "        settings.get(\"theme_mode\"),\n"
+        "        settings.get(\"runtime_theme_mode\"),\n"
+        "    ]\n"
+        "    for candidate in candidates:\n"
+        "        if candidate is not None:\n"
+        "            return _normalize_theme_mode(candidate)\n"
+        "    return \"auto\"\n"
+        "\n"
+        "def _persona_preferred_theme(cfg: Optional[dict] = None) -> Optional[str]:\n"
+        "    cfg = cfg or CFG\n"
+        "    persona_cfg = (cfg.get(\"persona\", {}) or {}) if isinstance(cfg, dict) else {}\n"
+        "    candidates = [\n"
+        "        persona_cfg.get(\"preferred_theme\"),\n"
+        "        persona_cfg.get(\"theme\"),\n"
+        "        persona_cfg.get(\"ui_theme\"),\n"
+        "    ]\n"
+        "    for candidate in candidates:\n"
+        "        mode = str(candidate or \"\").strip().lower()\n"
+        "        if mode in {\"light\", \"dark\"}:\n"
+        "            return mode\n"
+        "    return None\n"
+        "\n"
+        "def _resolve_effective_theme(cfg: Optional[dict] = None) -> str:\n"
+        "    cfg = cfg or CFG\n"
+        "    mode = _detect_theme_mode(cfg)\n"
+        "    if mode in {\"light\", \"dark\"}:\n"
+        "        return mode\n"
+        "    pref = _persona_preferred_theme(cfg)\n"
+        "    return pref if pref in {\"light\", \"dark\"} else \"dark\"\n"
+        "\n"
         "# ── KEYWORD / MEMORY HELPERS ──────────────────────────────────────────────────\n",
         "mode helpers",
     )
@@ -8285,6 +8326,331 @@ def _patch_embedded_deck_implementation(source: str, log_fn=None) -> str:
         '            "mode":             _detect_runtime_mode(),\n'
         "        }",
         "append_memory mode field",
+    )
+    source = _replace_once(
+        source,
+        '            "timezone_override":         "",\n'
+        '            "fullscreen_enabled":        False,\n'
+        '            "borderless_enabled":        False,\n',
+        '            "timezone_override":         "",\n'
+        '            "runtime_persona_mode":      "persona",\n'
+        '            "runtime_theme_mode":        "auto",\n'
+        '            "theme_mode":                "auto",\n'
+        '            "fullscreen_enabled":        False,\n'
+        '            "borderless_enabled":        False,\n',
+        "default config runtime mode settings",
+    )
+    source = _replace_once(
+        source,
+        "        self._first_token: bool = True   # write speaker label before first streaming token\n",
+        "        self._first_token: bool = True   # write speaker label before first streaming token\n"
+        "        self._runtime_persona_mode = _normalize_runtime_mode(\n"
+        "            (CFG.get(\"settings\", {}) or {}).get(\"runtime_persona_mode\", _detect_runtime_mode())\n"
+        "        )\n"
+        "        self._runtime_theme_mode = _normalize_theme_mode(_detect_theme_mode())\n"
+        "        self._pending_hidden_runtime_events: list[str] = []\n",
+        "EchoDeck runtime state init",
+    )
+    source = _replace_once(
+        source,
+        "        self._build_ui()\n",
+        "        self._build_ui()\n"
+        "        self._apply_runtime_theme_mode(self._runtime_theme_mode, emit_event=False)\n"
+        "        self._apply_runtime_persona_mode(self._runtime_persona_mode, emit_event=False)\n",
+        "EchoDeck apply runtime modes after ui build",
+    )
+    source = _replace_once(
+        source,
+        "    # ── MESSAGE HANDLING ───────────────────────────────────────────────────────\n",
+        "    def _runtime_event_payload(self, event_name: str, value: str, context: str = \"\") -> str:\n"
+        "        payload = {\n"
+        "            \"event\": event_name,\n"
+        "            \"value\": value,\n"
+        "            \"context\": context,\n"
+        "            \"timestamp\": local_now_iso(),\n"
+        "        }\n"
+        "        return \"[INTERNAL_EVENT] \" + json.dumps(payload, ensure_ascii=False)\n"
+        "\n"
+        "    def _queue_hidden_runtime_event(self, event_name: str, value: str, context: str = \"\") -> None:\n"
+        "        self._pending_hidden_runtime_events.append(\n"
+        "            self._runtime_event_payload(event_name, value, context)\n"
+        "        )\n"
+        "\n"
+        "    def _consume_hidden_runtime_events(self) -> list[str]:\n"
+        "        pending = list(self._pending_hidden_runtime_events)\n"
+        "        self._pending_hidden_runtime_events.clear()\n"
+        "        return pending\n"
+        "\n"
+        "    def _apply_runtime_persona_mode(self, mode: str, emit_event: bool = True) -> None:\n"
+        "        normalized = _normalize_runtime_mode(mode)\n"
+        "        if normalized == self._runtime_persona_mode and emit_event:\n"
+        "            return\n"
+        "        self._runtime_persona_mode = normalized\n"
+        "        CFG.setdefault(\"settings\", {})[\"runtime_persona_mode\"] = normalized\n"
+        "        CFG[\"runtime_mode\"] = normalized\n"
+        "        save_config(CFG)\n"
+        "        if hasattr(self, \"_settings_tab\") and self._settings_tab:\n"
+        "            self._settings_tab.sync_runtime_controls()\n"
+        "        if emit_event:\n"
+        "            self._diag_tab.log(f\"[MODE] Persona runtime mode -> {normalized}\", \"INFO\")\n"
+        "            self._queue_hidden_runtime_event(\"runtime_persona_mode\", normalized, \"persona runtime mode changed\")\n"
+        "\n"
+        "    def _apply_theme_stylesheet(self, effective_theme: str) -> None:\n"
+        "        base = STYLE\n"
+        "        if effective_theme == \"light\":\n"
+        "            override = (\n"
+        "                \"\\nQWidget { background-color: #f4f4f7; color: #1a1a22; }\"\n"
+        "                \"\\nQTextEdit, QLineEdit, QComboBox, QSpinBox, QTabWidget::pane { background: #ffffff; color: #1a1a22; }\"\n"
+        "                \"\\nQPushButton { background: #e5e8f2; color: #1a1a22; border: 1px solid #b7bfd3; }\"\n"
+        "            )\n"
+        "            self.setStyleSheet(base + override)\n"
+        "        elif effective_theme == \"dark\":\n"
+        "            override = (\n"
+        "                \"\\nQWidget { background-color: #0b0b12; color: #d8d8e8; }\"\n"
+        "                \"\\nQTextEdit, QLineEdit, QComboBox, QSpinBox, QTabWidget::pane { background: #12121c; color: #e8e8f5; }\"\n"
+        "                \"\\nQPushButton { background: #1a1a2b; color: #d8d8e8; border: 1px solid #3a3a56; }\"\n"
+        "            )\n"
+        "            self.setStyleSheet(base + override)\n"
+        "        else:\n"
+        "            self.setStyleSheet(base)\n"
+        "\n"
+        "    def _apply_runtime_theme_mode(self, mode: str, emit_event: bool = True) -> None:\n"
+        "        normalized = _normalize_theme_mode(mode)\n"
+        "        if normalized == self._runtime_theme_mode and emit_event:\n"
+        "            return\n"
+        "        self._runtime_theme_mode = normalized\n"
+        "        CFG.setdefault(\"settings\", {})[\"runtime_theme_mode\"] = normalized\n"
+        "        CFG.setdefault(\"settings\", {})[\"theme_mode\"] = normalized\n"
+        "        CFG[\"theme_mode\"] = normalized\n"
+        "        save_config(CFG)\n"
+        "        effective = _resolve_effective_theme(CFG)\n"
+        "        self._apply_theme_stylesheet(effective)\n"
+        "        if hasattr(self, \"_settings_tab\") and self._settings_tab:\n"
+        "            self._settings_tab.sync_runtime_controls()\n"
+        "        if emit_event:\n"
+        "            context = (\n"
+        "                \"environment is brightly lit\" if effective == \"light\" else\n"
+        "                \"environment is dim\" if effective == \"dark\" else\n"
+        "                \"persona-preferred theme restored\"\n"
+        "            )\n"
+        "            self._diag_tab.log(\n"
+        "                f\"[THEME] mode={normalized} effective={effective}\", \"INFO\"\n"
+        "            )\n"
+        "            self._queue_hidden_runtime_event(\"runtime_theme_mode\", normalized, context)\n"
+        "\n"
+        "    def _handle_theme_command(self, text: str) -> bool:\n"
+        "        if text == \"Theme Light\":\n"
+        "            self._apply_runtime_theme_mode(\"light\")\n"
+        "            return True\n"
+        "        if text == \"Theme Auto\":\n"
+        "            self._apply_runtime_theme_mode(\"auto\")\n"
+        "            return True\n"
+        "        if text == \"Theme Dark\":\n"
+        "            self._apply_runtime_theme_mode(\"dark\")\n"
+        "            return True\n"
+        "        return False\n"
+        "\n"
+        "    # ── MESSAGE HANDLING ───────────────────────────────────────────────────────\n",
+        "runtime mode/theme methods",
+    )
+    source = _replace_once(
+        source,
+        "        if not text:\n"
+        "            return\n"
+        "\n"
+        "        # Flip back to persona chat tab from Self tab if needed\n",
+        "        if not text:\n"
+        "            return\n"
+        "        if self._handle_theme_command(text):\n"
+        "            self._input_field.clear()\n"
+        "            return\n"
+        "\n"
+        "        # Flip back to persona chat tab from Self tab if needed\n",
+        "send message intercept theme command",
+    )
+    source = _replace_once(
+        source,
+        "        # Build system prompt\n"
+        "        system = SYSTEM_PROMPT_BASE\n"
+        "        if memory_ctx:\n"
+        "            system += f\"\\n\\n{memory_ctx}\"\n"
+        "        if journal_ctx:\n"
+        "            system += f\"\\n\\n{journal_ctx}\"\n"
+        "        system += vampire_ctx\n",
+        "        # Build system prompt\n"
+        "        runtime_mode = _normalize_runtime_mode(self._runtime_persona_mode)\n"
+        "        if runtime_mode == \"default\":\n"
+        "            system = \"\"\n"
+        "        else:\n"
+        "            system = SYSTEM_PROMPT_BASE\n"
+        "            if runtime_mode == \"rp\":\n"
+        "                system += (\n"
+        "                    \"\\n\\n[RUNTIME PERSONA MODE]\\n\"\n"
+        "                    \"Mode: rp\\n\"\n"
+        "                    \"Speak as the selected persona as a fully in-world character. \"\n"
+        "                    \"Do not frame yourself as an AI assistant.\"\n"
+        "                )\n"
+        "            else:\n"
+        "                system += \"\\n\\n[RUNTIME PERSONA MODE]\\nMode: persona\"\n"
+        "        if memory_ctx:\n"
+        "            system += f\"\\n\\n{memory_ctx}\"\n"
+        "        if journal_ctx:\n"
+        "            system += f\"\\n\\n{journal_ctx}\"\n"
+        "        system += vampire_ctx\n",
+        "send message runtime persona system prompt",
+    )
+    source = _replace_once(
+        source,
+        "            self._pending_transmissions = 0\n"
+        "            self._suspended_duration    = \"\"\n"
+        "\n"
+        "        history = self._sessions.get_history()\n",
+        "            self._pending_transmissions = 0\n"
+        "            self._suspended_duration    = \"\"\n"
+        "\n"
+        "        history = self._sessions.get_history()\n"
+        "        for evt in self._consume_hidden_runtime_events():\n"
+        "            history.append({\"role\": \"user\", \"content\": evt})\n",
+        "inject hidden runtime events into history",
+    )
+    source = _replace_once(
+        source,
+        "    def _build_system_section(self, layout: QVBoxLayout) -> None:\n"
+        "        if self._deck._torpor_panel is not None:\n"
+        "            layout.addWidget(QLabel(\"Operational Mode\"))\n"
+        "            layout.addWidget(self._deck._torpor_panel)\n"
+        "\n"
+        "        layout.addWidget(QLabel(\"Idle\"))\n"
+        "        layout.addWidget(self._deck._idle_btn)\n"
+        "\n"
+        "        settings = CFG.get(\"settings\", {})\n"
+        "        tz_auto = bool(settings.get(\"timezone_auto_detect\", True))\n"
+        "        tz_override = str(settings.get(\"timezone_override\", \"\") or \"\").strip()\n"
+        "\n"
+        "        tz_auto_chk = QCheckBox(\"Auto-detect local/system time zone\")\n"
+        "        tz_auto_chk.setChecked(tz_auto)\n"
+        "        tz_auto_chk.toggled.connect(self._deck._set_timezone_auto_detect)\n"
+        "        layout.addWidget(tz_auto_chk)\n"
+        "\n"
+        "        tz_row = QHBoxLayout()\n"
+        "        tz_row.addWidget(QLabel(\"Manual Time Zone Override:\"))\n"
+        "        tz_combo = QComboBox()\n"
+        "        tz_combo.setEditable(True)\n"
+        "        tz_options = [\n"
+        "            \"America/Chicago\", \"America/New_York\", \"America/Los_Angeles\",\n"
+        "            \"America/Denver\", \"UTC\"\n"
+        "        ]\n"
+        "        tz_combo.addItems(tz_options)\n"
+        "        if tz_override:\n"
+        "            if tz_combo.findText(tz_override) < 0:\n"
+        "                tz_combo.addItem(tz_override)\n"
+        "            tz_combo.setCurrentText(tz_override)\n"
+        "        else:\n"
+        "            tz_combo.setCurrentText(\"America/Chicago\")\n"
+        "        tz_combo.setEnabled(not tz_auto)\n"
+        "        tz_combo.currentTextChanged.connect(self._deck._set_timezone_override)\n"
+        "        tz_auto_chk.toggled.connect(lambda enabled: tz_combo.setEnabled(not enabled))\n"
+        "        tz_row.addWidget(tz_combo, 1)\n"
+        "        tz_host = QWidget()\n"
+        "        tz_host.setLayout(tz_row)\n"
+        "        layout.addWidget(tz_host)\n",
+        "    def _build_system_section(self, layout: QVBoxLayout) -> None:\n"
+        "        if self._deck._torpor_panel is not None:\n"
+        "            layout.addWidget(QLabel(\"Operational Mode\"))\n"
+        "            layout.addWidget(self._deck._torpor_panel)\n"
+        "\n"
+        "        layout.addWidget(QLabel(\"Idle\"))\n"
+        "        layout.addWidget(self._deck._idle_btn)\n"
+        "\n"
+        "        layout.addWidget(QLabel(\"Persona Runtime Mode\"))\n"
+        "        self._persona_mode_buttons = {}\n"
+        "        persona_modes = [\n"
+        "            (\"default\", \"Default\"),\n"
+        "            (\"persona\", \"Persona\"),\n"
+        "            (\"rp\", \"RP\"),\n"
+        "        ]\n"
+        "        persona_row = QHBoxLayout()\n"
+        "        for mode_key, label in persona_modes:\n"
+        "            btn = QPushButton(label)\n"
+        "            btn.setCheckable(True)\n"
+        "            btn.clicked.connect(lambda _checked=False, m=mode_key: self._deck._apply_runtime_persona_mode(m))\n"
+        "            persona_row.addWidget(btn)\n"
+        "            self._persona_mode_buttons[mode_key] = btn\n"
+        "        persona_host = QWidget()\n"
+        "        persona_host.setLayout(persona_row)\n"
+        "        layout.addWidget(persona_host)\n"
+        "\n"
+        "        settings = CFG.get(\"settings\", {})\n"
+        "        tz_auto = bool(settings.get(\"timezone_auto_detect\", True))\n"
+        "        tz_override = str(settings.get(\"timezone_override\", \"\") or \"\").strip()\n"
+        "\n"
+        "        tz_auto_chk = QCheckBox(\"Auto-detect local/system time zone\")\n"
+        "        tz_auto_chk.setChecked(tz_auto)\n"
+        "        tz_auto_chk.toggled.connect(self._deck._set_timezone_auto_detect)\n"
+        "        layout.addWidget(tz_auto_chk)\n"
+        "\n"
+        "        tz_row = QHBoxLayout()\n"
+        "        tz_row.addWidget(QLabel(\"Manual Time Zone Override:\"))\n"
+        "        tz_combo = QComboBox()\n"
+        "        tz_combo.setEditable(True)\n"
+        "        tz_options = [\n"
+        "            \"America/Chicago\", \"America/New_York\", \"America/Los_Angeles\",\n"
+        "            \"America/Denver\", \"UTC\"\n"
+        "        ]\n"
+        "        tz_combo.addItems(tz_options)\n"
+        "        if tz_override:\n"
+        "            if tz_combo.findText(tz_override) < 0:\n"
+        "                tz_combo.addItem(tz_override)\n"
+        "            tz_combo.setCurrentText(tz_override)\n"
+        "        else:\n"
+        "            tz_combo.setCurrentText(\"America/Chicago\")\n"
+        "        tz_combo.setEnabled(not tz_auto)\n"
+        "        tz_combo.currentTextChanged.connect(self._deck._set_timezone_override)\n"
+        "        tz_auto_chk.toggled.connect(lambda enabled: tz_combo.setEnabled(not enabled))\n"
+        "        tz_row.addWidget(tz_combo, 1)\n"
+        "        tz_host = QWidget()\n"
+        "        tz_host.setLayout(tz_row)\n"
+        "        layout.addWidget(tz_host)\n",
+        "settings system section persona runtime controls",
+    )
+    source = _replace_once(
+        source,
+        "    def _build_ui_section(self, layout: QVBoxLayout) -> None:\n"
+        "        layout.addWidget(QLabel(\"Window Shell\"))\n"
+        "        layout.addWidget(self._deck._fs_btn)\n"
+        "        layout.addWidget(self._deck._bl_btn)\n",
+        "    def _build_ui_section(self, layout: QVBoxLayout) -> None:\n"
+        "        layout.addWidget(QLabel(\"Theme Mode\"))\n"
+        "        self._theme_mode_buttons = {}\n"
+        "        theme_modes = [\n"
+        "            (\"light\", \"Light\"),\n"
+        "            (\"auto\", \"Auto\"),\n"
+        "            (\"dark\", \"Dark\"),\n"
+        "        ]\n"
+        "        theme_row = QHBoxLayout()\n"
+        "        for mode_key, label in theme_modes:\n"
+        "            btn = QPushButton(label)\n"
+        "            btn.setCheckable(True)\n"
+        "            btn.clicked.connect(lambda _checked=False, m=mode_key: self._deck._apply_runtime_theme_mode(m))\n"
+        "            theme_row.addWidget(btn)\n"
+        "            self._theme_mode_buttons[mode_key] = btn\n"
+        "        theme_host = QWidget()\n"
+        "        theme_host.setLayout(theme_row)\n"
+        "        layout.addWidget(theme_host)\n"
+        "\n"
+        "        layout.addWidget(QLabel(\"Window Shell\"))\n"
+        "        layout.addWidget(self._deck._fs_btn)\n"
+        "        layout.addWidget(self._deck._bl_btn)\n"
+        "        self.sync_runtime_controls()\n"
+        "\n"
+        "    def sync_runtime_controls(self) -> None:\n"
+        "        persona_mode = _normalize_runtime_mode(getattr(self._deck, \"_runtime_persona_mode\", \"persona\"))\n"
+        "        theme_mode = _normalize_theme_mode(getattr(self._deck, \"_runtime_theme_mode\", \"auto\"))\n"
+        "        for mode_key, btn in getattr(self, \"_persona_mode_buttons\", {}).items():\n"
+        "            btn.setChecked(mode_key == persona_mode)\n"
+        "        for mode_key, btn in getattr(self, \"_theme_mode_buttons\", {}).items():\n"
+        "            btn.setChecked(mode_key == theme_mode)\n",
+        "settings ui section theme controls + sync",
     )
     return source
 
@@ -8570,6 +8936,9 @@ class DeckSetupWorker(QThread):
                 "sound_enabled":             True,
                 "google_inbound_interval_ms": 30000,
                 "auto_wake_on_relief":       False,
+                "runtime_persona_mode":      "persona",
+                "runtime_theme_mode":        "auto",
+                "theme_mode":                "auto",
             },
             "persona": {
                 "name":              self._deck_name,
