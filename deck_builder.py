@@ -8202,6 +8202,12 @@ def _patch_embedded_deck_implementation(source: str, log_fn=None) -> str:
 
     source = _replace_once(
         source,
+        "    QGridLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QFrame,\n",
+        "    QGridLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFrame,\n",
+        "QtWidgets import QPlainTextEdit",
+    )
+    source = _replace_once(
+        source,
         '            return [x for x in data if isinstance(x, dict)]',
         '            return [_normalize_jsonl_record(path, x)\n'
         '                    for x in data if isinstance(x, dict)]',
