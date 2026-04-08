@@ -8353,7 +8353,11 @@ def _patch_embedded_deck_implementation(source: str, log_fn=None) -> str:
     )
     source = _replace_once(
         source,
+        "        self.setStyleSheet(STYLE)\n"
+        "\n"
         "        self._build_ui()\n",
+        "        self.setStyleSheet(STYLE)\n"
+        "\n"
         "        self._build_ui()\n"
         "        self._apply_runtime_theme_mode(self._runtime_theme_mode, emit_event=False)\n"
         "        self._apply_runtime_persona_mode(self._runtime_persona_mode, emit_event=False)\n",
