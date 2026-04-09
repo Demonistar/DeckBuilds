@@ -1729,12 +1729,17 @@ BASE_DECK_IMPLEMENTATION = r'''
 from __future__ import annotations
 
 import json
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Callable
 
+from PySide6.QtCore import Qt, QDateTime, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QCalendarWidget,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -1774,6 +1779,11 @@ def _load_settings() -> dict:
     defaults = {
         "runtime_persona_mode": "persona",
         "runtime_theme_mode": "auto",
+        "model": {
+            "type": "ollama",
+            "host": "http://127.0.0.1:11434",
+            "ollama_model": "",
+        },
     }
     if not CFG_PATH.exists():
         return defaults
@@ -1782,6 +1792,9 @@ def _load_settings() -> dict:
         settings = (cfg.get("settings") or {}) if isinstance(cfg, dict) else {}
         if isinstance(settings, dict):
             defaults.update(settings)
+        model = cfg.get("model") if isinstance(cfg, dict) else None
+        if isinstance(model, dict):
+            defaults["model"].update(model)
     except Exception:
         pass
     return defaults
@@ -1798,7 +1811,7 @@ class EchoDeck(QMainWindow):
         self.setCentralWidget(root)
         root_l = QVBoxLayout(root)
         root_l.setContentsMargins(12, 12, 12, 12)
-        root_l.setSpacing(10)
+        root_l.setSpacing(8)
 
         header = QLabel(f"{DECK_NAME} · v{DECK_VERSION}")
         header.setObjectName("deck_header")
@@ -1817,7 +1830,12 @@ class EchoDeck(QMainWindow):
         # Optional modules only load if explicitly registered.
         self._load_optional_modules()
 
+        self._footer = QLabel("")
+        self._footer.setObjectName("deck_footer")
+        root_l.addWidget(self._footer)
+
         self._apply_theme_mode(self._settings.get("runtime_theme_mode", "auto"))
+        self._begin_startup()
 
     def _build_chat_shell(self) -> None:
         page = QWidget()
@@ -1839,8 +1857,31 @@ class EchoDeck(QMainWindow):
         row.addWidget(self._chat_input, 1)
         row.addWidget(send)
 
+        # Lower shell block
+        lower_shell = QFrame()
+        lower_shell.setObjectName("lower_shell")
+        lower_grid = QGridLayout(lower_shell)
+        lower_grid.setContentsMargins(8, 8, 8, 8)
+        lower_grid.setHorizontalSpacing(8)
+        lower_grid.setVerticalSpacing(8)
+
+        self._mirror = QLabel(f"{UI_MIRROR_LABEL}: —")
+        self._emotion = QLabel(f"{UI_EMOTIONS_LABEL}: —")
+        self._primary_orb = QLabel(f"{UI_LEFT_ORB_TITLE} / {UI_LEFT_ORB_LABEL}: stable")
+        self._cycle = QLabel(f"{UI_CYCLE_TITLE}: waxing")
+        self._secondary_orb = QLabel(f"{UI_RIGHT_ORB_TITLE} / {UI_RIGHT_ORB_LABEL}: ready")
+        self._essence = QLabel(f"{UI_ESSENCE_TITLE}: {UI_ESSENCE_PRIMARY}")
+
+        lower_grid.addWidget(self._mirror, 0, 0)
+        lower_grid.addWidget(self._emotion, 0, 1)
+        lower_grid.addWidget(self._primary_orb, 0, 2)
+        lower_grid.addWidget(self._cycle, 1, 0)
+        lower_grid.addWidget(self._secondary_orb, 1, 1)
+        lower_grid.addWidget(self._essence, 1, 2)
+
         lay.addWidget(self._chat_log, 1)
         lay.addLayout(row)
+        lay.addWidget(lower_shell)
         self._tabs.addTab(page, UI_CHAT_WINDOW)
 
     def _build_journal_shell(self) -> None:
@@ -1899,9 +1940,47 @@ class EchoDeck(QMainWindow):
         border = C_BORDER if dark else "#c0c0c0"
         self.setStyleSheet(
             f"QWidget {{ background: {bg}; color: {text}; }}"
-            f"QTextEdit, QLineEdit, QTabWidget::pane {{ background: {panel}; border: 1px solid {border}; }}"
+            f"QTextEdit, QLineEdit, QTabWidget::pane, QFrame#lower_shell {{ background: {panel}; border: 1px solid {border}; }}"
             f"QPushButton {{ background: {C_PRIMARY}; color: white; border: 1px solid {border}; padding: 6px 10px; }}"
+            f"QLabel#deck_header {{ font-size: 14px; font-weight: 600; padding: 4px 2px; }}"
+            f"QLabel#deck_footer {{ color: {C_TEXT_DIM}; border-top: 1px solid {border}; padding-top: 4px; }}"
         )
+
+    def _probe_model_connection(self) -> tuple[bool, str]:
+        model_cfg = self._settings.get("model") if isinstance(self._settings, dict) else None
+        if not isinstance(model_cfg, dict):
+            return False, "No model configuration"
+        model_type = str(model_cfg.get("type", "")).strip().lower()
+        if model_type == "ollama":
+            host = str(model_cfg.get("host", "http://127.0.0.1:11434")).rstrip("/")
+            try:
+                req = urllib.request.Request(f"{host}/api/tags", method="GET")
+                with urllib.request.urlopen(req, timeout=2.5) as resp:
+                    if resp.status == 200:
+                        model = str(model_cfg.get("ollama_model", "")).strip() or "(auto)"
+                        return True, f"Ollama reachable · model {model}"
+                return False, "Ollama returned unexpected status"
+            except Exception as ex:
+                return False, f"Ollama unavailable ({ex.__class__.__name__})"
+        if model_type in {"openai", "claude", "local"}:
+            return True, f"Configured: {model_type}"
+        return False, f"Unsupported model type: {model_type or 'unset'}"
+
+    def _begin_startup(self) -> None:
+        self._set_runtime_state("CONNECTING", "[SYSTEM] Connecting...")
+        QTimer.singleShot(60, self._complete_startup)
+
+    def _complete_startup(self) -> None:
+        ok, detail = self._probe_model_connection()
+        if ok:
+            self._set_runtime_state("READY", f"[SYSTEM] Ready · {detail}")
+        else:
+            self._set_runtime_state("OFFLINE", f"[SYSTEM] Offline · {detail}")
+
+    def _set_runtime_state(self, state: str, line: str) -> None:
+        self._chat_log.append(line)
+        now = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
+        self._footer.setText(f"{UI_FOOTER_STRIP_LABEL}: {state}  ·  {now}  ·  moon: tracking")
 
     def _send_message(self) -> None:
         text = self._chat_input.text().strip()
@@ -1920,7 +1999,7 @@ def main() -> None:
     deck.show()
 
     if warnings:
-        QMessageBox.information(deck, "Startup Validator", "\n".join(warnings))
+        QMessageBox.information(deck, "Startup Validator", "\\n".join(warnings))
 
     app.exec()
 
