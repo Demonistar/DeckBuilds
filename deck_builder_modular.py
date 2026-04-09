@@ -1,373 +1,462 @@
 #!/usr/bin/env python3
-"""Direct-run modular Deck entry point.
+"""PyQt6 modular Deck Builder / Runtime shell.
 
-Architecture for this phase:
-- deck_builder_modular.py is both the builder/runtime entry point.
-- Optional modules are loaded live from a sibling ``Modules/`` folder.
-- Built-in systems are always available and registered internally.
+This entrypoint intentionally launches a GUI-only application.
+No interactive CLI loop is provided.
 """
 
 from __future__ import annotations
 
-import argparse
 import importlib.util
-import json
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
-from typing import Any, Callable
+from typing import Callable
 
-DECK_VERSION = "0.2.0"
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QPlainTextEdit,
+    QSizePolicy,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
-
-# ----------------------------- Service / Category Core -----------------------------
-
-
-class ServiceRegistry:
-    """Simple named service registry used by built-ins and loaded modules."""
-
-    def __init__(self) -> None:
-        self._services: dict[str, Any] = {}
-
-    def register(self, key: str, service: Any) -> None:
-        self._services[key] = service
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return self._services.get(key, default)
-
-    def require(self, key: str) -> Any:
-        if key not in self._services:
-            raise KeyError(f"Missing required service: {key}")
-        return self._services[key]
-
-    def as_dict(self) -> dict[str, Any]:
-        return dict(self._services)
-
-
-class CategoryManager:
-    """Tracks modules grouped by category for display/routing."""
-
-    def __init__(self) -> None:
-        self._items: dict[str, list[str]] = {}
-
-    def add(self, category: str, module_name: str) -> None:
-        self._items.setdefault(category, [])
-        if module_name not in self._items[category]:
-            self._items[category].append(module_name)
-
-    def snapshot(self) -> dict[str, list[str]]:
-        return {k: sorted(v) for k, v in sorted(self._items.items())}
-
-
-class Diagnostics:
-    """In-memory diagnostics/event logger."""
-
-    def __init__(self) -> None:
-        self._entries: list[str] = []
-
-    def log(self, message: str) -> None:
-        self._entries.append(message)
-
-    def tail(self, size: int = 20) -> list[str]:
-        if size <= 0:
-            return []
-        return self._entries[-size:]
-
-
-class PersonaSystem:
-    """Persona baseline for this phase (minimal but persistent)."""
-
-    def __init__(self, runtime_root: Path) -> None:
-        self._store = runtime_root / ".persona.json"
-        self._persona = self._load()
-
-    def _load(self) -> dict[str, Any]:
-        if not self._store.exists():
-            return {
-                "name": "Default",
-                "tone": "helpful",
-                "guardrails": ["safe", "clear", "concise"],
-            }
-        try:
-            return json.loads(self._store.read_text(encoding="utf-8"))
-        except Exception:
-            return {
-                "name": "Default",
-                "tone": "helpful",
-                "guardrails": ["safe", "clear", "concise"],
-            }
-
-    def get(self) -> dict[str, Any]:
-        return dict(self._persona)
-
-    def set(self, payload: dict[str, Any]) -> None:
-        self._persona.update(payload)
-        self._store.write_text(json.dumps(self._persona, indent=2), encoding="utf-8")
-
-
-# ----------------------------- Module registration model ----------------------------
+DECK_VERSION = "1.0.0"
 
 
 @dataclass
 class ModuleSpec:
     name: str
     category: str
-    source: str
-    handler: Callable[[str, "DeckContext"], str] | None = None
-    description: str = ""
+    source: str  # "builtin" or "external"
+    description: str
+    panel_factory: Callable[[], QWidget]
+    enabled: bool = True
 
 
-@dataclass
-class DeckContext:
-    runtime_root: Path
-    modules_dir: Path
-    services: ServiceRegistry
-    categories: CategoryManager
-    diagnostics: Diagnostics
-    modules: dict[str, ModuleSpec] = field(default_factory=dict)
+class ModuleDiscovery:
+    """Discovers optional modules from a sibling Modules/ folder."""
+
+    def __init__(self, runtime_root: Path) -> None:
+        self.runtime_root = runtime_root
+        self.modules_dir = runtime_root / "Modules"
+        self.errors: list[str] = []
+
+    def discover(self) -> list[ModuleSpec]:
+        self.modules_dir.mkdir(exist_ok=True)
+        discovered: list[ModuleSpec] = []
+
+        for module_file in sorted(self.modules_dir.glob("*.py")):
+            if module_file.name.startswith("_"):
+                continue
+
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    f"deck_external_{module_file.stem}", str(module_file)
+                )
+                if spec is None or spec.loader is None:
+                    raise RuntimeError("Could not build import spec")
+
+                py_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(py_module)
+
+                register = getattr(py_module, "register", None)
+                if register is None or not callable(register):
+                    raise ValueError("Missing callable register()")
+
+                module_info = register()
+                if not isinstance(module_info, dict):
+                    raise TypeError("register() must return a dict")
+
+                name = str(module_info.get("name", module_file.stem))
+                category = str(module_info.get("category", "External"))
+                description = str(module_info.get("description", "External module"))
+
+                def build_panel(info: dict = module_info, path: Path = module_file) -> QWidget:
+                    panel = QWidget()
+                    layout = QVBoxLayout(panel)
+                    layout.addWidget(QLabel(f"Module: {info.get('name', path.stem)}"))
+                    layout.addWidget(QLabel(f"Source file: {path.name}"))
+                    desc = QPlainTextEdit()
+                    desc.setReadOnly(True)
+                    desc.setPlainText(str(info.get("description", "No description provided.")))
+                    layout.addWidget(desc)
+                    return panel
+
+                discovered.append(
+                    ModuleSpec(
+                        name=name,
+                        category=category,
+                        source="external",
+                        description=description,
+                        panel_factory=build_panel,
+                    )
+                )
+            except Exception as exc:
+                self.errors.append(
+                    f"Failed loading {module_file.name}: {exc}\n{traceback.format_exc()}"
+                )
+
+        return discovered
 
 
-class ModuleAPI:
-    """API exposed to optional external modules in ./Modules."""
+class DeckBuilderWindow(QMainWindow):
+    def __init__(self, runtime_root: Path) -> None:
+        super().__init__()
+        self.runtime_root = runtime_root
+        self.discovery = ModuleDiscovery(runtime_root)
 
-    def __init__(self, context: DeckContext) -> None:
-        self._context = context
+        self.modules: list[ModuleSpec] = []
+        self.category_tabs: dict[str, QTabWidget] = {}
 
-    def register_module(
-        self,
-        *,
-        name: str,
-        category: str,
-        handler: Callable[[str, DeckContext], str] | None = None,
-        description: str = "",
-    ) -> None:
-        if name in self._context.modules:
-            raise ValueError(f"Module '{name}' already registered")
-        spec = ModuleSpec(
-            name=name,
-            category=category,
-            source="external",
-            handler=handler,
-            description=description,
-        )
-        self._context.modules[name] = spec
-        self._context.categories.add(category, name)
-        self._context.diagnostics.log(f"Registered external module: {name}")
+        self.setWindowTitle(f"Deck Builder Modular v{DECK_VERSION}")
+        self.resize(1400, 900)
 
-    def register_service(self, key: str, service: Any) -> None:
-        self._context.services.register(key, service)
+        self._build_ui()
+        self._load_modules()
+        self._render_categories()
 
-    @property
-    def context(self) -> DeckContext:
-        return self._context
+    # ------------------------- UI composition -------------------------
 
+    def _build_ui(self) -> None:
+        root = QWidget()
+        root_layout = QVBoxLayout(root)
 
-class StartupValidator:
-    """Startup validator framework for direct-run architecture."""
+        header = QLabel("Deck Builder Runtime / Visual Modular Shell")
+        header.setStyleSheet("font-size: 18px; font-weight: 700;")
+        root_layout.addWidget(header)
 
-    def __init__(self, context: DeckContext) -> None:
-        self.context = context
+        body = QHBoxLayout()
+        root_layout.addLayout(body, stretch=1)
 
-    def validate(self) -> list[str]:
-        issues: list[str] = []
-        if not self.context.modules_dir.exists():
-            issues.append(f"Modules folder missing: {self.context.modules_dir}")
-        if not self.context.modules_dir.is_dir():
-            issues.append(f"Modules path is not a directory: {self.context.modules_dir}")
-        if "persona" not in self.context.services.as_dict():
-            issues.append("Persona service is not registered")
-        return issues
+        # Left: category navigation
+        left_box = QGroupBox("Categories")
+        left_layout = QVBoxLayout(left_box)
+        self.category_list = QListWidget()
+        self.category_list.currentTextChanged.connect(self._on_category_selected)
+        left_layout.addWidget(self.category_list)
+        body.addWidget(left_box, stretch=1)
 
+        # Center: module tabs area
+        center_box = QGroupBox("Modules in Selected Category")
+        center_layout = QVBoxLayout(center_box)
+        self.category_stack = QTabWidget()
+        self.category_stack.setTabPosition(QTabWidget.TabPosition.North)
+        center_layout.addWidget(self.category_stack)
+        body.addWidget(center_box, stretch=3)
 
-# ------------------------------- Direct runtime shell -------------------------------
+        # Right: discovery and module manager summary
+        right_box = QGroupBox("Discovery / Module Manager")
+        right_layout = QVBoxLayout(right_box)
 
+        self.discovery_summary = QLabel("Scanning modules...")
+        self.discovery_summary.setWordWrap(True)
+        right_layout.addWidget(self.discovery_summary)
 
-class DeckRuntime:
-    def __init__(self, script_path: Path) -> None:
-        runtime_root = script_path.resolve().parent
-        modules_dir = runtime_root / "Modules"
+        self.manager_list = QListWidget()
+        right_layout.addWidget(self.manager_list, stretch=1)
 
-        services = ServiceRegistry()
-        categories = CategoryManager()
-        diagnostics = Diagnostics()
-        context = DeckContext(
-            runtime_root=runtime_root,
-            modules_dir=modules_dir,
-            services=services,
-            categories=categories,
-            diagnostics=diagnostics,
-        )
+        manager_actions = QHBoxLayout()
+        self.enable_btn = QPushButton("Enable")
+        self.disable_btn = QPushButton("Disable")
+        self.install_btn = QPushButton("Install")
+        self.remove_btn = QPushButton("Remove")
 
-        self.context = context
-        self.api = ModuleAPI(context)
-        self.persona = PersonaSystem(runtime_root)
+        self.enable_btn.clicked.connect(self._enable_selected_module)
+        self.disable_btn.clicked.connect(self._disable_selected_module)
+        self.install_btn.clicked.connect(self._install_placeholder)
+        self.remove_btn.clicked.connect(self._remove_placeholder)
 
-        self.context.services.register("persona", self.persona)
-        self.context.services.register("diagnostics", diagnostics)
-        self.context.services.register("module_api", self.api)
+        manager_actions.addWidget(self.enable_btn)
+        manager_actions.addWidget(self.disable_btn)
+        manager_actions.addWidget(self.install_btn)
+        manager_actions.addWidget(self.remove_btn)
+        right_layout.addLayout(manager_actions)
 
-        self._register_builtins()
+        body.addWidget(right_box, stretch=2)
 
-    def _register_builtins(self) -> None:
-        builtins = [
+        # Bottom: prompt area + status panel
+        bottom = QHBoxLayout()
+
+        prompt_box = QGroupBox("Prompt Area")
+        prompt_layout = QVBoxLayout(prompt_box)
+        self.prompt_input = QPlainTextEdit()
+        self.prompt_input.setPlaceholderText("Enter prompt text here...")
+        self.prompt_input.setMinimumHeight(120)
+        prompt_layout.addWidget(self.prompt_input)
+
+        prompt_actions = QHBoxLayout()
+        self.send_btn = QPushButton("Send")
+        self.send_btn.clicked.connect(self._send_prompt)
+        self.token_label = QLabel("Tokens: --")
+        prompt_actions.addWidget(self.send_btn)
+        prompt_actions.addWidget(self.token_label)
+        prompt_actions.addStretch(1)
+        prompt_layout.addLayout(prompt_actions)
+
+        bottom.addWidget(prompt_box, stretch=2)
+
+        status_box = QGroupBox("State / Status Log")
+        status_layout = QVBoxLayout(status_box)
+        self.status_log = QPlainTextEdit()
+        self.status_log.setReadOnly(True)
+        self.status_log.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        status_layout.addWidget(self.status_log)
+        bottom.addWidget(status_box, stretch=3)
+
+        root_layout.addLayout(bottom, stretch=1)
+
+        self.setCentralWidget(root)
+
+    # ------------------------- Built-ins + discovery -------------------------
+
+    def _builtin_modules(self) -> list[ModuleSpec]:
+        def placeholder_panel(title: str, message: str) -> Callable[[], QWidget]:
+            def build() -> QWidget:
+                panel = QFrame()
+                layout = QVBoxLayout(panel)
+                label = QLabel(title)
+                label.setStyleSheet("font-size: 16px; font-weight: 600;")
+                layout.addWidget(label)
+                text = QPlainTextEdit()
+                text.setReadOnly(True)
+                text.setPlainText(message)
+                layout.addWidget(text)
+                return panel
+
+            return build
+
+        return [
             ModuleSpec(
-                name="System.Diagnostics",
-                category="System",
+                name="Instruments",
+                category="Built-in Systems",
                 source="builtin",
-                handler=lambda msg, ctx: "\n".join(ctx.diagnostics.tail(30)) or "No diagnostics yet.",
-                description="Shows recent diagnostics entries.",
+                description="Instrumentation controls and baseline tools.",
+                panel_factory=placeholder_panel(
+                    "Instruments",
+                    "Placeholder for instrument controls, deck hooks, and runtime signals.",
+                ),
             ),
             ModuleSpec(
-                name="System.Persona",
-                category="System",
+                name="Diagnostics",
+                category="Built-in Systems",
                 source="builtin",
-                handler=lambda msg, ctx: json.dumps(ctx.services.require("persona").get(), indent=2),
-                description="Displays current persona baseline.",
+                description="Runtime diagnostics and health checks.",
+                panel_factory=placeholder_panel(
+                    "Diagnostics",
+                    "Placeholder for diagnostics streams, warnings, and health metrics.",
+                ),
             ),
             ModuleSpec(
-                name="System.Modules",
-                category="System",
+                name="Settings",
+                category="Built-in Systems",
                 source="builtin",
-                handler=lambda msg, ctx: json.dumps(ctx.categories.snapshot(), indent=2),
-                description="Lists module categories and names.",
+                description="Application and module settings.",
+                panel_factory=placeholder_panel(
+                    "Settings",
+                    "Placeholder for app configuration, runtime profile, and persisted options.",
+                ),
             ),
             ModuleSpec(
-                name="Prompt.Echo",
-                category="Prompt",
+                name="Built-in Calendar",
+                category="Built-in Systems",
                 source="builtin",
-                handler=lambda msg, ctx: f"Echo: {msg}",
-                description="Baseline prompt interface echo responder.",
+                description="Baseline calendar integration placeholder.",
+                panel_factory=placeholder_panel(
+                    "Built-in Calendar",
+                    "Placeholder for date-aware planning, scheduling, and timeline widgets.",
+                ),
+            ),
+            ModuleSpec(
+                name="Persona System",
+                category="Built-in Systems",
+                source="builtin",
+                description="Persona management and behavioral profile.",
+                panel_factory=placeholder_panel(
+                    "Persona System",
+                    "Placeholder for persona profile editor and behavior constraints.",
+                ),
+            ),
+            ModuleSpec(
+                name="Module Manager",
+                category="Built-in Systems",
+                source="builtin",
+                description="Installed/discovered module management view.",
+                panel_factory=self._module_manager_panel,
+            ),
+            ModuleSpec(
+                name="AI Startup Validator",
+                category="Built-in Systems",
+                source="builtin",
+                description="Startup validation results and remediation guidance.",
+                panel_factory=placeholder_panel(
+                    "AI Startup Validator",
+                    "Checks for runtime folder shape, Modules availability, and module load errors.",
+                ),
             ),
         ]
 
-        for spec in builtins:
-            self.context.modules[spec.name] = spec
-            self.context.categories.add(spec.category, spec.name)
-            self.context.diagnostics.log(f"Registered built-in module: {spec.name}")
+    def _module_manager_panel(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.addWidget(QLabel("Module Manager Panel"))
 
-    def discover_external_modules(self) -> None:
-        self.context.modules_dir.mkdir(exist_ok=True)
-        for file in sorted(self.context.modules_dir.glob("*.py")):
-            if file.name.startswith("_"):
-                continue
-            self._load_external_module(file)
+        instructions = QPlainTextEdit()
+        instructions.setReadOnly(True)
+        instructions.setPlainText(
+            "Use the Discovery / Module Manager section on the right to select modules and "
+            "run scaffolded Enable/Disable/Install/Remove actions."
+        )
+        layout.addWidget(instructions)
+        return panel
 
-    def _load_external_module(self, file: Path) -> None:
-        module_name = f"deck_module_{file.stem}"
-        try:
-            spec = importlib.util.spec_from_file_location(module_name, str(file))
-            if spec is None or spec.loader is None:
-                raise RuntimeError("Could not create module spec")
-            py_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(py_module)
-            self._register_from_module(py_module, file)
-        except Exception as exc:
-            self.context.diagnostics.log(
-                f"Failed to load module '{file.name}': {exc}\n{traceback.format_exc()}"
+    def _load_modules(self) -> None:
+        self.modules = self._builtin_modules()
+        external = self.discovery.discover()
+        self.modules.extend(external)
+
+        builtins = [m for m in self.modules if m.source == "builtin"]
+        externals = [m for m in self.modules if m.source == "external"]
+
+        self.discovery_summary.setText(
+            "\n".join(
+                [
+                    f"Runtime root: {self.runtime_root}",
+                    f"Modules path scanned: {self.discovery.modules_dir}",
+                    f"Built-in systems: {len(builtins)}",
+                    f"External modules discovered: {len(externals)}",
+                ]
             )
+        )
 
-    def _register_from_module(self, py_module: ModuleType, file: Path) -> None:
-        register = getattr(py_module, "register", None)
-        if register is None or not callable(register):
-            self.context.diagnostics.log(
-                f"Skipped module '{file.name}' (missing callable register(api))"
+        if self.discovery.errors:
+            self._log("Startup validator: module load issues detected.")
+            for err in self.discovery.errors:
+                self._log(err)
+
+        self.manager_list.clear()
+        for module in self.modules:
+            item = QListWidgetItem(
+                f"[{module.source}] {module.name} ({module.category}) - {'enabled' if module.enabled else 'disabled'}"
             )
+            item.setData(Qt.ItemDataRole.UserRole, module.name)
+            self.manager_list.addItem(item)
+
+    def _render_categories(self) -> None:
+        self.category_tabs.clear()
+        self.category_list.clear()
+        self.category_stack.clear()
+
+        categories = sorted({m.category for m in self.modules})
+        for category in categories:
+            self.category_list.addItem(category)
+
+            tabs = QTabWidget()
+            for module in [m for m in self.modules if m.category == category and m.enabled]:
+                tabs.addTab(module.panel_factory(), module.name)
+            if tabs.count() == 0:
+                empty = QWidget()
+                lay = QVBoxLayout(empty)
+                lay.addWidget(QLabel("No enabled modules in this category."))
+                tabs.addTab(empty, "Empty")
+
+            self.category_tabs[category] = tabs
+            self.category_stack.addTab(tabs, category)
+
+        if self.category_list.count() > 0:
+            self.category_list.setCurrentRow(0)
+
+    # ------------------------- interactions -------------------------
+
+    def _log(self, message: str) -> None:
+        self.status_log.appendPlainText(message)
+
+    def _on_category_selected(self, category: str) -> None:
+        if not category:
             return
-        register(self.api)
-        self.context.diagnostics.log(f"Loaded module file: {file.name}")
+        for idx in range(self.category_stack.count()):
+            if self.category_stack.tabText(idx) == category:
+                self.category_stack.setCurrentIndex(idx)
+                self._log(f"Category selected: {category}")
+                break
 
-    def validate_startup(self) -> list[str]:
-        validator = StartupValidator(self.context)
-        return validator.validate()
+    def _send_prompt(self) -> None:
+        text = self.prompt_input.toPlainText().strip()
+        if not text:
+            self._log("Prompt send ignored: no input text.")
+            return
 
-    def run_prompt_interface(self) -> None:
-        print("=" * 80)
-        print(f"Deck Modular Runtime v{DECK_VERSION}")
-        print(f"Entry: {self.context.runtime_root / 'deck_builder_modular.py'}")
-        print(f"Modules folder: {self.context.modules_dir}")
-        print("Type '/help' for commands. Type '/quit' to exit.")
-        print("=" * 80)
+        token_estimate = len(text.split())
+        self.token_label.setText(f"Tokens (est.): {token_estimate}")
+        self._log(f"Prompt submitted ({token_estimate} tokens est.): {text}")
+        self.prompt_input.clear()
 
-        while True:
-            raw = input("deck> ").strip()
-            if not raw:
-                continue
-            if raw in {"/quit", "/exit"}:
-                print("Goodbye.")
-                return
-            if raw == "/help":
-                self._print_help()
-                continue
-            if raw == "/list":
-                print(json.dumps(self.context.categories.snapshot(), indent=2))
-                continue
-            if raw.startswith("/use "):
-                _, module_name, *message_bits = raw.split(" ")
-                message = " ".join(message_bits).strip() or "status"
-                print(self.invoke(module_name, message))
-                continue
-            if raw.startswith("/persona "):
-                payload_text = raw.removeprefix("/persona ").strip()
-                try:
-                    payload = json.loads(payload_text)
-                except json.JSONDecodeError as exc:
-                    print(f"Invalid JSON payload: {exc}")
-                    continue
-                self.persona.set(payload)
-                print("Persona updated.")
-                continue
+    def _selected_module_name(self) -> str | None:
+        item = self.manager_list.currentItem()
+        if item is None:
+            return None
+        value = item.data(Qt.ItemDataRole.UserRole)
+        return str(value) if value else None
 
-            # Default route goes to prompt baseline.
-            print(self.invoke("Prompt.Echo", raw))
+    def _enable_selected_module(self) -> None:
+        name = self._selected_module_name()
+        if not name:
+            self._log("Enable action ignored: no module selected.")
+            return
+        for module in self.modules:
+            if module.name == name:
+                module.enabled = True
+                self._log(f"Module enabled: {name}")
+                break
+        self._load_modules()
+        self._render_categories()
 
-    def _print_help(self) -> None:
-        print("Commands:")
-        print("  /help                 Show this help")
-        print("  /list                 Show discovered modules by category")
-        print("  /use <name> [msg]     Invoke a module by exact name")
-        print("  /persona <json>       Merge persona baseline with JSON")
-        print("  /quit                 Exit")
+    def _disable_selected_module(self) -> None:
+        name = self._selected_module_name()
+        if not name:
+            self._log("Disable action ignored: no module selected.")
+            return
+        for module in self.modules:
+            if module.name == name:
+                module.enabled = False
+                self._log(f"Module disabled: {name}")
+                break
+        self._load_modules()
+        self._render_categories()
 
-    def invoke(self, module_name: str, message: str) -> str:
-        spec = self.context.modules.get(module_name)
-        if spec is None:
-            return f"Unknown module '{module_name}'. Use /list to inspect available modules."
-        if spec.handler is None:
-            return f"Module '{module_name}' has no callable handler."
-        try:
-            result = spec.handler(message, self.context)
-            self.context.diagnostics.log(f"Invoked module {module_name!r} with message {message!r}")
-            return str(result)
-        except Exception as exc:
-            self.context.diagnostics.log(f"Handler error in {module_name}: {exc}")
-            return f"Error running '{module_name}': {exc}"
+    def _install_placeholder(self) -> None:
+        QMessageBox.information(
+            self,
+            "Install Module",
+            "Install action scaffolded. Add install workflow implementation here.",
+        )
+        self._log("Install action triggered (scaffold placeholder).")
+
+    def _remove_placeholder(self) -> None:
+        QMessageBox.information(
+            self,
+            "Remove Module",
+            "Remove action scaffolded. Add uninstall workflow implementation here.",
+        )
+        self._log("Remove action triggered (scaffold placeholder).")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Direct-run modular Deck runtime")
-    parser.add_argument(
-        "--list",
-        action="store_true",
-        help="Print discovered modules and exit",
-    )
-    args = parser.parse_args()
-
-    runtime = DeckRuntime(Path(__file__))
-    runtime.discover_external_modules()
-
-    issues = runtime.validate_startup()
-    if issues:
-        print("Startup validator warnings:")
-        for issue in issues:
-            print(f"- {issue}")
-
-    if args.list:
-        print(json.dumps(runtime.context.categories.snapshot(), indent=2))
-        return 0
-
-    runtime.run_prompt_interface()
-    return 0
+    app = QApplication([])
+    window = DeckBuilderWindow(Path(__file__).resolve().parent)
+    window.show()
+    return app.exec()
 
 
 if __name__ == "__main__":
