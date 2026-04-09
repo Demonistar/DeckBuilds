@@ -8226,7 +8226,7 @@ def _patch_embedded_deck_implementation(source: str, log_fn=None) -> str:
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._min_lines = 1
+        self._min_lines = 2
         self._max_lines = 6
         self.setAcceptDrops(True)
         self.setTabChangesFocus(False)
@@ -8253,6 +8253,8 @@ def _patch_embedded_deck_implementation(source: str, log_fn=None) -> str:
         min_h = self._height_for_lines(self._min_lines)
         max_h = self._height_for_lines(self._max_lines)
         target = max(min_h, min(max_h, doc_h))
+        self.setMinimumHeight(min_h)
+        self.setMaximumHeight(max_h)
         self.setFixedHeight(target)
         policy = (
             Qt.ScrollBarPolicy.ScrollBarAsNeeded
@@ -8424,6 +8426,7 @@ class EchoDeck(QMainWindow):
         input_container = QVBoxLayout()
         input_container.setContentsMargins(0, 0, 0, 0)
         input_container.setSpacing(2)
+        input_container.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
 
         token_row = QHBoxLayout()
         token_row.setContentsMargins(0, 0, 0, 0)
@@ -8437,6 +8440,8 @@ class EchoDeck(QMainWindow):
 
         input_row = QHBoxLayout()
         input_row.setContentsMargins(0, 0, 0, 0)
+        input_row.setSpacing(8)
+        input_row.setAlignment(Qt.AlignmentFlag.AlignBottom)
         prompt_sym = QLabel("✦")
         prompt_sym.setStyleSheet(
             f"color: {C_CRIMSON}; font-size: 16px; font-weight: bold; border: none;"
@@ -8445,7 +8450,7 @@ class EchoDeck(QMainWindow):
 
         self._input_field = DeckChatInput()
         self._input_field.setPlaceholderText(UI_INPUT_PLACEHOLDER)
-        self._input_field.set_line_limits(1, 6)
+        self._input_field.set_line_limits(2, 6)
         self._input_field.send_requested.connect(self._send_message)
         self._input_field.textChanged.connect(self._on_prompt_text_changed)
         self._input_field.drop_warning.connect(
@@ -8459,7 +8464,7 @@ class EchoDeck(QMainWindow):
         self._send_btn.setEnabled(False)
 
         input_row.addWidget(prompt_sym, 0, Qt.AlignmentFlag.AlignBottom)
-        input_row.addWidget(self._input_field, 1, Qt.AlignmentFlag.AlignBottom)
+        input_row.addWidget(self._input_field, 1)
         input_row.addWidget(self._send_btn, 0, Qt.AlignmentFlag.AlignBottom)
         input_container.addLayout(input_row)
         layout.addLayout(input_container)
