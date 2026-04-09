@@ -8203,7 +8203,7 @@ def _patch_embedded_deck_implementation(source: str, log_fn=None) -> str:
     source = _replace_once(
         source,
         "import random\nimport threading\nimport urllib.request\nimport uuid\nfrom datetime import datetime, date, timedelta, timezone\n",
-        "import random\nimport threading\nimport urllib.request\nimport uuid\nimport ast\nimport operator\nfrom datetime import datetime, date, timedelta, timezone\n",
+        "import random\nimport threading\nimport urllib.request\nimport uuid\nimport ast\nimport operator\nimport html\nfrom datetime import datetime, date, timedelta, timezone\n",
         "runtime imports for chat input helpers",
     )
 
@@ -8658,6 +8658,91 @@ class EchoDeck(QMainWindow):
         '            return [_normalize_jsonl_record(path, x)\n'
         '                    for x in data if isinstance(x, dict)]',
         "read_jsonl array mode fallback",
+    )
+    source = _replace_once(
+        source,
+        "    # ── CHAT DISPLAY ───────────────────────────────────────────────────────────\n"
+        "    def _append_chat(self, speaker: str, text: str) -> None:\n"
+        "        colors = {\n"
+        "            \"YOU\":     C_GOLD,\n"
+        "            DECK_NAME.upper():C_GOLD,\n"
+        "            \"SYSTEM\":  C_PURPLE,\n"
+        "            \"ERROR\":   C_BLOOD,\n"
+        "        }\n"
+        "        label_colors = {\n"
+        "            \"YOU\":     C_GOLD_DIM,\n"
+        "            DECK_NAME.upper():C_CRIMSON,\n"
+        "            \"SYSTEM\":  C_PURPLE,\n"
+        "            \"ERROR\":   C_BLOOD,\n"
+        "        }\n"
+        "        color       = colors.get(speaker, C_GOLD)\n"
+        "        label_color = label_colors.get(speaker, C_GOLD_DIM)\n"
+        "        timestamp   = datetime.now().strftime(\"%H:%M:%S\")\n"
+        "\n"
+        "        if speaker == \"SYSTEM\":\n"
+        "            self._chat_display.append(\n"
+        "                f'<span style=\"color:{C_TEXT_DIM}; font-size:10px;\">'\n"
+        "                f'[{timestamp}] </span>'\n"
+        "                f'<span style=\"color:{label_color};\">✦ {text}</span>'\n"
+        "            )\n"
+        "        else:\n"
+        "            self._chat_display.append(\n"
+        "                f'<span style=\"color:{C_TEXT_DIM}; font-size:10px;\">'\n"
+        "                f'[{timestamp}] </span>'\n"
+        "                f'<span style=\"color:{label_color}; font-weight:bold;\">'\n"
+        "                f'{speaker} ❧</span> '\n"
+        "                f'<span style=\"color:{color};\">{text}</span>'\n"
+        "            )\n"
+        "\n"
+        "        # Add blank line after Morganna's response (not during streaming)\n"
+        "        if speaker == DECK_NAME.upper():\n"
+        "            self._chat_display.append(\"\")\n"
+        "\n"
+        "        self._chat_display.verticalScrollBar().setValue(\n"
+        "            self._chat_display.verticalScrollBar().maximum()\n"
+        "        )\n",
+        "    # ── CHAT DISPLAY ───────────────────────────────────────────────────────────\n"
+        "    def _append_chat(self, speaker: str, text: str) -> None:\n"
+        "        colors = {\n"
+        "            \"YOU\":     C_GOLD,\n"
+        "            DECK_NAME.upper():C_GOLD,\n"
+        "            \"SYSTEM\":  C_PURPLE,\n"
+        "            \"ERROR\":   C_BLOOD,\n"
+        "        }\n"
+        "        label_colors = {\n"
+        "            \"YOU\":     C_GOLD_DIM,\n"
+        "            DECK_NAME.upper():C_CRIMSON,\n"
+        "            \"SYSTEM\":  C_PURPLE,\n"
+        "            \"ERROR\":   C_BLOOD,\n"
+        "        }\n"
+        "        color       = colors.get(speaker, C_GOLD)\n"
+        "        label_color = label_colors.get(speaker, C_GOLD_DIM)\n"
+        "        timestamp   = datetime.now().strftime(\"%H:%M:%S\")\n"
+        "        safe_text   = html.escape(text).replace(\"\\n\", \"<br>\")\n"
+        "\n"
+        "        if speaker == \"SYSTEM\":\n"
+        "            self._chat_display.append(\n"
+        "                f'<span style=\"color:{C_TEXT_DIM}; font-size:10px;\">'\n"
+        "                f'[{timestamp}] </span>'\n"
+        "                f'<span style=\"color:{label_color};\">✦ {safe_text}</span>'\n"
+        "            )\n"
+        "        else:\n"
+        "            self._chat_display.append(\n"
+        "                f'<span style=\"color:{C_TEXT_DIM}; font-size:10px;\">'\n"
+        "                f'[{timestamp}] </span>'\n"
+        "                f'<span style=\"color:{label_color}; font-weight:bold;\">'\n"
+        "                f'{speaker} ❧</span> '\n"
+        "                f'<span style=\"color:{color};\">{safe_text}</span>'\n"
+        "            )\n"
+        "\n"
+        "        # Add blank line after Morganna's response (not during streaming)\n"
+        "        if speaker == DECK_NAME.upper():\n"
+        "            self._chat_display.append(\"\")\n"
+        "\n"
+        "        self._chat_display.verticalScrollBar().setValue(\n"
+        "            self._chat_display.verticalScrollBar().maximum()\n"
+        "        )\n",
+        "chat display preserve multiline user text",
     )
     source = _replace_once(
         source,
