@@ -8202,9 +8202,450 @@ def _patch_embedded_deck_implementation(source: str, log_fn=None) -> str:
 
     source = _replace_once(
         source,
+        "import random\nimport threading\nimport urllib.request\nimport uuid\nfrom datetime import datetime, date, timedelta, timezone\n",
+        "import random\nimport threading\nimport urllib.request\nimport uuid\nimport ast\nimport operator\nfrom datetime import datetime, date, timedelta, timezone\n",
+        "runtime imports for chat input helpers",
+    )
+
+    source = _replace_once(
+        source,
         "    QGridLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QFrame,\n",
         "    QGridLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFrame,\n",
         "QtWidgets import QPlainTextEdit",
+    )
+    source = _replace_once(
+        source,
+        """class EchoDeck(QMainWindow):
+""",
+        """class DeckChatInput(QTextEdit):
+    send_requested = Signal()
+    drop_warning = Signal(str)
+
+    _SUPPORTED_TEXT_EXTS = {".txt", ".md", ".json", ".py", ".log"}
+    _MAX_DROP_BYTES = 200_000
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._min_lines = 1
+        self._max_lines = 6
+        self.setAcceptDrops(True)
+        self.setTabChangesFocus(False)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.textChanged.connect(self._recompute_height)
+        self._recompute_height()
+
+    def set_line_limits(self, min_lines: int = 1, max_lines: int = 6) -> None:
+        self._min_lines = max(1, int(min_lines))
+        self._max_lines = max(self._min_lines, int(max_lines))
+        self._recompute_height()
+
+    def _line_height(self) -> int:
+        return max(1, self.fontMetrics().lineSpacing())
+
+    def _height_for_lines(self, lines: int) -> int:
+        margins = int(self.contentsMargins().top() + self.contentsMargins().bottom())
+        doc_margin = int(self.document().documentMargin() * 2)
+        frame = int(self.frameWidth() * 2)
+        return (self._line_height() * max(1, lines)) + margins + doc_margin + frame + 4
+
+    def _recompute_height(self) -> None:
+        doc_h = int(self.document().size().height()) + 8
+        min_h = self._height_for_lines(self._min_lines)
+        max_h = self._height_for_lines(self._max_lines)
+        target = max(min_h, min(max_h, doc_h))
+        self.setFixedHeight(target)
+        policy = (
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            if doc_h > max_h else
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.setVerticalScrollBarPolicy(policy)
+
+    def keyPressEvent(self, event):
+        is_enter = event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+        if is_enter:
+            mods = event.modifiers()
+            if mods & Qt.KeyboardModifier.ControlModifier:
+                super().keyPressEvent(event)
+                return
+            if mods & Qt.KeyboardModifier.ShiftModifier:
+                super().keyPressEvent(event)
+                return
+            self.send_requested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def dragEnterEvent(self, event):
+        md = event.mimeData()
+        if md.hasText():
+            event.acceptProposedAction()
+            return
+        if md.hasUrls():
+            for url in md.urls():
+                if url.isLocalFile():
+                    ext = Path(url.toLocalFile()).suffix.lower()
+                    if ext in self._SUPPORTED_TEXT_EXTS:
+                        event.acceptProposedAction()
+                        return
+        event.ignore()
+
+    def dropEvent(self, event):
+        md = event.mimeData()
+        inserted_parts: list[str] = []
+
+        if md.hasText():
+            text = md.text()
+            if text:
+                inserted_parts.append(text)
+
+        if md.hasUrls():
+            for url in md.urls():
+                if not url.isLocalFile():
+                    continue
+                p = Path(url.toLocalFile())
+                if p.suffix.lower() not in self._SUPPORTED_TEXT_EXTS:
+                    self.drop_warning.emit(f"Unsupported drop type ignored: {p.name}")
+                    continue
+                try:
+                    if p.stat().st_size > self._MAX_DROP_BYTES:
+                        kb = self._MAX_DROP_BYTES // 1024
+                        self.drop_warning.emit(
+                            f"Drop skipped: {p.name} exceeds {kb}KB safety limit."
+                        )
+                        continue
+                    try:
+                        blob = p.read_text(encoding="utf-8")
+                    except UnicodeDecodeError:
+                        blob = p.read_text(encoding="latin-1", errors="replace")
+                    if blob:
+                        inserted_parts.append(blob)
+                except Exception as ex:
+                    self.drop_warning.emit(f"Could not read dropped file {p.name}: {ex}")
+
+        if inserted_parts:
+            text_to_insert = "\\n".join(x for x in inserted_parts if x)
+            cursor = self.textCursor()
+            cursor.insertText(text_to_insert)
+            self.setTextCursor(cursor)
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+
+class DeckSlashCommandDispatcher:
+    _HELP_LINES = [
+        "/help",
+        "/modules",
+        "/module <name>",
+        "/clear",
+        "/newchat",
+        "/history",
+        "/notes",
+        "/system",
+        "/calc <expression>",
+    ]
+
+    def dispatch(self, deck: "EchoDeck", text: str) -> bool:
+        raw = (text or "").strip()
+        if not raw.startswith("/"):
+            return False
+        body = raw[1:].strip()
+        if not body:
+            deck._append_chat("SYSTEM", "Command expected after '/'. Try /help.")
+            return True
+
+        parts = body.split(maxsplit=1)
+        cmd = parts[0].lower()
+        args = parts[1] if len(parts) > 1 else ""
+
+        if cmd == "help":
+            deck._append_chat("SYSTEM", "Available commands: " + ", ".join(self._HELP_LINES))
+            return True
+        if cmd == "modules":
+            deck._slash_list_modules()
+            return True
+        if cmd == "module":
+            deck._slash_open_module(args)
+            return True
+        if cmd == "clear":
+            deck._input_field.clear()
+            return True
+        if cmd == "newchat":
+            deck._slash_new_chat()
+            return True
+        if cmd == "history":
+            deck._slash_history()
+            return True
+        if cmd == "notes":
+            deck._slash_open_notes()
+            return True
+        if cmd == "system":
+            deck._slash_open_system()
+            return True
+        if cmd == "calc":
+            deck._slash_calc(args)
+            return True
+
+        deck._append_chat("SYSTEM", f"Unknown command: /{cmd}. Use /help.")
+        return True
+
+
+class EchoDeck(QMainWindow):
+""",
+        "inject multiline chat input + slash command classes",
+    )
+    source = _replace_once(
+        source,
+        """        # ── Input row ──────────────────────────────────────────────────
+        input_row = QHBoxLayout()
+        prompt_sym = QLabel("✦")
+        prompt_sym.setStyleSheet(
+            f"color: {C_CRIMSON}; font-size: 16px; font-weight: bold; border: none;"
+        )
+        prompt_sym.setFixedWidth(20)
+
+        self._input_field = QLineEdit()
+        self._input_field.setPlaceholderText(UI_INPUT_PLACEHOLDER)
+        self._input_field.returnPressed.connect(self._send_message)
+        self._input_field.setEnabled(False)
+
+        self._send_btn = QPushButton(UI_SEND_BUTTON)
+        self._send_btn.setFixedWidth(110)
+        self._send_btn.clicked.connect(self._send_message)
+        self._send_btn.setEnabled(False)
+
+        input_row.addWidget(prompt_sym)
+        input_row.addWidget(self._input_field)
+        input_row.addWidget(self._send_btn)
+        layout.addLayout(input_row)
+""",
+        """        # ── Input row ──────────────────────────────────────────────────
+        input_container = QVBoxLayout()
+        input_container.setContentsMargins(0, 0, 0, 0)
+        input_container.setSpacing(2)
+
+        token_row = QHBoxLayout()
+        token_row.setContentsMargins(0, 0, 0, 0)
+        token_row.addStretch(1)
+        self._prompt_token_label = QLabel("Prompt tokens (est): 0")
+        self._prompt_token_label.setStyleSheet(
+            f"color: {C_TEXT_DIM}; font-size: 10px; border: none;"
+        )
+        token_row.addWidget(self._prompt_token_label, 0, Qt.AlignmentFlag.AlignRight)
+        input_container.addLayout(token_row)
+
+        input_row = QHBoxLayout()
+        input_row.setContentsMargins(0, 0, 0, 0)
+        prompt_sym = QLabel("✦")
+        prompt_sym.setStyleSheet(
+            f"color: {C_CRIMSON}; font-size: 16px; font-weight: bold; border: none;"
+        )
+        prompt_sym.setFixedWidth(20)
+
+        self._input_field = DeckChatInput()
+        self._input_field.setPlaceholderText(UI_INPUT_PLACEHOLDER)
+        self._input_field.set_line_limits(1, 6)
+        self._input_field.send_requested.connect(self._send_message)
+        self._input_field.textChanged.connect(self._on_prompt_text_changed)
+        self._input_field.drop_warning.connect(
+            lambda msg: self._append_chat("SYSTEM", msg)
+        )
+        self._input_field.setEnabled(False)
+
+        self._send_btn = QPushButton(UI_SEND_BUTTON)
+        self._send_btn.setFixedWidth(110)
+        self._send_btn.clicked.connect(self._send_message)
+        self._send_btn.setEnabled(False)
+
+        input_row.addWidget(prompt_sym, 0, Qt.AlignmentFlag.AlignBottom)
+        input_row.addWidget(self._input_field, 1, Qt.AlignmentFlag.AlignBottom)
+        input_row.addWidget(self._send_btn, 0, Qt.AlignmentFlag.AlignBottom)
+        input_container.addLayout(input_row)
+        layout.addLayout(input_container)
+""",
+        "multiline input row and token counter",
+    )
+    source = _replace_once(
+        source,
+        """    # ── MESSAGE HANDLING ───────────────────────────────────────────────────────
+    def _send_message(self) -> None:
+""",
+        """    # ── MESSAGE HANDLING ───────────────────────────────────────────────────────
+    def _on_prompt_text_changed(self) -> None:
+        text = self._input_field.toPlainText() if self._input_field else ""
+        count, exact = self._count_prompt_tokens(text)
+        suffix = "exact" if exact else "est"
+        if hasattr(self, "_prompt_token_label") and self._prompt_token_label is not None:
+            self._prompt_token_label.setText(f"Prompt tokens ({suffix}): {count}")
+
+    def _count_prompt_tokens(self, text: str) -> tuple[int, bool]:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return 0, False
+        tok = getattr(getattr(self, "_adaptor", None), "_tokenizer", None)
+        if tok is not None and hasattr(tok, "encode"):
+            try:
+                return len(tok.encode(cleaned)), True
+            except Exception:
+                pass
+        return max(1, math.ceil(len(cleaned) / 4)), False
+
+    def _slash_list_modules(self) -> None:
+        names = [str(d.get("title", "")).strip() for d in getattr(self, "_spell_tab_defs", [])]
+        names = [n for n in names if n]
+        if names:
+            self._append_chat("SYSTEM", "Available modules: " + ", ".join(names))
+        else:
+            self._append_chat("SYSTEM", "No module listing is available yet.")
+
+    def _slash_open_module(self, module_name: str) -> None:
+        target = module_name.strip().lower()
+        if not target:
+            self._append_chat("SYSTEM", "Usage: /module <name>")
+            return
+        for i in range(self._spell_tabs.count()):
+            title = self._spell_tabs.tabText(i).lower()
+            tab_id = str(self._spell_tabs.tabBar().tabData(i) or "").lower()
+            if target in title or target == tab_id:
+                self._spell_tabs.setCurrentIndex(i)
+                self._append_chat("SYSTEM", f"Module focused: {self._spell_tabs.tabText(i)}")
+                return
+        self._append_chat("SYSTEM", f"Module not found: {module_name}")
+
+    def _slash_new_chat(self) -> None:
+        try:
+            self._sessions.save()
+        except Exception:
+            pass
+        self._sessions = SessionManager()
+        self._session_id = self._sessions.session_id
+        self._chat_display.clear()
+        self._append_chat("SYSTEM", "A new chat session begins.")
+        if hasattr(self, "_journal_sidebar") and self._journal_sidebar is not None:
+            self._journal_sidebar.clear_journal_indicator()
+
+    def _slash_history(self) -> None:
+        sessions = self._sessions.list_sessions()[:5]
+        if not sessions:
+            self._append_chat("SYSTEM", "No saved sessions found.")
+            return
+        lines = [f"{s.get('date','?')} — {s.get('name','(unnamed)')}" for s in sessions]
+        self._append_chat("SYSTEM", "Recent sessions: " + " | ".join(lines))
+
+    def _slash_open_notes(self) -> None:
+        self._slash_open_module("lessons")
+
+    def _slash_open_system(self) -> None:
+        self._slash_open_module("instruments")
+
+    def _safe_calc(self, expr: str) -> float:
+        allowed_bin = {
+            ast.Add: operator.add,
+            ast.Sub: operator.sub,
+            ast.Mult: operator.mul,
+            ast.Div: operator.truediv,
+            ast.Mod: operator.mod,
+            ast.Pow: operator.pow,
+        }
+        allowed_unary = {
+            ast.UAdd: operator.pos,
+            ast.USub: operator.neg,
+        }
+        node = ast.parse(expr, mode="eval")
+
+        def _eval(n):
+            if isinstance(n, ast.Expression):
+                return _eval(n.body)
+            if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
+                return float(n.value)
+            if isinstance(n, ast.BinOp) and type(n.op) in allowed_bin:
+                return allowed_bin[type(n.op)](_eval(n.left), _eval(n.right))
+            if isinstance(n, ast.UnaryOp) and type(n.op) in allowed_unary:
+                return allowed_unary[type(n.op)](_eval(n.operand))
+            raise ValueError("Unsupported expression")
+
+        return _eval(node)
+
+    def _slash_calc(self, expr: str) -> None:
+        raw = expr.strip()
+        if not raw:
+            self._append_chat("SYSTEM", "Usage: /calc <expression>")
+            return
+        try:
+            result = self._safe_calc(raw)
+            self._append_chat("SYSTEM", f"Calc: {raw} = {result}")
+        except Exception as ex:
+            self._append_chat("SYSTEM", f"Calc error: {ex}")
+
+    def _send_message(self) -> None:
+""",
+        "inject prompt token + slash helpers",
+    )
+    source = _replace_once(
+        source,
+        """        text = self._input_field.text().strip()
+        if not text:
+            return
+""",
+        """        raw_text = self._input_field.toPlainText()
+        text = raw_text.strip()
+        if not text:
+            return
+
+        if self._slash_dispatcher.dispatch(self, text):
+            self._on_prompt_text_changed()
+            return
+""",
+        "send_message multiline text + slash intercept",
+    )
+    source = _replace_once(
+        source,
+        """        self._input_field.clear()
+        self._append_chat("YOU", text)
+""",
+        """        self._input_field.clear()
+        self._on_prompt_text_changed()
+        self._append_chat("YOU", text)
+""",
+        "send_message prompt counter refresh after clear",
+    )
+    source = _replace_once(
+        source,
+        """        self._token_count         = 0
+""",
+        """        self._token_count         = 0
+        self._slash_dispatcher  = DeckSlashCommandDispatcher()
+""",
+        "echo deck init slash dispatcher",
+    )
+    source = _replace_once(
+        source,
+        """        window._input_field.setText(line)
+        window._input_field.setFocus()
+""",
+        """        if hasattr(window._input_field, "setPlainText"):
+            window._input_field.setPlainText(line)
+        else:
+            window._input_field.setText(line)
+        window._input_field.setFocus()
+        if hasattr(window, "_on_prompt_text_changed"):
+            window._on_prompt_text_changed()
+""",
+        "send roll result to multiline prompt",
+    )
+    source = _replace_once(
+        source,
+        """                    self._input_field.setText(date_text)
+                    routed_target = "input_field_set"
+""",
+        """                    if hasattr(self._input_field, "setPlainText"):
+                        self._input_field.setPlainText(date_text)
+                    else:
+                        self._input_field.setText(date_text)
+                    routed_target = "input_field_set"
+""",
+        "calendar route to multiline prompt",
     )
     source = _replace_once(
         source,
