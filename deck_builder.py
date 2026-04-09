@@ -8226,7 +8226,7 @@ def _patch_embedded_deck_implementation(source: str, log_fn=None) -> str:
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._min_lines = 2
+        self._min_lines = 1
         self._max_lines = 6
         self.setAcceptDrops(True)
         self.setTabChangesFocus(False)
@@ -8246,10 +8246,11 @@ def _patch_embedded_deck_implementation(source: str, log_fn=None) -> str:
         margins = int(self.contentsMargins().top() + self.contentsMargins().bottom())
         doc_margin = int(self.document().documentMargin() * 2)
         frame = int(self.frameWidth() * 2)
-        return (self._line_height() * max(1, lines)) + margins + doc_margin + frame + 4
+        return (self._line_height() * max(1, lines)) + margins + doc_margin + frame
 
     def _recompute_height(self) -> None:
-        doc_h = int(self.document().size().height()) + 8
+        doc_size = self.document().documentLayout().documentSize()
+        doc_h = int(math.ceil(doc_size.height()))
         min_h = self._height_for_lines(self._min_lines)
         max_h = self._height_for_lines(self._max_lines)
         target = max(min_h, min(max_h, doc_h))
@@ -8450,7 +8451,7 @@ class EchoDeck(QMainWindow):
 
         self._input_field = DeckChatInput()
         self._input_field.setPlaceholderText(UI_INPUT_PLACEHOLDER)
-        self._input_field.set_line_limits(2, 6)
+        self._input_field.set_line_limits(1, 6)
         self._input_field.send_requested.connect(self._send_message)
         self._input_field.textChanged.connect(self._on_prompt_text_changed)
         self._input_field.drop_warning.connect(
