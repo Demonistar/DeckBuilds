@@ -204,6 +204,8 @@ def _load_module_manifest(path: Path) -> Optional[dict]:
         "tab_name": str(data.get("tab_name") or display_name),
         "slot_key": slot_key,
         "requires": list(data.get("requires") or []),
+        "requirements": list(data.get("requirements") or []),
+        "requires_google": bool(data.get("requires_google", False)),
         "default_on": bool(data.get("default_on", False)),
         "runtime_marker": str(data.get("runtime_marker") or "").strip(),
         "manifest_path": str(path),
@@ -11086,6 +11088,8 @@ class ModuleChecklist(QWidget):
     PLANNED modules show as greyed out with status badge.
     """
 
+    selection_changed = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._checkboxes: dict[str, QCheckBox] = {}
@@ -11146,6 +11150,7 @@ class ModuleChecklist(QWidget):
                 cb.setChecked(mod.get("default_on", False) and is_usable)
                 cb.setEnabled(is_usable)
                 cb.setToolTip(mod.get("description", ""))
+                cb.toggled.connect(self.selection_changed.emit)
 
                 if not is_usable:
                     cb.setStyleSheet(f"color: {S('text_dim')};")
@@ -11186,6 +11191,22 @@ class ModuleChecklist(QWidget):
                     persona_name in sl_personas and
                     MODULES[mod_key]["status"] in ("built", "partial")
                 )
+        self.selection_changed.emit()
+
+    def selected_modules_require_google(self) -> bool:
+        """True when any selected module explicitly declares a Google dependency."""
+        for mod_key in self.get_selected():
+            mod = MODULES.get(mod_key, {})
+            if bool(mod.get("requires_google", False)):
+                return True
+
+            reqs = []
+            reqs.extend(mod.get("requires", []) or [])
+            reqs.extend(mod.get("requirements", []) or [])
+            for req in reqs:
+                if "google" in str(req).lower():
+                    return True
+        return False
 
 
 # ── FACE PACK PANEL ───────────────────────────────────────────────────────────
@@ -11618,7 +11639,12 @@ class DeckBuilderDialog(QDialog):
         left_layout.addWidget(h_divider())
 
         # Google credentials
-        left_layout.addWidget(section_label("Google Credentials  (required for Google modules)"))
+        self._google_section = QWidget()
+        google_layout = QVBoxLayout(self._google_section)
+        google_layout.setContentsMargins(0, 0, 0, 0)
+        google_layout.setSpacing(4)
+
+        google_layout.addWidget(section_label("Google Credentials  (required for Google modules)"))
         google_row = QHBoxLayout()
         self._google_creds_field = QLineEdit()
         self._google_creds_field.setPlaceholderText(
@@ -11629,13 +11655,13 @@ class DeckBuilderDialog(QDialog):
         self._btn_browse_creds.clicked.connect(self._browse_google_creds)
         google_row.addWidget(self._google_creds_field)
         google_row.addWidget(self._btn_browse_creds)
-        left_layout.addLayout(google_row)
+        google_layout.addLayout(google_row)
 
         self._google_status = QLabel("")
         self._google_status.setStyleSheet(f"color: {S('text_dim')}; font-size: 10px;")
-        left_layout.addWidget(self._google_status)
-
-        left_layout.addWidget(h_divider())
+        google_layout.addWidget(self._google_status)
+        google_layout.addWidget(h_divider())
+        left_layout.addWidget(self._google_section)
 
         # Shortcut checkbox
         self._shortcut_cb = QCheckBox("Create desktop shortcut")
@@ -11649,6 +11675,7 @@ class DeckBuilderDialog(QDialog):
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(8, 0, 0, 0)
         self._module_list = ModuleChecklist()
+        self._module_list.selection_changed.connect(self._refresh_google_section_visibility)
         right_layout.addWidget(self._module_list)
 
         splitter.addWidget(left)
@@ -11689,6 +11716,7 @@ class DeckBuilderDialog(QDialog):
         self._generated_state_greetings: Optional[dict[str, str]] = None
         self._approved_state_greetings: Optional[dict[str, str]] = None
         self._build_state_greetings: Optional[dict[str, str]] = None
+        self._refresh_google_section_visibility()
     def _apply_style(self) -> None:
         self.setStyleSheet(_get_style())
 
@@ -11715,9 +11743,14 @@ class DeckBuilderDialog(QDialog):
         self._persona_panel.clear_state_greetings_preview()
         # Let module list adjust defaults
         self._module_list.set_defaults_for_persona(name)
+        self._refresh_google_section_visibility()
         # Auto-fill deck name if blank
         if not self._name_field.text().strip() and name not in ("Default", "Custom"):
             self._name_field.setText(name)
+
+    def _refresh_google_section_visibility(self) -> None:
+        show_google = self._module_list.selected_modules_require_google()
+        self._google_section.setVisible(show_google)
 
     def _generate_state_greetings_now(self) -> Optional[dict[str, str]]:
         if not self._current_persona:
