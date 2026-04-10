@@ -9973,16 +9973,21 @@ class DeckSetupWorker(QThread):
             self._log("✓ Memory files initialized")
             self.progress.emit(68)
 
-            # ── 6b. Copy Google credentials if provided ────────────────
-            if self._google_creds and Path(self._google_creds).exists():
-                google_dir = deck_home / "google"
-                google_dir.mkdir(parents=True, exist_ok=True)
-                dest = google_dir / "google_credentials.json"
-                import shutil as _shutil2
-                _shutil2.copy2(self._google_creds, str(dest))
-                self._log(f"✓ Google credentials copied to google/")
+            # ── 6b. Copy Google credentials only when Google modules are selected ──
+            google_mods = {"google_calendar", "google_drive", "gmail"}
+            google_modules_enabled = any(m in google_mods for m in self._selected_modules)
+            if google_modules_enabled:
+                if self._google_creds and Path(self._google_creds).exists():
+                    google_dir = deck_home / "google"
+                    google_dir.mkdir(parents=True, exist_ok=True)
+                    dest = google_dir / "google_credentials.json"
+                    import shutil as _shutil2
+                    _shutil2.copy2(self._google_creds, str(dest))
+                    self._log(f"✓ Google credentials copied to google/")
+                elif self._google_creds:
+                    self._log("⚠ Google credentials file not found — skipped")
             elif self._google_creds:
-                self._log("⚠ Google credentials file not found — skipped")
+                self._log("ℹ Google credentials provided, but no Google modules selected — skipped")
 
             # ── 7. Write deck Python file ──────────────────────────────
             deck_filename = f"{deck_lower}_deck.py"
