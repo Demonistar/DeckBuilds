@@ -181,7 +181,7 @@ MODULES: dict[str, dict] = {
         "tab_name":     "Tasks",
         "slot_key":     "MODULE_GOOGLE_CALENDAR",
         "requires":     ["google-api-python-client", "google-auth-oauthlib"],
-        "default_on":   True,
+        "default_on":   False,
     },
     "google_drive": {
         "display_name": "Google Drive + Docs",
@@ -191,7 +191,7 @@ MODULES: dict[str, dict] = {
         "tab_name":     "Records",
         "slot_key":     "MODULE_GOOGLE_DRIVE",
         "requires":     ["google-api-python-client"],
-        "default_on":   True,
+        "default_on":   False,
     },
     "gmail": {
         "display_name": "Gmail Integration",
@@ -1584,6 +1584,27 @@ MODULE_CODE: dict[str, Optional[str]] = {
     "session_browser":    "# [MODULE: session_browser — PARTIAL — see JournalSidebar]",
     "system_monitor_ext": "# [MODULE: system_monitor_ext — PARTIAL — see HardwarePanel]",
 }
+
+GOOGLE_REQUIREMENT_TOKENS = ("google", "gmail", "gdrive", "gcalendar")
+
+
+def module_requires_google(mod: dict) -> bool:
+    """Return True when module metadata declares Google integration."""
+    if bool(mod.get("requires_google", False)):
+        return True
+    for req in mod.get("requires", []):
+        req_text = str(req).lower()
+        if any(token in req_text for token in GOOGLE_REQUIREMENT_TOKENS):
+            return True
+    return False
+
+
+def selected_modules_require_google(selected_modules: list[str]) -> bool:
+    """Return True if any selected module requires Google credentials/runtime."""
+    for mod_key in selected_modules:
+        if module_requires_google(MODULES.get(mod_key, {})):
+            return True
+    return False
 
 DECK_TEMPLATE = '''\
 from __future__ import annotations
@@ -10044,6 +10065,7 @@ class DeckSetupWorker(QThread):
         self._ai_state_greetings = ai_state_greetings
         self._model_config     = model_config
         self._selected_modules = selected_modules
+        self._requires_google  = selected_modules_require_google(selected_modules)
         self._face_source      = face_source
         self._create_shortcut  = create_shortcut
         self._output_base      = output_base
@@ -10146,16 +10168,17 @@ class DeckSetupWorker(QThread):
             self._log("✓ Memory files initialized")
             self.progress.emit(68)
 
-            # ── 6b. Copy Google credentials if provided ────────────────
-            if self._google_creds and Path(self._google_creds).exists():
-                google_dir = deck_home / "google"
-                google_dir.mkdir(parents=True, exist_ok=True)
-                dest = google_dir / "google_credentials.json"
-                import shutil as _shutil2
-                _shutil2.copy2(self._google_creds, str(dest))
-                self._log(f"✓ Google credentials copied to google/")
-            elif self._google_creds:
-                self._log("⚠ Google credentials file not found — skipped")
+            # ── 6b. Copy Google credentials only for Google module builds ────
+            if self._requires_google:
+                if self._google_creds and Path(self._google_creds).exists():
+                    google_dir = deck_home / "google"
+                    google_dir.mkdir(parents=True, exist_ok=True)
+                    dest = google_dir / "google_credentials.json"
+                    import shutil as _shutil2
+                    _shutil2.copy2(self._google_creds, str(dest))
+                    self._log("✓ Google credentials copied to google/")
+                elif self._google_creds:
+                    self._log("⚠ Google credentials file not found — skipped")
 
             # ── 7. Write deck Python file ──────────────────────────────
             deck_filename = f"{deck_lower}_deck.py"
@@ -10225,17 +10248,6 @@ class DeckSetupWorker(QThread):
                 "api_type":     m.get("api_type",      ""),
                 "api_model":    m.get("api_model",     ""),
             },
-            "google": {
-                "credentials": str(deck_home / "google" / "google_credentials.json"),
-                "token":       str(deck_home / "google" / "token.json"),
-                "timezone":    "America/Chicago",
-                "scopes": [
-                    "https://www.googleapis.com/auth/calendar",
-                    "https://www.googleapis.com/auth/calendar.events",
-                    "https://www.googleapis.com/auth/drive",
-                    "https://www.googleapis.com/auth/documents",
-                ],
-            },
             "paths": {
                 "faces":    str(deck_home / "Faces"),
                 "sounds":   str(deck_home / "sounds"),
@@ -10274,6 +10286,18 @@ class DeckSetupWorker(QThread):
             },
             "first_run": False,
         }
+        if self._requires_google:
+            cfg["google"] = {
+                "credentials": str(deck_home / "google" / "google_credentials.json"),
+                "token":       str(deck_home / "google" / "token.json"),
+                "timezone":    "America/Chicago",
+                "scopes": [
+                    "https://www.googleapis.com/auth/calendar",
+                    "https://www.googleapis.com/auth/calendar.events",
+                    "https://www.googleapis.com/auth/drive",
+                    "https://www.googleapis.com/auth/documents",
+                ],
+            }
         (deck_home / "config.json").write_text(
             json.dumps(cfg, indent=2), encoding="utf-8"
         )
@@ -10359,8 +10383,7 @@ class DeckSetupWorker(QThread):
             "# Pillow",
         ]
 
-        google_mods = {"google_calendar", "google_drive", "gmail"}
-        if any(m in selected_modules for m in google_mods):
+        if selected_modules_require_google(selected_modules):
             lines.extend([
                 "",
                 "# Google integration (required for selected modules)",
@@ -11254,6 +11277,8 @@ class ModuleChecklist(QWidget):
     PLANNED modules show as greyed out with status badge.
     """
 
+    selected_changed = Signal(list)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._checkboxes: dict[str, QCheckBox] = {}
@@ -11314,6 +11339,7 @@ class ModuleChecklist(QWidget):
                 cb.setChecked(mod.get("default_on", False) and is_usable)
                 cb.setEnabled(is_usable)
                 cb.setToolTip(mod.get("description", ""))
+                cb.toggled.connect(self._emit_selected_changed)
 
                 if not is_usable:
                     cb.setStyleSheet(f"color: {S('text_dim')};")
@@ -11344,6 +11370,9 @@ class ModuleChecklist(QWidget):
         """Return list of selected module keys."""
         return [k for k, cb in self._checkboxes.items() if cb.isChecked()]
 
+    def _emit_selected_changed(self) -> None:
+        self.selected_changed.emit(self.get_selected())
+
     def set_defaults_for_persona(self, persona_name: str) -> None:
         """Adjust default module selections based on persona."""
         # SL modules default on for Morganna/GrimVeil
@@ -11354,6 +11383,7 @@ class ModuleChecklist(QWidget):
                     persona_name in sl_personas and
                     MODULES[mod_key]["status"] in ("built", "partial")
                 )
+        self._emit_selected_changed()
 
 
 # ── FACE PACK PANEL ───────────────────────────────────────────────────────────
@@ -11785,23 +11815,29 @@ class DeckBuilderDialog(QDialog):
 
         left_layout.addWidget(h_divider())
 
-        # Google credentials
-        left_layout.addWidget(section_label("Google Credentials  (required for Google modules)"))
+        # Google credentials (shown only when selected modules require Google)
+        self._google_creds_section = QWidget()
+        google_layout = QVBoxLayout(self._google_creds_section)
+        google_layout.setContentsMargins(0, 0, 0, 0)
+        google_layout.setSpacing(4)
+        google_layout.addWidget(section_label("Google Credentials  (required for Google modules)"))
+
         google_row = QHBoxLayout()
         self._google_creds_field = QLineEdit()
         self._google_creds_field.setPlaceholderText(
-            "Path to google credentials.json  (optional — needed for Calendar/Drive)"
+            "Path to google credentials.json"
         )
         self._btn_browse_creds = QPushButton("Browse")
         self._btn_browse_creds.setFixedWidth(70)
         self._btn_browse_creds.clicked.connect(self._browse_google_creds)
         google_row.addWidget(self._google_creds_field)
         google_row.addWidget(self._btn_browse_creds)
-        left_layout.addLayout(google_row)
+        google_layout.addLayout(google_row)
 
         self._google_status = QLabel("")
         self._google_status.setStyleSheet(f"color: {S('text_dim')}; font-size: 10px;")
-        left_layout.addWidget(self._google_status)
+        google_layout.addWidget(self._google_status)
+        left_layout.addWidget(self._google_creds_section)
 
         left_layout.addWidget(h_divider())
 
@@ -11817,6 +11853,7 @@ class DeckBuilderDialog(QDialog):
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(8, 0, 0, 0)
         self._module_list = ModuleChecklist()
+        self._module_list.selected_changed.connect(self._refresh_google_credentials_visibility)
         right_layout.addWidget(self._module_list)
 
         splitter.addWidget(left)
@@ -11857,6 +11894,7 @@ class DeckBuilderDialog(QDialog):
         self._generated_state_greetings: Optional[dict[str, str]] = None
         self._approved_state_greetings: Optional[dict[str, str]] = None
         self._build_state_greetings: Optional[dict[str, str]] = None
+        self._refresh_google_credentials_visibility()
     def _apply_style(self) -> None:
         self.setStyleSheet(_get_style())
 
@@ -11954,6 +11992,15 @@ class DeckBuilderDialog(QDialog):
                 f"color: {S('green')}; font-size: 10px;"
             )
 
+    def _refresh_google_credentials_visibility(self) -> None:
+        needs_google = selected_modules_require_google(self._module_list.get_selected())
+        self._google_creds_section.setVisible(needs_google)
+        if needs_google:
+            self._google_status.setText("Google module selected — credentials required for build.")
+            self._google_status.setStyleSheet(f"color: {S('orange')}; font-size: 10px;")
+        else:
+            self._google_status.setText("")
+
     def _begin_build(self) -> None:
         deck_name = self._name_field.text().strip()
 
@@ -11968,6 +12015,24 @@ class DeckBuilderDialog(QDialog):
                                 "The face pack source is invalid. "
                                 "Fix it or clear it to skip face installation.")
             return
+
+        selected_modules = self._module_list.get_selected()
+        requires_google = selected_modules_require_google(selected_modules)
+        google_creds_path = self._google_creds_field.text().strip()
+        if requires_google:
+            if not google_creds_path:
+                QMessageBox.warning(
+                    self, "Google Credentials Required",
+                    "At least one selected module requires Google credentials.\n"
+                    "Select a credentials JSON file before building."
+                )
+                return
+            if not Path(google_creds_path).exists():
+                QMessageBox.warning(
+                    self, "Google Credentials Missing",
+                    f"Credentials file not found:\n{google_creds_path}"
+                )
+                return
 
         # Check for existing deck
         output_base  = SCRIPT_DIR
