@@ -9063,6 +9063,192 @@ class EchoDeck(QMainWindow):
     )
     source = _replace_once(
         source,
+        """        # ── GPU master bar (full width) ───────────────────────────────
+        layout.addWidget(section_label("❧ INFERNAL ENGINE"))
+        self.gauge_gpu_master = GaugeWidget("RTX", "%", 100.0, C_CRIMSON)
+        self.gauge_gpu_master.setMaximumHeight(55)
+        layout.addWidget(self.gauge_gpu_master)
+
+        layout.addStretch()
+""",
+        """        # ── GPU master bar (full width) ───────────────────────────────
+        layout.addWidget(section_label("❧ INFERNAL ENGINE"))
+        self.gauge_gpu_master = GaugeWidget("RTX", "%", 100.0, C_CRIMSON)
+        self.gauge_gpu_master.setMaximumHeight(55)
+        layout.addWidget(self.gauge_gpu_master)
+
+        # ── Power telemetry ────────────────────────────────────────────
+        layout.addWidget(section_label("❧ POWER"))
+        power_frame = QFrame()
+        power_frame.setStyleSheet(
+            f"background: {C_PANEL}; border: 1px solid {C_BORDER}; border-radius: 2px;"
+        )
+        pf = QVBoxLayout(power_frame)
+        pf.setContentsMargins(8, 4, 8, 4)
+        pf.setSpacing(2)
+        self.lbl_power_has_battery = QLabel("✦ HAS BATTERY: N/A")
+        self.lbl_power_percent = QLabel("✦ BATTERY: N/A")
+        self.lbl_power_state = QLabel("✦ POWER STATE: N/A")
+        self.lbl_power_time = QLabel("✦ REMAINING: N/A")
+        self.lbl_power_direction = QLabel("✦ DIRECTION: N/A")
+        for lbl in (self.lbl_power_has_battery, self.lbl_power_percent, self.lbl_power_state, self.lbl_power_time, self.lbl_power_direction):
+            lbl.setStyleSheet(
+                f"color: {C_TEXT_DIM}; font-size: 10px; "
+                f"font-family: {DECK_FONT}, serif; border: none;"
+            )
+            pf.addWidget(lbl)
+        layout.addWidget(power_frame)
+
+        # ── Network telemetry ──────────────────────────────────────────
+        layout.addWidget(section_label("❧ NETWORK"))
+        network_frame = QFrame()
+        network_frame.setStyleSheet(
+            f"background: {C_PANEL}; border: 1px solid {C_BORDER}; border-radius: 2px;"
+        )
+        nf = QVBoxLayout(network_frame)
+        nf.setContentsMargins(8, 4, 8, 4)
+        nf.setSpacing(2)
+        self.lbl_net_connected = QLabel("✦ CONNECTED: N/A")
+        self.lbl_net_wifi = QLabel("✦ WI-FI: N/A")
+        self.lbl_net_iface = QLabel("✦ ADAPTER: N/A")
+        self.lbl_net_ssid = QLabel("✦ SSID: N/A")
+        self.lbl_net_throughput = QLabel("✦ THROUGHPUT: N/A")
+        for lbl in (self.lbl_net_connected, self.lbl_net_wifi, self.lbl_net_iface, self.lbl_net_ssid, self.lbl_net_throughput):
+            lbl.setStyleSheet(
+                f"color: {C_TEXT_DIM}; font-size: 10px; "
+                f"font-family: {DECK_FONT}, serif; border: none;"
+            )
+            nf.addWidget(lbl)
+        layout.addWidget(network_frame)
+
+        layout.addStretch()
+""",
+        "instruments panel power+network sections",
+    )
+    source = _replace_once(
+        source,
+        "    def update_stats(self) -> None:\n",
+        "    def _fmt_secs(self, secs: int) -> str:\n"
+        "        if secs is None or secs < 0:\n"
+        "            return \"Unknown\"\n"
+        "        h = secs // 3600\n"
+        "        m = (secs % 3600) // 60\n"
+        "        return f\"{h}h {m}m\"\n"
+        "\n"
+        "    def _update_power_stats(self) -> None:\n"
+        "        if not PSUTIL_OK or not hasattr(psutil, \"sensors_battery\"):\n"
+        "            self.lbl_power_has_battery.setText(\"✦ HAS BATTERY: Unavailable\")\n"
+        "            self.lbl_power_percent.setText(\"✦ BATTERY: N/A\")\n"
+        "            self.lbl_power_state.setText(\"✦ POWER STATE: Unavailable\")\n"
+        "            self.lbl_power_time.setText(\"✦ REMAINING: Unavailable\")\n"
+        "            self.lbl_power_direction.setText(\"✦ DIRECTION: Unavailable\")\n"
+        "            return\n"
+        "        try:\n"
+        "            batt = psutil.sensors_battery()\n"
+        "        except Exception:\n"
+        "            batt = None\n"
+        "        if batt is None:\n"
+        "            self.lbl_power_has_battery.setText(\"✦ HAS BATTERY: No\")\n"
+        "            self.lbl_power_percent.setText(\"✦ BATTERY: No battery detected\")\n"
+        "            self.lbl_power_state.setText(\"✦ POWER STATE: No battery detected\")\n"
+        "            self.lbl_power_time.setText(\"✦ REMAINING: No battery detected\")\n"
+        "            self.lbl_power_direction.setText(\"✦ DIRECTION: No battery detected\")\n"
+        "            return\n"
+        "        pct = float(getattr(batt, \"percent\", 0.0) or 0.0)\n"
+        "        plugged = bool(getattr(batt, \"power_plugged\", False))\n"
+        "        left = int(getattr(batt, \"secsleft\", -1) or -1)\n"
+        "        rem = self._fmt_secs(left) if left >= 0 else \"Unknown\"\n"
+        "        state = \"Plugged in / charging\" if plugged else \"On battery\"\n"
+        "        direction = \"Charging\" if plugged else \"Discharging\"\n"
+        "        self.lbl_power_has_battery.setText(\"✦ HAS BATTERY: Yes\")\n"
+        "        self.lbl_power_percent.setText(f\"✦ BATTERY: {pct:.0f}%\")\n"
+        "        self.lbl_power_state.setText(f\"✦ POWER STATE: {state}\")\n"
+        "        self.lbl_power_time.setText(f\"✦ REMAINING: {rem}\")\n"
+        "        self.lbl_power_direction.setText(f\"✦ DIRECTION: {direction}\")\n"
+        "\n"
+        "    def _detect_wifi_ssid(self) -> str:\n"
+        "        for cmd in ([\"netsh\", \"wlan\", \"show\", \"interfaces\"], [\"nmcli\", \"-t\", \"-f\", \"active,ssid\", \"dev\", \"wifi\"], [\"iwgetid\", \"-r\"]):\n"
+        "            try:\n"
+        "                out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True, timeout=1.5)\n"
+        "            except Exception:\n"
+        "                continue\n"
+        "            txt = (out or \"\").strip()\n"
+        "            if not txt:\n"
+        "                continue\n"
+        "            if cmd[0] == \"netsh\":\n"
+        "                for line in txt.splitlines():\n"
+        "                    low = line.lower().strip()\n"
+        "                    if low.startswith(\"ssid\") and \"bssid\" not in low and \":\" in line:\n"
+        "                        return line.split(\":\", 1)[1].strip() or \"Unknown\"\n"
+        "            elif cmd[0] == \"nmcli\":\n"
+        "                for line in txt.splitlines():\n"
+        "                    if line.startswith(\"yes:\"):\n"
+        "                        return line.split(\":\", 1)[1].strip() or \"Unknown\"\n"
+        "            else:\n"
+        "                return txt.splitlines()[0].strip() or \"Unknown\"\n"
+        "        return \"No Wi-Fi\"\n"
+        "\n"
+        "    def _update_network_stats(self) -> None:\n"
+        "        if not PSUTIL_OK:\n"
+        "            self.lbl_net_connected.setText(\"✦ CONNECTED: Unavailable\")\n"
+        "            self.lbl_net_wifi.setText(\"✦ WI-FI: Unavailable\")\n"
+        "            self.lbl_net_iface.setText(\"✦ ADAPTER: Unavailable\")\n"
+        "            self.lbl_net_ssid.setText(\"✦ SSID: Unavailable\")\n"
+        "            self.lbl_net_throughput.setText(\"✦ THROUGHPUT: Unavailable\")\n"
+        "            return\n"
+        "        try:\n"
+        "            stats = psutil.net_if_stats(); addrs = psutil.net_if_addrs(); io_now = psutil.net_io_counters()\n"
+        "        except Exception:\n"
+        "            self.lbl_net_connected.setText(\"✦ CONNECTED: Unavailable\")\n"
+        "            self.lbl_net_wifi.setText(\"✦ WI-FI: Unavailable\")\n"
+        "            self.lbl_net_iface.setText(\"✦ ADAPTER: Unavailable\")\n"
+        "            self.lbl_net_ssid.setText(\"✦ SSID: Unavailable\")\n"
+        "            self.lbl_net_throughput.setText(\"✦ THROUGHPUT: Unavailable\")\n"
+        "            return\n"
+        "        active = []\n"
+        "        for name, st in stats.items():\n"
+        "            if not getattr(st, \"isup\", False):\n"
+        "                continue\n"
+        "            if name.lower().startswith(\"loopback\") or name.lower().startswith(\"lo\"):\n"
+        "                continue\n"
+        "            if addrs.get(name, []):\n"
+        "                active.append(name)\n"
+        "        connected = bool(active)\n"
+        "        wifi_iface = next((n for n in active if any(k in n.lower() for k in (\"wi-fi\", \"wifi\", \"wlan\", \"wireless\"))), \"\")\n"
+        "        is_wifi = bool(wifi_iface)\n"
+        "        iface_label = wifi_iface or (active[0] if active else \"None\")\n"
+        "        throughput = \"N/A\"\n"
+        "        if io_now is not None:\n"
+        "            now = time.time()\n"
+        "            last_ts = getattr(self, \"_net_prev_ts\", None)\n"
+        "            if last_ts and now > last_ts:\n"
+        "                up = max(0.0, (io_now.bytes_sent - getattr(self, \"_net_prev_sent\", io_now.bytes_sent)) / 1024.0 / (now - last_ts))\n"
+        "                down = max(0.0, (io_now.bytes_recv - getattr(self, \"_net_prev_recv\", io_now.bytes_recv)) / 1024.0 / (now - last_ts))\n"
+        "                throughput = f\"↓ {down:.1f} KB/s ↑ {up:.1f} KB/s\"\n"
+        "            self._net_prev_ts = now\n"
+        "            self._net_prev_sent = io_now.bytes_sent\n"
+        "            self._net_prev_recv = io_now.bytes_recv\n"
+        "        ssid = self._detect_wifi_ssid() if is_wifi else \"No Wi-Fi\"\n"
+        "        self.lbl_net_connected.setText(f\"✦ CONNECTED: {'Yes' if connected else 'No'}\")\n"
+        "        self.lbl_net_wifi.setText(f\"✦ WI-FI: {'Yes' if is_wifi else 'No'}\")\n"
+        "        self.lbl_net_iface.setText(f\"✦ ADAPTER: {iface_label}\")\n"
+        "        self.lbl_net_ssid.setText(f\"✦ SSID: {ssid}\")\n"
+        "        self.lbl_net_throughput.setText(f\"✦ THROUGHPUT: {throughput}\")\n"
+        "\n"
+        "    def update_stats(self) -> None:\n",
+        "instruments helper methods for power+network",
+    )
+    source = _replace_once(
+        source,
+        "        # Update drive bars every 30 seconds (not every tick)\n",
+        "        self._update_power_stats()\n"
+        "        self._update_network_stats()\n"
+        "\n"
+        "        # Update drive bars every 30 seconds (not every tick)\n",
+        "instruments update cycle power+network",
+    )
+    source = _replace_once(
+        source,
         "class DiceTrayDie(QFrame):\n",
         """class FinancialPlannerTab(QWidget):
     \"\"\"Manual-entry Financial Planner module with Dashboard + Planner internal tabs.\"\"\"
@@ -9759,6 +9945,183 @@ class DiceTrayDie(QFrame):
         '            {"id": "diagnostics", "title": "Diagnostics", "widget": self._diag_tab, "default_order": 11},\n'
         '            {"id": "settings", "title": "Settings", "widget": self._settings_tab, "default_order": 12},\n',
         "financial planner tab definition order",
+    )
+    source = _replace_once(
+        source,
+        "        self._load_spell_tab_state_from_config()\n"
+        "        self._rebuild_spell_tabs()\n",
+        "        self._init_category_framework()\n"
+        "        self._load_spell_tab_state_from_config()\n"
+        "        self._rebuild_spell_tabs()\n",
+        "initialize category framework",
+    )
+    source = _replace_once(
+        source,
+        "        right_workspace_layout.addWidget(self._spell_tabs, 1)\n",
+        "        self._category_strip = QWidget()\n"
+        "        self._category_strip_layout = QHBoxLayout(self._category_strip)\n"
+        "        self._category_strip_layout.setContentsMargins(0, 0, 0, 0)\n"
+        "        self._category_strip_layout.setSpacing(4)\n"
+        "        right_workspace_layout.addWidget(self._category_strip, 0)\n"
+        "        right_workspace_layout.addWidget(self._spell_tabs, 1)\n",
+        "inject category strip host",
+    )
+    source = _replace_once(
+        source,
+        "    def _load_spell_tab_state_from_config(self) -> None:\n",
+        "    def _init_category_framework(self) -> None:\n"
+        "        self._protected_categories = {\"System\", \"Core\"}\n"
+        "        self._category_map = {}\n"
+        "        self._module_registry = {}\n"
+        "        for tab in self._spell_tab_defs:\n"
+        "            tab.setdefault(\"category\", \"Core\")\n"
+        "            tab.setdefault(\"secondary_categories\", [])\n"
+        "            tab.setdefault(\"protected_category\", tab.get(\"category\") in self._protected_categories)\n"
+        "            self._register_module_categories(tab)\n"
+        "        self._active_category = \"Core\" if \"Core\" in self._category_map else next(iter(self._category_map.keys()), \"Core\")\n"
+        "        self._rebuild_category_strip()\n"
+        "\n"
+        "    def _register_module_categories(self, tab: dict) -> None:\n"
+        "        tab_id = str(tab.get(\"id\") or \"\").strip()\n"
+        "        if not tab_id:\n"
+        "            return\n"
+        "        primary = str(tab.get(\"category\") or \"Core\").strip() or \"Core\"\n"
+        "        secondary = [str(c).strip() for c in tab.get(\"secondary_categories\", []) if str(c).strip()]\n"
+        "        self._module_registry[tab_id] = {\"id\": tab_id, \"installed\": True, \"enabled\": True, \"primary\": primary, \"secondary\": secondary}\n"
+        "        self._category_map.setdefault(primary, {\"modules\": set(), \"protected\": bool(tab.get(\"protected_category\", False) or primary in self._protected_categories)})\n"
+        "        self._category_map[primary][\"modules\"].add(tab_id)\n"
+        "        for cat in secondary:\n"
+        "            if cat in self._category_map:\n"
+        "                self._category_map[cat][\"modules\"].add(tab_id)\n"
+        "\n"
+        "    def _rebuild_category_strip(self) -> None:\n"
+        "        if not hasattr(self, \"_category_strip_layout\"):\n"
+        "            return\n"
+        "        while self._category_strip_layout.count():\n"
+        "            item = self._category_strip_layout.takeAt(0)\n"
+        "            w = item.widget()\n"
+        "            if w is not None:\n"
+        "                w.deleteLater()\n"
+        "        cats = list(self._category_map.keys())\n"
+        "        if self._active_category not in cats and cats:\n"
+        "            self._active_category = cats[0]\n"
+        "        for cat in cats:\n"
+        "            btn = QToolButton()\n"
+        "            btn.setText(cat)\n"
+        "            btn.setCheckable(True)\n"
+        "            btn.setChecked(cat == self._active_category)\n"
+        "            btn.clicked.connect(lambda _checked=False, c=cat: self._select_category(c))\n"
+        "            self._category_strip_layout.addWidget(btn)\n"
+        "        self._category_strip_layout.addStretch(1)\n"
+        "\n"
+        "    def _select_category(self, category: str) -> None:\n"
+        "        if category not in self._category_map:\n"
+        "            return\n"
+        "        self._active_category = category\n"
+        "        self._rebuild_category_strip()\n"
+        "        self._rebuild_spell_tabs()\n"
+        "\n"
+        "    def _visible_tab_for_active_category(self, tab: dict) -> bool:\n"
+        "        tab_id = str(tab.get(\"id\") or \"\")\n"
+        "        reg = self._module_registry.get(tab_id, {})\n"
+        "        if not reg.get(\"installed\", True) or not reg.get(\"enabled\", True):\n"
+        "            return False\n"
+        "        return (not self._active_category) or tab_id in self._category_map.get(self._active_category, {}).get(\"modules\", set())\n"
+        "\n"
+        "    def _disable_module(self, tab_id: str) -> None:\n"
+        "        if tab_id in self._module_registry:\n"
+        "            self._module_registry[tab_id][\"enabled\"] = False\n"
+        "            self._rebuild_spell_tabs()\n"
+        "\n"
+        "    def _uninstall_module(self, tab_id: str, delete_files: bool = False) -> None:\n"
+        "        reg = self._module_registry.get(tab_id)\n"
+        "        if not reg:\n"
+        "            return\n"
+        "        reg[\"installed\"] = False\n"
+        "        reg[\"enabled\"] = False\n"
+        "        for cat_data in self._category_map.values():\n"
+        "            cat_data.get(\"modules\", set()).discard(tab_id)\n"
+        "        self._cleanup_empty_categories()\n"
+        "        self._rebuild_category_strip()\n"
+        "        self._rebuild_spell_tabs()\n"
+        "\n"
+        "    def _reinstall_modules_from_library(self) -> None:\n"
+        "        for tab in self._spell_tab_defs:\n"
+        "            tab_id = str(tab.get(\"id\") or \"\")\n"
+        "            if not tab_id:\n"
+        "                continue\n"
+        "            reg = self._module_registry.setdefault(tab_id, {\"id\": tab_id, \"installed\": True, \"enabled\": True, \"primary\": str(tab.get(\"category\") or \"Core\"), \"secondary\": [str(c).strip() for c in tab.get(\"secondary_categories\", []) if str(c).strip()]})\n"
+        "            reg[\"installed\"] = True\n"
+        "            reg[\"enabled\"] = True\n"
+        "            primary = reg.get(\"primary\") or \"Core\"\n"
+        "            self._category_map.setdefault(primary, {\"modules\": set(), \"protected\": bool(tab.get(\"protected_category\", False) or primary in self._protected_categories)})\n"
+        "            self._category_map[primary][\"modules\"].add(tab_id)\n"
+        "            for cat in reg.get(\"secondary\", []):\n"
+        "                if cat in self._category_map:\n"
+        "                    self._category_map[cat][\"modules\"].add(tab_id)\n"
+        "        self._cleanup_empty_categories()\n"
+        "        self._rebuild_category_strip()\n"
+        "        self._rebuild_spell_tabs()\n"
+        "\n"
+        "    def _cleanup_empty_categories(self) -> None:\n"
+        "        remove = []\n"
+        "        for cat, data in self._category_map.items():\n"
+        "            if data.get(\"modules\"):\n"
+        "                continue\n"
+        "            if data.get(\"protected\") or cat in self._protected_categories:\n"
+        "                continue\n"
+        "            remove.append(cat)\n"
+        "        for cat in remove:\n"
+        "            self._category_map.pop(cat, None)\n"
+        "        if self._active_category not in self._category_map:\n"
+        "            self._active_category = next(iter(self._category_map.keys()), \"Core\")\n"
+        "\n"
+        "    def _load_spell_tab_state_from_config(self) -> None:\n",
+        "inject category framework and lifecycle",
+    )
+    source = _replace_once(
+        source,
+        "        for tab in self._ordered_spell_tab_defs():\n"
+        "            i = self._spell_tabs.addTab(tab[\"widget\"], tab[\"title\"])\n",
+        "        for tab in self._ordered_spell_tab_defs():\n"
+        "            if not self._visible_tab_for_active_category(tab):\n"
+        "                continue\n"
+        "            i = self._spell_tabs.addTab(tab[\"widget\"], tab[\"title\"])\n",
+        "category-aware visible tabs",
+    )
+    source = _replace_once(
+        source,
+        '            {"id": "instruments", "title": "Instruments", "widget": self._hw_panel, "default_order": 0},\n'
+        '            {"id": "records", "title": "Records", "widget": self._records_tab, "default_order": 1},\n'
+        '            {"id": "tasks", "title": "Tasks", "widget": self._tasks_tab, "default_order": 2},\n'
+        '            {"id": "sl_scans", "title": "SL Scans", "widget": self._sl_scans, "default_order": 3},\n'
+        '            {"id": "sl_commands", "title": "SL Commands", "widget": self._sl_commands, "default_order": 4},\n'
+        '            {"id": "job_tracker", "title": "Job Tracker", "widget": self._job_tracker, "default_order": 5},\n'
+        '            {"id": "lessons", "title": "Lessons", "widget": self._lessons_tab, "default_order": 6},\n',
+        '            {"id": "instruments", "title": "Instruments", "widget": self._hw_panel, "default_order": 0, "category": "System", "secondary_categories": ["Core"], "protected_category": True},\n'
+        '            {"id": "records", "title": "Records", "widget": self._records_tab, "default_order": 1, "category": "Core", "secondary_categories": []},\n'
+        '            {"id": "tasks", "title": "Tasks", "widget": self._tasks_tab, "default_order": 2, "category": "Core", "secondary_categories": []},\n'
+        '            {"id": "sl_scans", "title": "SL Scans", "widget": self._sl_scans, "default_order": 3, "category": "Operations", "secondary_categories": []},\n'
+        '            {"id": "sl_commands", "title": "SL Commands", "widget": self._sl_commands, "default_order": 4, "category": "Operations", "secondary_categories": []},\n'
+        '            {"id": "job_tracker", "title": "Job Tracker", "widget": self._job_tracker, "default_order": 5, "category": "Operations", "secondary_categories": []},\n'
+        '            {"id": "lessons", "title": "Lessons", "widget": self._lessons_tab, "default_order": 6, "category": "Core", "secondary_categories": ["Management"]},\n',
+        "category metadata for base spell tabs",
+    )
+    source = _replace_once(
+        source,
+        '            {"id": "modules", "title": "Modules", "widget": self._module_tracker, "default_order": 7},\n'
+        '            {"id": "financial_planner", "title": "Financial Planner", "widget": self._financial_planner_tab, "default_order": 8},\n'
+        '            {"id": "dice_roller", "title": "Dice Roller", "widget": self._dice_roller_tab, "default_order": 9},\n'
+        '            {"id": "magic_8_ball", "title": "Magic 8-Ball", "widget": self._magic_8ball_tab, "default_order": 10},\n'
+        '            {"id": "diagnostics", "title": "Diagnostics", "widget": self._diag_tab, "default_order": 11},\n'
+        '            {"id": "settings", "title": "Settings", "widget": self._settings_tab, "default_order": 12},\n',
+        '            {"id": "modules", "title": "Modules", "widget": self._module_tracker, "default_order": 7, "category": "Management", "secondary_categories": ["Utilities"]},\n'
+        '            {"id": "financial_planner", "title": "Financial Planner", "widget": self._financial_planner_tab, "default_order": 8, "category": "Utilities", "secondary_categories": ["Management"]},\n'
+        '            {"id": "dice_roller", "title": "Dice Roller", "widget": self._dice_roller_tab, "default_order": 9, "category": "Utilities", "secondary_categories": []},\n'
+        '            {"id": "magic_8_ball", "title": "Magic 8-Ball", "widget": self._magic_8ball_tab, "default_order": 10, "category": "Utilities", "secondary_categories": []},\n'
+        '            {"id": "diagnostics", "title": "Diagnostics", "widget": self._diag_tab, "default_order": 11, "category": "System", "secondary_categories": [], "protected_category": True},\n'
+        '            {"id": "settings", "title": "Settings", "widget": self._settings_tab, "default_order": 12, "category": "System", "secondary_categories": [], "protected_category": True},\n',
+        "category metadata for extended spell tabs",
     )
     return source
 
