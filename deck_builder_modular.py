@@ -10467,6 +10467,12 @@ class PersonaPanel(QWidget):
         self._loaded_persona: Optional[dict] = None
         self._loaded_name:    Optional[str]  = None
         self._radio_group = QButtonGroup(self)
+        self._builtin_name_by_id = {0: "Default", 1: "Assistant", 2: "Friend"}
+        self._builtin_pronoun_map = {
+            "male":   {"subject": "he", "object": "him", "possessive": "his"},
+            "female": {"subject": "she", "object": "her", "possessive": "her"},
+            "none":   {"subject": "", "object": "", "possessive": ""},
+        }
         self._state_greetings_preview: Optional[dict[str, str]] = None
         self._setup_ui()
 
@@ -10501,6 +10507,44 @@ class PersonaPanel(QWidget):
         self._radio_friend.setStyleSheet(radio_style)
         self._radio_group.addButton(self._radio_friend, 2)
         root.addWidget(self._radio_friend)
+
+        # ── Built-in gender / pronouns ─────────────────────────────────────
+        self._builtin_gender_box = QGroupBox("Built-in Persona Pronouns")
+        self._builtin_gender_box.setStyleSheet(
+            f"QGroupBox {{ color: {S('text')}; border: 1px solid {S('border')}; margin-top: 6px; }}"
+            f"QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; }}"
+        )
+        builtin_gender_layout = QVBoxLayout(self._builtin_gender_box)
+        builtin_gender_layout.setContentsMargins(8, 10, 8, 8)
+        builtin_gender_layout.setSpacing(4)
+
+        gender_row = QHBoxLayout()
+        self._builtin_gender_group = QButtonGroup(self)
+        self._gender_male = QRadioButton("Male")
+        self._gender_female = QRadioButton("Female")
+        self._gender_none = QRadioButton("None")
+        self._gender_other = QRadioButton("Other")
+        for idx, btn in enumerate([self._gender_male, self._gender_female, self._gender_none, self._gender_other]):
+            btn.setStyleSheet(radio_style)
+            self._builtin_gender_group.addButton(btn, idx)
+            gender_row.addWidget(btn)
+        self._gender_none.setChecked(True)
+        builtin_gender_layout.addLayout(gender_row)
+
+        custom_row = QHBoxLayout()
+        self._custom_subject = QLineEdit()
+        self._custom_object = QLineEdit()
+        self._custom_possessive = QLineEdit()
+        self._custom_subject.setPlaceholderText("subject")
+        self._custom_object.setPlaceholderText("object")
+        self._custom_possessive.setPlaceholderText("possessive")
+        for field in (self._custom_subject, self._custom_object, self._custom_possessive):
+            field.setStyleSheet(
+                f"background: {S('bg3')}; color: {S('text')}; border: 1px solid {S('border')}; padding: 3px 6px;"
+            )
+            custom_row.addWidget(field)
+        builtin_gender_layout.addLayout(custom_row)
+        root.addWidget(self._builtin_gender_box)
 
         hint = QLabel("All other personas (Morganna, GrimVeil, VEX, etc.) load via file below.")
         hint.setStyleSheet(dim_style)
@@ -10581,22 +10625,62 @@ class PersonaPanel(QWidget):
 
         # Connect radio group
         self._radio_group.idClicked.connect(self._on_radio_changed)
+        self._builtin_gender_group.idClicked.connect(self._on_builtin_pronouns_changed)
+        self._custom_subject.textChanged.connect(self._on_builtin_pronouns_changed)
+        self._custom_object.textChanged.connect(self._on_builtin_pronouns_changed)
+        self._custom_possessive.textChanged.connect(self._on_builtin_pronouns_changed)
 
         # Emit initial selection
+        self._update_builtin_pronoun_controls()
         self._emit_builtin("Default")
 
     def _on_radio_changed(self, radio_id: int) -> None:
-        names = {0: "Default", 1: "Assistant", 2: "Friend"}
-        if radio_id in names:
+        if radio_id in self._builtin_name_by_id:
             self._loaded_persona = None
             self._loaded_name    = None
             self._file_path.setText("")
             self._preview.setText("")
-            self._emit_builtin(names[radio_id])
+            self._update_builtin_pronoun_controls()
+            self._emit_builtin(self._builtin_name_by_id[radio_id])
+            return
+        self._update_builtin_pronoun_controls()
         # radio_id == 3 (Load from file) — do nothing until file is browsed
 
+    def _builtin_selection_name(self) -> Optional[str]:
+        radio_id = self._radio_group.checkedId()
+        return self._builtin_name_by_id.get(radio_id)
+
+    def _current_builtin_pronouns(self) -> dict[str, str]:
+        gender_id = self._builtin_gender_group.checkedId()
+        if gender_id == 0:
+            return dict(self._builtin_pronoun_map["male"])
+        if gender_id == 1:
+            return dict(self._builtin_pronoun_map["female"])
+        if gender_id == 2:
+            return dict(self._builtin_pronoun_map["none"])
+        return {
+            "subject": self._custom_subject.text().strip(),
+            "object": self._custom_object.text().strip(),
+            "possessive": self._custom_possessive.text().strip(),
+        }
+
+    def _update_builtin_pronoun_controls(self) -> None:
+        is_builtin = self._builtin_selection_name() is not None
+        self._builtin_gender_box.setVisible(is_builtin)
+        custom_visible = is_builtin and self._builtin_gender_group.checkedId() == 3
+        self._custom_subject.setVisible(custom_visible)
+        self._custom_object.setVisible(custom_visible)
+        self._custom_possessive.setVisible(custom_visible)
+
+    def _on_builtin_pronouns_changed(self, *_args) -> None:
+        self._update_builtin_pronoun_controls()
+        name = self._builtin_selection_name()
+        if name:
+            self._emit_builtin(name)
+
     def _emit_builtin(self, name: str) -> None:
-        persona = BUILTIN_PERSONAS[name]
+        persona = dict(BUILTIN_PERSONAS[name])
+        persona["pronouns"] = self._current_builtin_pronouns()
         self._preview.setText(
             f"Built-in: {name}\n{persona['description']}"
         )
@@ -10694,9 +10778,10 @@ class PersonaPanel(QWidget):
         if radio_id == 3:
             # File-loaded
             return self._loaded_name, self._loaded_persona
-        names = {0: "Default", 1: "Assistant", 2: "Friend"}
-        name = names.get(radio_id, "Default")
-        return name, BUILTIN_PERSONAS[name]
+        name = self._builtin_name_by_id.get(radio_id, "Default")
+        persona = dict(BUILTIN_PERSONAS[name])
+        persona["pronouns"] = self._current_builtin_pronouns()
+        return name, persona
 
 class ModuleChecklist(QWidget):
     """
