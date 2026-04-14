@@ -1,0 +1,19 @@
+{
+  "key": "magic_8_ball",
+  "display_name": "Magic 8-Ball",
+  "version": "1.0.0",
+  "deck_api_version": "1.0",
+  "home_category": "Entertainment",
+  "tab_definitions": [
+    {
+      "tab_id": "magic_8ball",
+      "tab_name": "Magic 8-Ball"
+    }
+  ],
+  "hook_registrations": [],
+  "shared_resource": null,
+  "pip_dependencies": [],
+  "module_file": "magic_8_ball.py",
+  "entry_function": "register",
+  "description": "Classic Magic 8-Ball module with persona interpretation handoff."
+}
