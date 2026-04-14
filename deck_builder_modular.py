@@ -1532,6 +1532,17 @@ def build_deck_file(
         ui_labels  = persona.get("ui_labels", {})
         deck_lower = deck_name.lower().replace(" ", "_")
 
+        pronouns = persona.get("pronouns", {}) or {}
+        pronoun_subject = pronouns.get("subject", "they")
+        pronoun_object = pronouns.get("object", "them")
+        pronoun_possessive = pronouns.get("possessive", "their")
+        system_prompt_base = persona.get("system_prompt", "")
+        system_prompt = (
+            f"{system_prompt_base}\n\n"
+            f"Your pronouns are {pronoun_subject}/{pronoun_object}/{pronoun_possessive}. "
+            "Refer to yourself using these pronouns."
+        )
+
         replacements = {
             "<<<DECK_VERSION>>>":          DECK_VERSION,
             "<<<DECK_NAME>>>":             deck_name,
@@ -1560,7 +1571,7 @@ def build_deck_file(
             "<<<FOOTER_STRIP_LABEL>>>":    ui_labels.get("footer_strip_label", "STATE"),
             "<<<FACE_PREFIX>>>":           persona.get("face_prefix", deck_name),
             "<<<SOUND_PREFIX>>>":          deck_lower,
-            "<<<SYSTEM_PROMPT>>>":         persona.get("system_prompt", ""),
+            "<<<SYSTEM_PROMPT>>>":         system_prompt,
             "<<<COGNITIVE_ANCHORS>>>":     anchors_literal,
             "<<<COLOR_PRIMARY>>>":         colors.get("primary",    "#888888"),
             "<<<COLOR_SECONDARY>>>":       colors.get("secondary",  "#aaaaaa"),
@@ -1580,9 +1591,9 @@ def build_deck_file(
             ),
             "<<<INSTALLED_MODULES_COMMENT>>>": installed_comment,
             "<<<DECK_IMPLEMENTATION>>>":   deck_impl,
-            "<<<DECK_PRONOUN_SUBJECT>>>":   persona.get("pronouns", {}).get("subject",    "they"),
-            "<<<DECK_PRONOUN_OBJECT>>>":    persona.get("pronouns", {}).get("object",     "them"),
-            "<<<DECK_PRONOUN_POSSESSIVE>>>": persona.get("pronouns", {}).get("possessive", "their"),
+            "<<<DECK_PRONOUN_SUBJECT>>>":   pronoun_subject,
+            "<<<DECK_PRONOUN_OBJECT>>>":    pronoun_object,
+            "<<<DECK_PRONOUN_POSSESSIVE>>>": pronoun_possessive,
             "<<<UI_FONT_FAMILY>>>":         persona.get("font_family",    "'Georgia', 'Times New Roman', serif"),
             "<<<UI_AWAKENING_LINE>>>":      persona.get("awakening_line", "Connecting..."),
         }
