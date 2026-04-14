@@ -9195,7 +9195,7 @@ class DiceTrayDie(QFrame):
         source,
         "        self._load_spell_tab_state_from_config()\n"
         "        self._rebuild_spell_tabs()\n",
-        "        self._init_category_framework()\n"
+        "        self._init_spell_category_framework()\n"
         "        self._load_spell_tab_state_from_config()\n"
         "        self._rebuild_spell_tabs()\n",
         "initialize category framework",
@@ -9214,7 +9214,7 @@ class DiceTrayDie(QFrame):
     source = _replace_once(
         source,
         "    def _load_spell_tab_state_from_config(self) -> None:\n",
-        "    def _init_category_framework(self) -> None:\n"
+        "    def _init_spell_category_framework(self) -> None:\n"
         "        self._protected_categories = {\"System\", \"Core\"}\n"
         "        self._category_map = {}\n"
         "        self._module_registry = {}\n"
