@@ -9191,6 +9191,77 @@ class DiceTrayDie(QFrame):
         '            {"id": "settings", "title": "Settings", "widget": self._settings_tab, "default_order": 12},\n',
         "financial planner tab definition order",
     )
+    source = _replace_once(
+        source,
+        """        self._init_spell_category_framework()
+        self._load_spell_tab_state_from_config()
+        self._rebuild_spell_tabs()
+
+        right_workspace = QWidget()
+        right_workspace_layout = QVBoxLayout(right_workspace)
+        right_workspace_layout.setContentsMargins(0, 0, 0, 0)
+        right_workspace_layout.setSpacing(4)
+
+        self._category_strip = QWidget()
+        self._category_strip_layout = QHBoxLayout(self._category_strip)
+        self._category_strip_layout.setContentsMargins(0, 0, 0, 0)
+        self._category_strip_layout.setSpacing(4)
+        right_workspace_layout.addWidget(self._category_strip, 0)
+
+        right_workspace_layout.addWidget(self._spell_tabs, stretch=1)
+""",
+        """        self._init_spell_category_framework()
+        self._load_spell_tab_state_from_config()
+
+        right_workspace = QWidget()
+        right_workspace_layout = QVBoxLayout(right_workspace)
+        right_workspace_layout.setContentsMargins(0, 0, 0, 0)
+        right_workspace_layout.setSpacing(4)
+
+        self._category_strip = QWidget()
+        self._category_strip_layout = QHBoxLayout(self._category_strip)
+        self._category_strip_layout.setContentsMargins(0, 0, 0, 0)
+        self._category_strip_layout.setSpacing(4)
+        right_workspace_layout.addWidget(self._category_strip, 0)  # CATEGORY_BAR_ACTIVE
+        self._rebuild_category_strip()  # CATEGORY_BAR_ACTIVE
+
+        right_workspace_layout.addWidget(self._spell_tabs, stretch=1)
+        self._rebuild_spell_tabs()
+""",
+        "category bar insertion + visible runtime rebuild ordering",
+    )
+    source = _replace_once(
+        source,
+        """        self._spell_tab_state = {}
+        self._rebuild_spell_category_map()
+        self._restore_last_selected_category()
+        for tab in self._spell_tab_defs:
+""",
+        """        self._spell_tab_state = {}
+        self._rebuild_spell_category_map()
+        self._active_category = "SYSTEM"  # CATEGORY_FILTER_ACTIVE
+        for tab in self._spell_tab_defs:
+""",
+        "force startup category default to SYSTEM",
+    )
+    source = _replace_once(
+        source,
+        """    def _visible_tab_for_active_category(self, tab: dict) -> bool:
+        category = self._normalize_spell_category(tab.get("category", "SYSTEM"))
+        if self._active_category not in self._category_map:
+            return category == "SYSTEM"
+        return category == self._active_category
+""",
+        """    def _visible_tab_for_active_category(self, tab: dict) -> bool:
+        # CATEGORY_FILTER_ACTIVE
+        category = self._normalize_spell_category(tab.get("category", "SYSTEM"))
+        active_category = self._normalize_spell_category(getattr(self, "_active_category", "SYSTEM"))
+        if active_category not in self._category_map:
+            active_category = "SYSTEM"
+        return category == active_category
+""",
+        "active category tab filtering marker + guard",
+    )
     return source
 
 
