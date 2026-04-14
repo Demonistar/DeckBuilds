@@ -9590,8 +9590,31 @@ import traceback
             "cfg_set": lambda k, v: CFG.__setitem__(k, v),
             "cfg_path": lambda name: cfg_path(name),
             "create_label": lambda text: QLabel(str(text)),
+            "request_ai_interpretation": self.request_ai_interpretation,
             "restart": self._deck._restart_for_module_change,
         }
+
+    def request_ai_interpretation(self, source_module_key: str, context: dict) -> bool:
+        payload = {
+            "source_module_key": str(source_module_key or "").strip().lower(),
+            "context": context if isinstance(context, dict) else {},
+            "intent": "persona_interpretation",
+        }
+        try:
+            if hasattr(self._deck, "_queue_hidden_runtime_event"):
+                self._deck._queue_hidden_runtime_event(
+                    "module_ai_interpretation",
+                    payload,
+                    "module requested persona interpretation"
+                )
+                return True
+        except Exception as ex:
+            self._log(f"[MODULE][WARN] hidden AI handoff failed: {ex}")
+        self._log(
+            "[MODULE][WARN] AI handoff bridge unavailable; "
+            f"module={payload['source_module_key']} payload={payload}"
+        )
+        return False
 
     def _resolve_shared_resource_owners(self) -> None:
         owners = {}
