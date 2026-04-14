@@ -1539,8 +1539,10 @@ def build_deck_file(
         system_prompt_base = persona.get("system_prompt", "")
         system_prompt = (
             f"{system_prompt_base}\n\n"
+            f"Your name is {deck_name}. "
             f"Your pronouns are {pronoun_subject}/{pronoun_object}/{pronoun_possessive}. "
-            "Refer to yourself using these pronouns."
+            "Use these pronouns only when grammatically referring to yourself. "
+            "Never use your pronouns as your name or identity label."
         )
 
         replacements = {
