@@ -40,6 +40,8 @@ import tempfile
 import subprocess
 import urllib.request
 import re
+import ast
+import argparse
 import base64
 import hashlib
 import hmac
@@ -164,12 +166,13 @@ def set_scheme(name: str) -> None:
 # SECTION 1C — MODULE REGISTRY
 #
 # Modules are discovered dynamically from the .\Modules\ subfolder at startup.
-# Each module provides a manifest.json (or <name>.json) with its metadata.
-# No modules are hardcoded here — drop a folder into .\Modules\ and it appears.
+# Each module is a signed .edm artifact.
+# Developer packaging reads MODULE_MANIFEST directly from the module .py file.
 #
 # TO ADD A NEW MODULE:
-#   1. Create .\Modules\<ModuleName>\manifest.json
-#   2. Restart the builder — it will appear automatically in the checklist.
+#   1. Author a Python file that declares MODULE_MANIFEST = {...}
+#   2. Package it into .edm
+#   3. Drop the .edm into .\Modules\ and restart the builder
 # ═══════════════════════════════════════════════════════════════════════════════
 
 MODULES_DIR = SCRIPT_DIR / "Modules"
@@ -184,6 +187,48 @@ def _normalize_module_key(name: str) -> str:
 
 def _edm_canonical_json(data: dict) -> bytes:
     return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _extract_module_manifest_from_source(module_path: Path) -> dict:
+    source = module_path.read_text(encoding="utf-8")
+    try:
+        tree = ast.parse(source, filename=str(module_path))
+    except SyntaxError as ex:
+        raise ValueError(f"Unable to parse module source: {module_path} ({ex})") from ex
+
+    for node in tree.body:
+        value_node = None
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "MODULE_MANIFEST":
+                    value_node = node.value
+                    break
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == "MODULE_MANIFEST":
+                value_node = node.value
+
+        if value_node is None:
+            continue
+
+        try:
+            manifest = ast.literal_eval(value_node)
+        except Exception as ex:
+            raise ValueError(f"MODULE_MANIFEST must be a literal dict in: {module_path}") from ex
+        if not isinstance(manifest, dict):
+            raise ValueError(f"MODULE_MANIFEST must be a dict in: {module_path}")
+        return manifest
+
+    raise ValueError(f"MODULE_MANIFEST not found in: {module_path}")
+
+
+def _default_edm_output_path(module_path: Path, manifest: dict) -> Path:
+    display_name = str(manifest.get("display_name") or "").strip()
+    if display_name:
+        stem = "".join(ch for ch in display_name.title() if ch.isalnum())
+    else:
+        stem = "".join(part.capitalize() for part in module_path.stem.split("_") if part)
+    stem = stem or "Module"
+    return module_path.with_name(f"{stem}.edm")
 
 
 def _sign_edm(manifest: dict, payload_b64: str, signing_key: str | bytes = EDM_SIGNING_KEY) -> str:
@@ -202,34 +247,20 @@ def verify_edm_signature(package: dict, signing_key: str | bytes = EDM_SIGNING_K
     return hmac.compare_digest(sig, expected)
 
 
-def package_module_to_edm(module_dir: Path, output_path: Optional[Path] = None, signing_key: str | bytes = EDM_SIGNING_KEY) -> Path:
-    """Developer tool: package a module folder into a signed .edm artifact."""
-    module_dir = Path(module_dir)
-    manifest_path = module_dir / "manifest.json"
-    if not manifest_path.exists():
-        raise FileNotFoundError(f"manifest.json not found in {module_dir}")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not isinstance(manifest, dict):
-        raise ValueError("manifest.json must be a JSON object")
-
-    key = _normalize_module_key(str(manifest.get("key") or module_dir.name))
-    if not key:
-        raise ValueError("Manifest key is required")
-
-    module_file = manifest.get("module_file") or "module.py"
-    module_path = module_dir / str(module_file)
+def package_module_to_edm(module_source: Path, output_path: Optional[Path] = None, signing_key: str | bytes = EDM_SIGNING_KEY) -> Path:
+    """Developer tool: package a single Python module file into a signed .edm artifact."""
+    module_path = Path(module_source)
+    if module_path.suffix.lower() != ".py":
+        raise ValueError(f"Expected a Python module file (.py), got: {module_path}")
     if not module_path.exists():
         raise FileNotFoundError(f"Module payload file not found: {module_path}")
 
-    assets: list[dict] = []
-    assets_root = module_dir / "assets"
-    asset_payload: dict[str, str] = {}
-    if assets_root.exists():
-        for ap in sorted(x for x in assets_root.rglob("*") if x.is_file()):
-            rel = ap.relative_to(module_dir).as_posix()
-            blob = ap.read_bytes()
-            assets.append({"path": rel, "size": len(blob), "sha256": hashlib.sha256(blob).hexdigest()})
-            asset_payload[rel] = base64.b64encode(blob).decode("ascii")
+    manifest = _extract_module_manifest_from_source(module_path)
+    key = _normalize_module_key(str(manifest.get("key") or module_path.stem))
+    if not key:
+        raise ValueError("Manifest key is required")
+
+    module_file = module_path.name
 
     reserved_binding = str(manifest.get("bound_deck_id") or "")
     normalized_manifest = {
@@ -247,7 +278,7 @@ def package_module_to_edm(module_dir: Path, output_path: Optional[Path] = None, 
         "dependencies": list(manifest.get("dependencies") or []),
         "pip_dependencies": list(manifest.get("pip_dependencies") or manifest.get("requires") or []),
         "bound_deck_id": reserved_binding,
-        "assets": assets,
+        "assets": [],
         "entry_file": str(module_file),
         "entry_function": str(manifest.get("entry_function") or "register"),
         "description": str(manifest.get("description") or ""),
@@ -257,7 +288,7 @@ def package_module_to_edm(module_dir: Path, output_path: Optional[Path] = None, 
         "entry_file": str(module_file),
         "entry_function": normalized_manifest["entry_function"],
         "module_source": module_path.read_text(encoding="utf-8"),
-        "assets": asset_payload,
+        "assets": {},
     }
     payload_b64 = base64.b64encode(zlib.compress(_edm_canonical_json(payload), 9)).decode("ascii")
 
@@ -269,7 +300,7 @@ def package_module_to_edm(module_dir: Path, output_path: Optional[Path] = None, 
     package["signature"] = _sign_edm(normalized_manifest, payload_b64, signing_key=signing_key)
 
     if output_path is None:
-        output_path = module_dir.with_suffix(".edm")
+        output_path = _default_edm_output_path(module_path, manifest)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(package, sort_keys=True, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
@@ -12111,9 +12142,41 @@ def _launch_deck(deck_path: Path) -> None:
         print(f"Run manually: python {deck_path}")
 
 
+def _build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument(
+        "--pack-module",
+        dest="pack_module",
+        metavar="MODULE_PY",
+        help="Package a Python module file containing MODULE_MANIFEST into a signed .edm artifact.",
+    )
+    parser.add_argument(
+        "--out",
+        dest="pack_out",
+        metavar="EDM_PATH",
+        help="Optional output path for --pack-module. Defaults to <DisplayName>.edm beside MODULE_PY.",
+    )
+    return parser
+
+
+def _run_cli(args: argparse.Namespace) -> bool:
+    if not args.pack_module:
+        return False
+    source = Path(args.pack_module)
+    out = Path(args.pack_out) if args.pack_out else None
+    built = package_module_to_edm(source, output_path=out)
+    print(f"Created EDM module: {built}")
+    return True
+
+
 def main() -> None:
     # Ensure we're running from the right directory
     os.chdir(str(SCRIPT_DIR))
+
+    parser = _build_cli_parser()
+    args, _unknown = parser.parse_known_args(sys.argv[1:])
+    if _run_cli(args):
+        return
 
     app = QApplication(sys.argv)
     app.setApplicationName("Echo Deck Builder")
