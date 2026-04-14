@@ -40,6 +40,10 @@ import tempfile
 import subprocess
 import urllib.request
 import re
+import base64
+import hashlib
+import hmac
+import zlib
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -169,43 +173,140 @@ def set_scheme(name: str) -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 MODULES_DIR = SCRIPT_DIR / "Modules"
+EDM_SIGNING_KEY = os.environ.get("ECHO_DECK_EDM_SIGNING_KEY", "echo-deck-dev-signing-key")
+EDM_FORMAT_VERSION = 1
+DECK_MODULE_API_VERSION = "1.0"
 
 
 def _normalize_module_key(name: str) -> str:
     return "".join(ch.lower() if ch.isalnum() else "_" for ch in name).strip("_")
 
 
-def _load_module_manifest(path: Path) -> Optional[dict]:
+def _edm_canonical_json(data: dict) -> bytes:
+    return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _sign_edm(manifest: dict, payload_b64: str, signing_key: str | bytes = EDM_SIGNING_KEY) -> str:
+    key_bytes = signing_key.encode("utf-8") if isinstance(signing_key, str) else signing_key
+    signed_blob = _edm_canonical_json(manifest) + b"." + payload_b64.encode("utf-8")
+    return hmac.new(key_bytes, signed_blob, hashlib.sha256).hexdigest()
+
+
+def verify_edm_signature(package: dict, signing_key: str | bytes = EDM_SIGNING_KEY) -> bool:
+    manifest = package.get("manifest")
+    payload_b64 = package.get("payload_b64")
+    sig = str(package.get("signature") or "")
+    if not isinstance(manifest, dict) or not isinstance(payload_b64, str) or not sig:
+        return False
+    expected = _sign_edm(manifest, payload_b64, signing_key=signing_key)
+    return hmac.compare_digest(sig, expected)
+
+
+def package_module_to_edm(module_dir: Path, output_path: Optional[Path] = None, signing_key: str | bytes = EDM_SIGNING_KEY) -> Path:
+    """Developer tool: package a module folder into a signed .edm artifact."""
+    module_dir = Path(module_dir)
+    manifest_path = module_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"manifest.json not found in {module_dir}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError("manifest.json must be a JSON object")
+
+    key = _normalize_module_key(str(manifest.get("key") or module_dir.name))
+    if not key:
+        raise ValueError("Manifest key is required")
+
+    module_file = manifest.get("module_file") or "module.py"
+    module_path = module_dir / str(module_file)
+    if not module_path.exists():
+        raise FileNotFoundError(f"Module payload file not found: {module_path}")
+
+    assets: list[dict] = []
+    assets_root = module_dir / "assets"
+    asset_payload: dict[str, str] = {}
+    if assets_root.exists():
+        for ap in sorted(x for x in assets_root.rglob("*") if x.is_file()):
+            rel = ap.relative_to(module_dir).as_posix()
+            blob = ap.read_bytes()
+            assets.append({"path": rel, "size": len(blob), "sha256": hashlib.sha256(blob).hexdigest()})
+            asset_payload[rel] = base64.b64encode(blob).decode("ascii")
+
+    reserved_binding = str(manifest.get("bound_deck_id") or "")
+    normalized_manifest = {
+        "format_version": EDM_FORMAT_VERSION,
+        "key": key,
+        "display_name": str(manifest.get("display_name") or key.replace("_", " ").title()),
+        "version": str(manifest.get("version") or "0.1.0"),
+        "deck_api_version": str(manifest.get("deck_api_version") or DECK_MODULE_API_VERSION),
+        "home_category": str(manifest.get("home_category") or manifest.get("category") or "External Modules"),
+        "tab_definitions": list(manifest.get("tab_definitions") or manifest.get("tabs") or []),
+        "hook_registrations": list(manifest.get("hook_registrations") or []),
+        "shared_resource": manifest.get("shared_resource"),
+        "shared_resource_priority": int(manifest.get("shared_resource_priority", 1000) or 1000),
+        "settings_sections": list(manifest.get("settings_sections") or []),
+        "dependencies": list(manifest.get("dependencies") or []),
+        "pip_dependencies": list(manifest.get("pip_dependencies") or manifest.get("requires") or []),
+        "bound_deck_id": reserved_binding,
+        "assets": assets,
+        "entry_file": str(module_file),
+        "entry_function": str(manifest.get("entry_function") or "register"),
+        "description": str(manifest.get("description") or ""),
+    }
+
+    payload = {
+        "entry_file": str(module_file),
+        "entry_function": normalized_manifest["entry_function"],
+        "module_source": module_path.read_text(encoding="utf-8"),
+        "assets": asset_payload,
+    }
+    payload_b64 = base64.b64encode(zlib.compress(_edm_canonical_json(payload), 9)).decode("ascii")
+
+    package = {
+        "edm_schema": "echo_deck_module",
+        "manifest": normalized_manifest,
+        "payload_b64": payload_b64,
+    }
+    package["signature"] = _sign_edm(normalized_manifest, payload_b64, signing_key=signing_key)
+
+    if output_path is None:
+        output_path = module_dir.with_suffix(".edm")
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(package, sort_keys=True, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
+    return output_path
+
+
+def _read_edm_manifest(path: Path) -> Optional[dict]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        package = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
-
-    if not isinstance(data, dict):
+    if not isinstance(package, dict):
         return None
-
-    key = str(data.get("key") or data.get("id") or path.stem).strip()
-    key = _normalize_module_key(key)
+    if not verify_edm_signature(package):
+        return None
+    manifest = package.get("manifest")
+    if not isinstance(manifest, dict):
+        return None
+    key = _normalize_module_key(str(manifest.get("key") or path.stem))
     if not key:
         return None
-
-    display_name = str(data.get("display_name") or data.get("name") or key.replace("_", " ").title()).strip()
-    slot_key = str(data.get("slot_key") or f"MODULE_{key.upper()}").strip()
-
     return {
         "key": key,
-        "display_name": display_name,
-        "category": str(data.get("category") or "External Modules"),
+        "display_name": str(manifest.get("display_name") or key.replace("_", " ").title()),
+        "category": str(manifest.get("home_category") or "External Modules"),
         "status": "built",
-        "description": str(data.get("description") or ""),
-        "tab_name": str(data.get("tab_name") or display_name),
-        "slot_key": slot_key,
-        "requires": list(data.get("requires") or []),
-        "requirements": list(data.get("requirements") or []),
-        "default_on": bool(data.get("default_on", False)),
-        "runtime_marker": str(data.get("runtime_marker") or "").strip(),
+        "description": str(manifest.get("description") or ""),
+        "tab_name": str(manifest.get("display_name") or key),
+        "slot_key": f"MODULE_{key.upper()}",
+        "requires": list(manifest.get("pip_dependencies") or []),
+        "pip_dependencies": list(manifest.get("pip_dependencies") or []),
+        "default_on": bool(manifest.get("default_on", False)),
+        "runtime_marker": str(manifest.get("runtime_marker") or ""),
         "manifest_path": str(path),
-        "module_path": str(path.parent),
+        "module_path": str(path),
+        "artifact_path": str(path),
+        "deck_api_version": str(manifest.get("deck_api_version") or DECK_MODULE_API_VERSION),
     }
 
 
@@ -213,26 +314,18 @@ def discover_optional_modules(modules_dir: Path, log_fn=None) -> dict[str, dict]
     discovered: dict[str, dict] = {}
     if not modules_dir.exists():
         return discovered
-
-    manifests: list[Path] = []
-    manifests.extend(sorted(modules_dir.glob("*.json")))
-    manifests.extend(sorted(modules_dir.glob("*/manifest.json")))
-
-    for mf in manifests:
-        mod = _load_module_manifest(mf)
+    for edm_path in sorted(modules_dir.glob("*.edm")):
+        mod = _read_edm_manifest(edm_path)
         if not mod:
             if log_fn:
-                log_fn(f"[MODULES][WARN] Invalid manifest skipped: {mf}")
+                log_fn(f"[MODULES][WARN] Invalid/unsigned EDM skipped: {edm_path.name}")
             continue
-        key = _normalize_module_key(str(mod.get("key", "")) or mf.stem)
-        if not key:
-            continue
+        key = mod["key"]
         if key in discovered:
             if log_fn:
-                log_fn(f"[MODULES][WARN] Duplicate module key skipped: {key} ({mf})")
+                log_fn(f"[MODULES][WARN] Duplicate module key skipped: {key} ({edm_path.name})")
             continue
         discovered[key] = mod
-
     return dict(sorted(discovered.items(), key=lambda kv: kv[1].get("display_name", kv[0]).lower()))
 
 
@@ -9362,6 +9455,459 @@ class DiceTrayDie(QFrame):
 """,
         "active category tab filtering marker + guard",
     )
+    source = _replace_once(
+        source,
+        """import ast
+import operator
+import html
+""",
+        """import ast
+import operator
+import html
+import hashlib
+import hmac
+import importlib.util
+import traceback
+""",
+        "runtime imports for module system",
+    )
+
+    source = _replace_once(
+        source,
+        """class EchoDeck(QMainWindow):
+""",
+        """class EchoDeckModuleManager:
+    # Signed .edm module manager for runtime install/load.
+
+    DECK_API_VERSION = "1.0"
+    ALLOWED_HOOKS = {"on_startup", "on_shutdown", "on_message", "on_tick", "on_install", "on_uninstall"}
+
+    def __init__(self, deck_window: "EchoDeck"):
+        self._deck = deck_window
+        self._modules_dir = SCRIPT_DIR / "Modules"
+        self._modules_dir.mkdir(parents=True, exist_ok=True)
+        self._installed: dict[str, dict] = {}
+        self._hooks: dict[str, list] = {k: [] for k in self.ALLOWED_HOOKS}
+
+    def _log(self, msg: str) -> None:
+        try:
+            self._deck._append_chat("SYSTEM", msg)
+        except Exception:
+            _early_log(msg)
+
+    def _license_binding_valid(self, module_binding: str, deck_identifier: str) -> bool:
+        # LICENSING STUB: replace with server-side validation in a future pass.
+        return True
+
+    def _verify_signature(self, package: dict) -> bool:
+        manifest = package.get("manifest")
+        payload_b64 = package.get("payload_b64")
+        signature = str(package.get("signature") or "")
+        if not isinstance(manifest, dict) or not isinstance(payload_b64, str) or not signature:
+            return False
+        signing_key = os.environ.get("ECHO_DECK_EDM_SIGNING_KEY", "echo-deck-dev-signing-key").encode("utf-8")
+        canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        expected = hmac.new(signing_key, canonical + b"." + payload_b64.encode("utf-8"), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(signature, expected)
+
+    def _api_compatible(self, version: str) -> bool:
+        return str(version or "").strip() == self.DECK_API_VERSION
+
+    def _unpack_payload(self, payload_b64: str) -> dict:
+        blob = zlib.decompress(base64.b64decode(payload_b64.encode("ascii")))
+        payload = json.loads(blob.decode("utf-8"))
+        return payload if isinstance(payload, dict) else {}
+
+    def scan_available(self) -> dict[str, dict]:
+        available: dict[str, dict] = {}
+        cfg_modules = CFG.setdefault("modules", {})
+        installed = cfg_modules.setdefault("installed", [])
+        for edm in sorted(self._modules_dir.glob("*.edm")):
+            self._log(f"[MODULE] discovered: {edm.name}")
+            try:
+                package = json.loads(edm.read_text(encoding="utf-8"))
+            except Exception as ex:
+                self._log(f"[MODULE][WARN] invalid EDM JSON skipped: {edm.name} ({ex})")
+                continue
+            if not self._verify_signature(package):
+                self._log(f"[MODULE][SECURITY] signature failed: {edm.name}")
+                continue
+            manifest = package.get("manifest") if isinstance(package.get("manifest"), dict) else {}
+            key = str(manifest.get("key") or edm.stem).strip().lower().replace(" ", "_")
+            if not self._api_compatible(manifest.get("deck_api_version")):
+                self._log(f"[MODULE][WARN] api version incompatible: {key}")
+                continue
+            if not self._license_binding_valid(str(manifest.get("bound_deck_id") or ""), str(CFG.get("_dkid") or "")):
+                self._log(f"[MODULE][WARN] licensing bind failed: {key}")
+                continue
+            available[key] = {"package": package, "manifest": manifest, "path": edm}
+            if key not in installed:
+                installed.append(key)
+                self._log(f"[MODULE] install registered: {key}")
+        cfg_modules["installed"] = [k for k in installed if k in available]
+        save_config(CFG)
+        return available
+
+    def load_installed(self) -> dict[str, dict]:
+        available = self.scan_available()
+        self._installed = {}
+        self._hooks = {k: [] for k in self.ALLOWED_HOOKS}
+        for key in CFG.get("modules", {}).get("installed", []):
+            item = available.get(key)
+            if not item:
+                continue
+            manifest = item["manifest"]
+            package = item["package"]
+            try:
+                payload = self._unpack_payload(package["payload_b64"])
+                mod_ns = {"__name__": f"edm_{key}"}
+                exec(payload.get("module_source", ""), mod_ns, mod_ns)
+                entry_name = str(payload.get("entry_function") or manifest.get("entry_function") or "register")
+                entry = mod_ns.get(entry_name)
+                if not callable(entry):
+                    raise RuntimeError(f"entry function missing: {entry_name}")
+                deck_api = self._build_deck_api()
+                contract = entry(deck_api)
+                if not isinstance(contract, dict):
+                    raise RuntimeError("entry did not return dict")
+                if str(contract.get("deck_api_version") or "") != self.DECK_API_VERSION:
+                    raise RuntimeError("module contract API mismatch")
+                self._installed[key] = {"manifest": manifest, "contract": contract, "payload": payload}
+                for hook_name, hook_fn in (contract.get("hooks") or {}).items():
+                    if hook_name in self._hooks and callable(hook_fn):
+                        self._hooks[hook_name].append((key, hook_fn))
+            except Exception as ex:
+                self._log(f"[MODULE][WARN] load skipped for {key}: {ex}")
+                self._log(traceback.format_exc())
+        self._resolve_shared_resource_owners()
+        return self._installed
+
+    def _build_deck_api(self) -> dict:
+        return {
+            "deck_api_version": self.DECK_API_VERSION,
+            "log": lambda msg: self._log(f"[MODULE] {msg}"),
+            "cfg_get": lambda k, d=None: CFG.get(k, d),
+            "cfg_set": lambda k, v: CFG.__setitem__(k, v),
+            "cfg_path": lambda name: cfg_path(name),
+            "create_label": lambda text: QLabel(str(text)),
+            "restart": self._deck._restart_for_module_change,
+        }
+
+    def _resolve_shared_resource_owners(self) -> None:
+        owners = {}
+        for key, item in self._installed.items():
+            c = item.get("contract", {})
+            resource = c.get("shared_resource")
+            if not resource:
+                continue
+            pri = int(c.get("shared_resource_priority", 1000) or 1000)
+            cur = owners.get(resource)
+            if cur is None or pri < cur[1]:
+                owners[resource] = (key, pri)
+        CFG.setdefault("modules", {})["shared_resource_owners"] = {k: v[0] for k, v in owners.items()}
+        save_config(CFG)
+        for resource, (owner, pri) in owners.items():
+            self._log(f"[MODULE] shared resource owner selected: {resource} -> {owner} (priority={pri})")
+
+    def build_runtime_tab_defs(self) -> list[dict]:
+        tab_defs = []
+        for key, item in self._installed.items():
+            contract = item.get("contract", {})
+            home_category = str(contract.get("home_category") or "External Modules")
+            for t in contract.get("tabs") or []:
+                tab_id = str(t.get("tab_id") or f"{key}_tab")
+                tab_name = str(t.get("tab_name") or tab_id)
+                fn = t.get("get_content")
+                if not callable(fn):
+                    continue
+                try:
+                    widget = fn()
+                except Exception as ex:
+                    self._log(f"[MODULE][WARN] tab factory failed for {tab_id}: {ex}")
+                    continue
+                if not isinstance(widget, QWidget):
+                    self._log(f"[MODULE][WARN] tab factory must return QWidget: {tab_id}")
+                    continue
+                tab_defs.append({"id": tab_id, "title": tab_name, "widget": widget, "category": home_category, "default_order": 500})
+        return tab_defs
+
+    def build_settings_sections(self) -> list[dict]:
+        rows = []
+        for key, item in self._installed.items():
+            c = item.get("contract", {})
+            rows.append({
+                "key": key,
+                "display_name": c.get("display_name") or key,
+                "category": c.get("home_category") or "External Modules",
+                "settings_sections": c.get("settings_sections") or [],
+                "pip_dependencies": item.get("manifest", {}).get("pip_dependencies") or [],
+            })
+        return rows
+
+    def call_hook(self, hook_name: str, *args, **kwargs):
+        for key, fn in self._hooks.get(hook_name, []):
+            try:
+                fn(*args, **kwargs)
+            except Exception as ex:
+                self._log(f"[MODULE][WARN] hook {hook_name} failed for {key}: {ex}")
+
+    def install_from_drop(self, source_path: Path) -> tuple[bool, str]:
+        if source_path.suffix.lower() != ".edm":
+            return False, "Only .edm files are supported"
+        target = self._modules_dir / source_path.name
+        shutil.copy2(source_path, target)
+        self.scan_available()
+        return True, f"Installed module artifact: {target.name}"
+
+    def uninstall_module(self, key: str, full_purge: bool = False) -> None:
+        mods = CFG.setdefault("modules", {})
+        installed = [k for k in mods.get("installed", []) if k != key]
+        mods["installed"] = installed
+        archived = mods.setdefault("archive", {})
+        archived[key] = {"archived_at": datetime.now().isoformat(), "full_purge": bool(full_purge)}
+        self._log(f"[MODULE] uninstall archived: {key}")
+        if full_purge:
+            file_path = self._modules_dir / f"{key}.edm"
+            if file_path.exists():
+                file_path.unlink()
+            self._log(f"[MODULE] purge completed: {key}")
+        save_config(CFG)
+
+
+class ModuleImportManagerTab(QWidget):
+    def __init__(self, deck_window: "EchoDeck", manager: EchoDeckModuleManager, parent=None):
+        super().__init__(parent)
+        self._deck = deck_window
+        self._manager = manager
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(6)
+
+        root.addWidget(QLabel("Installed"))
+        self._installed = QListWidget()
+        root.addWidget(self._installed, 1)
+
+        root.addWidget(QLabel("New"))
+        self._new = QListWidget()
+        root.addWidget(self._new, 1)
+
+        btn_row = QHBoxLayout()
+        self._btn_install = _gothic_btn("Install Selected")
+        self._btn_uninstall = _gothic_btn("Uninstall")
+        self._btn_purge = _gothic_btn("Full Purge")
+        btn_row.addWidget(self._btn_install)
+        btn_row.addWidget(self._btn_uninstall)
+        btn_row.addWidget(self._btn_purge)
+        btn_row.addStretch(1)
+        root.addLayout(btn_row)
+
+        self._btn_install.clicked.connect(self._do_install)
+        self._btn_uninstall.clicked.connect(lambda: self._do_remove(False))
+        self._btn_purge.clicked.connect(lambda: self._do_remove(True))
+        self.refresh_lists()
+
+    def refresh_lists(self) -> None:
+        available = self._manager.scan_available()
+        installed = set(CFG.get("modules", {}).get("installed", []))
+        self._installed.clear(); self._new.clear()
+        for key, item in sorted(available.items()):
+            label = f"{item['manifest'].get('display_name', key)} ({key})"
+            if key in installed:
+                self._installed.addItem(label)
+            else:
+                self._new.addItem(label)
+
+    def _selected_key(self, lw: QListWidget) -> str:
+        item = lw.currentItem()
+        if not item:
+            return ""
+        txt = item.text()
+        if txt.endswith(")") and "(" in txt:
+            return txt.rsplit("(", 1)[-1][:-1]
+        return txt.strip().lower().replace(" ", "_")
+
+    def _do_install(self) -> None:
+        key = self._selected_key(self._new)
+        if not key:
+            return
+        mods = CFG.setdefault("modules", {})
+        installed = mods.setdefault("installed", [])
+        if key not in installed:
+            installed.append(key)
+            save_config(CFG)
+        self._deck._append_chat("SYSTEM", f"[MODULE] install registered: {key}")
+        self._deck._restart_for_module_change("module install")
+
+    def _do_remove(self, full_purge: bool) -> None:
+        key = self._selected_key(self._installed)
+        if not key:
+            return
+        self._manager.uninstall_module(key, full_purge=full_purge)
+        self._deck._restart_for_module_change("module uninstall")
+
+
+class EchoDeck(QMainWindow):
+""",
+        "inject runtime module manager and import tab",
+    )
+
+    source = _replace_once(
+        source,
+        """    QGridLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFrame,
+""",
+        """    QGridLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFrame,
+    QListWidget,
+""",
+        "QtWidgets import QListWidget",
+    )
+
+    source = _replace_once(
+        source,
+        """        self._token_count         = 0
+        self._slash_dispatcher  = DeckSlashCommandDispatcher()
+""",
+        """        self._token_count         = 0
+        self._slash_dispatcher  = DeckSlashCommandDispatcher()
+        self._deck_module_manager = EchoDeckModuleManager(self)
+""",
+        "echo deck init module manager",
+    )
+
+    source = _replace_once(
+        source,
+        """            {"id": "settings", "title": "Settings", "widget": self._settings_tab, "default_order": 12},
+""",
+        """            {"id": "module_imports", "title": "Import Modules", "widget": self._module_import_tab, "default_order": 12, "category": "SYSTEM"},
+            {"id": "settings", "title": "Settings", "widget": self._settings_tab, "default_order": 13},
+""",
+        "add import modules tab",
+    )
+
+    source = _replace_once(
+        source,
+        """        # ── Module Tracker tab ─────────────────────────────────────────
+        self._module_tracker = ModuleTrackerTab()
+""",
+        """        # ── Module Tracker tab ─────────────────────────────────────────
+        self._module_tracker = ModuleTrackerTab()
+        self._module_import_tab = ModuleImportManagerTab(self, self._deck_module_manager)
+""",
+        "instantiate module import manager tab",
+    )
+
+    source = _replace_once(
+        source,
+        """        right_workspace_layout.addWidget(self._spell_tabs, stretch=1)
+        self._rebuild_spell_tabs()
+""",
+        """        right_workspace_layout.addWidget(self._spell_tabs, stretch=1)
+        self._load_runtime_modules()
+        self._mount_runtime_module_tabs()
+        self._rebuild_spell_tabs()
+""",
+        "load runtime modules before tab rebuild",
+    )
+
+    source = _replace_once(
+        source,
+        """    # ── MESSAGE HANDLING ───────────────────────────────────────────────────────
+""",
+        """    def _load_runtime_modules(self) -> None:
+        self._runtime_module_contracts = self._deck_module_manager.load_installed()
+        if hasattr(self, "_module_import_tab") and self._module_import_tab is not None:
+            self._module_import_tab.refresh_lists()
+
+    def _mount_runtime_module_tabs(self) -> None:
+        runtime_tabs = self._deck_module_manager.build_runtime_tab_defs()
+        if not runtime_tabs:
+            return
+        ids = {str(t.get("id")) for t in self._spell_tab_defs}
+        for tab in runtime_tabs:
+            if str(tab.get("id")) in ids:
+                continue
+            self._spell_tab_defs.append(tab)
+
+    def _restart_for_module_change(self, reason: str = "module update") -> None:
+        self._append_chat("SYSTEM", f"[MODULE] restart triggered: {reason}")
+        try:
+            self._deck_module_manager.call_hook("on_shutdown")
+        except Exception:
+            pass
+        try:
+            self._sessions.save()
+        except Exception:
+            pass
+        script = Path(sys.argv[0]).resolve()
+        subprocess.Popen([sys.executable, str(script)], cwd=str(script.parent))
+        QApplication.instance().quit()
+
+    # ── MESSAGE HANDLING ───────────────────────────────────────────────────────
+""",
+        "add runtime module helpers",
+    )
+
+    source = _replace_once(
+        source,
+        """    def closeEvent(self, event) -> None:
+        # X button = immediate shutdown, no dialog
+        self._do_shutdown(None)
+""",
+        """    def dragEnterEvent(self, event):
+        md = event.mimeData()
+        if md.hasUrls() and any(u.isLocalFile() and u.toLocalFile().lower().endswith('.edm') for u in md.urls()):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        md = event.mimeData()
+        if not md.hasUrls():
+            super().dropEvent(event)
+            return
+        for u in md.urls():
+            if not u.isLocalFile():
+                continue
+            p = Path(u.toLocalFile())
+            if p.suffix.lower() != '.edm':
+                continue
+            ok, msg = self._deck_module_manager.install_from_drop(p)
+            self._append_chat("SYSTEM", f"[MODULE] {msg}")
+            if ok:
+                self._restart_for_module_change("module drop install")
+                break
+
+    def closeEvent(self, event) -> None:
+        try:
+            self._deck_module_manager.call_hook("on_shutdown")
+        except Exception:
+            pass
+        # X button = immediate shutdown, no dialog
+        self._do_shutdown(None)
+""",
+        "add drop install and module shutdown hooks",
+    )
+
+    source = _replace_once(
+        source,
+        """    def _startup_sequence(self) -> None:
+        self._append_chat("SYSTEM", f"✦ {APP_NAME} AWAKENING...")
+""",
+        """    def _startup_sequence(self) -> None:
+        self._append_chat("SYSTEM", f"✦ {APP_NAME} AWAKENING...")
+        self._deck_module_manager.call_hook("on_startup")
+""",
+        "startup hook dispatch",
+    )
+
+    source = _replace_once(
+        source,
+        """        self._append_chat("YOU", text)
+""",
+        """        self._append_chat("YOU", text)
+        self._deck_module_manager.call_hook("on_message", text)
+""",
+        "message hook dispatch",
+    )
     return source
 
 
@@ -9500,6 +10046,7 @@ class DeckSetupWorker(QThread):
                 deck_home / "backups",
                 deck_home / "personas",
                 deck_home / "config",
+                deck_home / "Modules",
             ]
             for d in dirs:
                 d.mkdir(parents=True, exist_ok=True)
@@ -9597,6 +10144,17 @@ class DeckSetupWorker(QThread):
             self._log("✓ requirements.txt written")
             self.progress.emit(90)
 
+            # ── 8b. Stage selected .edm modules into deck-local Modules/ ─────
+            staged = 0
+            for mod_key in self._selected_modules:
+                mod = MODULES.get(mod_key, {})
+                src = Path(str(mod.get("artifact_path") or ""))
+                if src.exists() and src.suffix.lower() == ".edm":
+                    dst = deck_home / "Modules" / src.name
+                    shutil.copy2(src, dst)
+                    staged += 1
+            self._log(f"✓ Staged EDM modules: {staged}")
+
             # ── 9. Create desktop shortcut ────────────────────────────
             shortcut_path = None
             if self._create_shortcut:
@@ -9671,9 +10229,14 @@ class DeckSetupWorker(QThread):
                 "torpor_system":     bool(self._persona.get("torpor_system", False)),
             },
             "modules": {
-                k: (k in self._selected_modules)
-                for k in MODULES
+                "installed": [k for k in self._selected_modules if k in MODULES],
+                "enabled": {k: (k in self._selected_modules) for k in MODULES},
+                "archive": {},
+                "shared_resource_owners": {},
+                "pip_dependencies": sorted({req for k in self._selected_modules for req in (MODULES.get(k, {}).get("pip_dependencies") or MODULES.get(k, {}).get("requires") or [])}),
             },
+            "_dkid": "",  # licensing stub: deck identifier
+            "_actc": 0,    # licensing stub: activation count
             "first_run": False,
         }
         (deck_home / "config.json").write_text(
@@ -9726,7 +10289,7 @@ class DeckSetupWorker(QThread):
         extra_reqs: set[str] = set()
         for mod_key in selected_modules:
             mod = MODULES.get(mod_key, {})
-            for req in mod.get("requires", []):
+            for req in (mod.get("pip_dependencies") or mod.get("requires") or []):
                 extra_reqs.add(req)
 
         lines = [
