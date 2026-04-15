@@ -10147,118 +10147,50 @@ import zlib
         save_config(CFG)
 
 
+FRAMEWORK_REGISTRY_RAW = {
+    "APE": {"name": "APE", "difficulty": "Beginner", "fields": ["Action", "Purpose", "Expectation"], "description": "A concise framework for quick prompting with clear intent and expected output.", "use_cases": "quick clarifications, rewrites, simple drafting", "advantages": ["fast and approachable", "minimal cognitive overhead", "easy to teach"], "considerations": ["can be too lightweight for complex tasks", "expectation should define constraints"], "example_lines": ["Action: Summarize this meeting transcript.", "Purpose: Send a concise update.", "Expectation: Bullet list with owners and deadlines."], "field_examples": {"Action": "Summarize this meeting transcript", "Purpose": "Send a concise update to leadership", "Expectation": "Bullet list with owners and deadlines"}},
+    "CRISPE": {"name": "CRISPE", "difficulty": "Intermediate", "fields": ["Context", "Role", "Instruction", "Steps", "Parameters"], "description": "Procedural framework that combines role framing with execution guidance.", "use_cases": "workflow design, multi-step analysis, reproducible processes", "advantages": ["strong process clarity", "helps generate repeatable outputs"], "considerations": ["steps should be ordered and concrete", "parameters should define limits or output format"], "example_lines": ["Context: Customer feedback from Q1 NPS survey.", "Role: UX researcher.", "Instruction: Identify top usability themes.", "Steps: Cluster comments, quantify frequency, map to user journey.", "Parameters: Return a table plus 5 prioritized recommendations."], "field_examples": {"Context": "Customer feedback from Q1 NPS survey", "Role": "UX researcher", "Instruction": "Identify top usability themes", "Steps": "Cluster comments, quantify frequency, map to user journey", "Parameters": "Return a table plus 5 prioritized recommendations"}},
+    "ROSE": {"name": "ROSE", "difficulty": "Beginner", "fields": ["Role", "Objective", "Style", "Example"], "description": "Simple creative/communication framework for goal-driven outputs with style guidance.", "use_cases": "content drafting, tone adaptation, response templating", "advantages": ["easy for non-technical users", "example field boosts output alignment"], "considerations": ["provide a realistic example", "objective should be specific"], "example_lines": ["Role: Technical writer.", "Objective: Explain API rate limiting to new developers.", "Style: Friendly and practical.", "Example: Use a traffic-light analogy and include a short FAQ."], "field_examples": {"Role": "Technical writer", "Objective": "Explain API rate limiting to new developers", "Style": "Friendly and practical", "Example": "Use a traffic-light analogy and include a short FAQ"}},
+    "RACE": {"name": "RACE", "difficulty": "Intermediate", "fields": ["Role", "Action", "Context", "Expectations"], "description": "Role-based framework that adds environment and outcome expectations.", "use_cases": "analysis, brainstorming, planning", "advantages": ["adds perspective and constraints", "quick to complete"], "considerations": ["context should include constraints", "expectations should specify output structure"], "example_lines": ["Role: Product analyst.", "Action: Evaluate this roadmap.", "Context: Team of 4 engineers and one quarter timeline.", "Expectations: Prioritized recommendations with rationale."], "field_examples": {"Role": "Product analyst", "Action": "Evaluate this roadmap", "Context": "Team of 4 engineers and one quarter timeline", "Expectations": "Prioritized recommendations with rationale"}},
+    "TAG": {"name": "TAG", "difficulty": "Beginner", "fields": ["Task", "Audience", "Guardrails"], "description": "Compact framework for constrained outputs with clear task and safety boundaries.", "use_cases": "policy-sensitive drafts, concise content generation, controlled responses", "advantages": ["quick to set up", "guardrails reduce off-target output"], "considerations": ["guardrails should be concrete", "audience should match reading level expectations"], "example_lines": ["Task: Draft a release note summary.", "Audience: Non-technical account managers.", "Guardrails: Max 150 words, no internal code names, include one customer benefit."], "field_examples": {"Task": "Draft a release note summary", "Audience": "Non-technical account managers", "Guardrails": "Max 150 words, no internal code names, include one customer benefit"}},
+    "ACE": {"name": "ACE", "difficulty": "Beginner", "fields": ["Audience", "Context", "Execution"], "description": "Audience-first framing that keeps outputs tuned to who will consume them.", "use_cases": "stakeholder updates, training docs, customer-facing summaries", "advantages": ["simple structure", "keeps tone audience-appropriate", "reduces ambiguity"], "considerations": ["define audience precisely", "execution should include output format"], "example_lines": ["Audience: New support hires.", "Context: Onboarding for ticket triage.", "Execution: Create a one-page SOP with examples for severity levels."], "field_examples": {"Audience": "New support hires", "Context": "Onboarding for ticket triage", "Execution": "Create a one-page SOP with examples for severity levels"}},
+    "CRAFT": {"name": "CRAFT", "difficulty": "Intermediate", "fields": ["Context", "Role", "Action", "Result", "Tone"], "description": "Balanced framework for assigning perspective, task, and intended outcome.", "use_cases": "strategy drafts, proposal writing, narrative transformation", "advantages": ["good balance of control and speed", "result clarifies deliverable"], "considerations": ["role and tone should not conflict", "result should be measurable where possible"], "example_lines": ["Context: Preparing quarterly board update.", "Role: Senior finance partner.", "Action: Analyze budget variance trends.", "Result: Executive summary with top 3 risks and mitigations.", "Tone: Professional and concise."], "field_examples": {"Context": "Preparing quarterly board update", "Role": "Senior finance partner", "Action": "Analyze budget variance trends", "Result": "Executive summary with top 3 risks and mitigations", "Tone": "Professional and concise"}},
+    "CHAIN": {"name": "CHAIN", "difficulty": "Advanced", "fields": ["Context", "Hypothesis", "Analysis", "Inference", "Narration"], "description": "Structured reasoning flow that separates assumptions, analysis, and final narrative.", "use_cases": "decision support, exploratory analysis, complex reasoning tasks", "advantages": ["promotes transparent logic", "improves consistency of complex outputs"], "considerations": ["requires more time to fill out", "hypothesis should be testable"], "example_lines": ["Context: Revenue dipped 12% QoQ.", "Hypothesis: Churn in mid-market accounts is primary driver.", "Analysis: Compare churn cohorts by segment and tenure.", "Inference: Identify highest-impact churn vectors.", "Narration: Present findings and 90-day recovery plan."], "field_examples": {"Context": "Revenue dipped 12% QoQ", "Hypothesis": "Churn in mid-market accounts is the primary driver", "Analysis": "Compare churn cohorts by segment and tenure", "Inference": "Identify highest-impact churn vectors", "Narration": "Present findings and a 90-day recovery plan"}},
+    "SMART": {"name": "SMART", "difficulty": "Intermediate", "fields": ["Specific", "Measurable", "Achievable", "Relevant", "Time-bound"], "description": "Goal-definition framework useful for objective planning and accountability.", "use_cases": "project planning, KPI definition, performance objectives", "advantages": ["clarifies success criteria", "enforces practical constraints"], "considerations": ["measurable metrics must be explicit", "time-bound target should include a concrete date"], "example_lines": ["Specific: Improve onboarding completion.", "Measurable: Raise completion from 62% to 80%.", "Achievable: Add guided checklist and reminder emails.", "Relevant: Supports activation and retention goals.", "Time-bound: Achieve by September 30."], "field_examples": {"Specific": "Improve onboarding completion", "Measurable": "Raise completion from 62% to 80%", "Achievable": "Add guided checklist and reminder emails", "Relevant": "Supports activation and retention goals", "Time-bound": "Achieve by September 30"}},
+    "CO-STAR": {"name": "CO-STAR", "difficulty": "Intermediate", "fields": ["Context", "Objective", "Style", "Tone", "Audience", "Response"], "description": "Comprehensive prompt scaffold balancing goals, voice, and response formatting.", "use_cases": "marketing copy, executive communication, polished deliverables", "advantages": ["high control over output style", "strong audience alignment"], "considerations": ["can be verbose for quick tasks", "response should be explicit about output format"], "example_lines": ["Context: Product launch for a workflow automation app.", "Objective: Announce GA availability.", "Style: Clear and persuasive.", "Tone: Confident and practical.", "Audience: Operations leaders at SMBs.", "Response: 3-paragraph launch email plus 5 subject line options."], "field_examples": {"Context": "Product launch for a workflow automation app", "Objective": "Announce GA availability", "Style": "Clear and persuasive", "Tone": "Confident and practical", "Audience": "Operations leaders at SMBs", "Response": "3-paragraph launch email plus 5 subject line options"}},
+}
+
+
+def _build_framework_registry() -> dict[str, dict]:
+    line_break = chr(10)
+    registry = {}
+    for key, row in FRAMEWORK_REGISTRY_RAW.items():
+        fields = list(row["fields"])
+        lines = list(row.get("example_lines", []))
+        built = dict(row)
+        built["assembly_order"] = list(row.get("assembly_order") or fields)
+        built["assembly_template"] = line_break.join(f"{field}: {{{field}}}" for field in built["assembly_order"])
+        built["example_prompt"] = line_break.join(lines)
+        built.pop("example_lines", None)
+        registry[key] = built
+    return registry
+
+
+FRAMEWORK_REGISTRY = _build_framework_registry()
+
+
 class FrameworksToolTab(QWidget):
     FIELD_MIN_HEIGHT = 72
     FIELD_MAX_HEIGHT = 220
-
-    FRAMEWORK_DEFINITIONS = {
-        "ACE": {
-            "difficulty": "Beginner",
-            "fields": ["Audience", "Context", "Execution"],
-            "description": "Audience-first framing that keeps outputs tuned to who will consume them.",
-            "use_cases": "stakeholder updates, training docs, customer-facing summaries",
-            "advantages": ["simple structure", "keeps tone audience-appropriate", "reduces ambiguity"],
-            "considerations": ["define audience precisely", "execution should include output format"],
-            "example": "Audience: New support hires\nContext: Onboarding for ticket triage\nExecution: Create a one-page SOP with examples for severity levels.",
-            "assembly": "Audience: {Audience}\nContext: {Context}\nExecution: {Execution}",
-        },
-        "APE": {
-            "difficulty": "Beginner",
-            "fields": ["Action", "Purpose", "Expectation"],
-            "description": "A concise framework for quick prompting with clear intent and expected output.",
-            "use_cases": "quick clarifications, rewrites, simple drafting",
-            "advantages": ["fast and approachable", "minimal cognitive overhead", "easy to teach"],
-            "considerations": ["can be too lightweight for complex tasks", "expectation field should define constraints"],
-            "example": "Action: Summarize this meeting transcript.\nPurpose: Send a concise update.\nExpectation: Bullet list with owners and deadlines.",
-            "assembly": "Action: {Action}\nPurpose: {Purpose}\nExpectation: {Expectation}",
-        },
-        "CHAIN": {
-            "difficulty": "Advanced",
-            "fields": ["Context", "Hypothesis", "Analysis", "Inference", "Narration"],
-            "description": "Structured reasoning flow that separates assumptions, analysis, and final narrative.",
-            "use_cases": "decision support, exploratory analysis, complex reasoning tasks",
-            "advantages": ["promotes transparent logic", "improves consistency of complex outputs"],
-            "considerations": ["requires more time to fill out", "hypothesis should be testable"],
-            "example": "Context: Revenue dipped 12% QoQ.\nHypothesis: Churn in mid-market accounts is primary driver.\nAnalysis: Compare churn cohorts by segment and tenure.\nInference: Identify highest-impact churn vectors.\nNarration: Present findings and 90-day recovery plan.",
-            "assembly": "Context: {Context}\nHypothesis: {Hypothesis}\nAnalysis: {Analysis}\nInference: {Inference}\nNarration: {Narration}",
-        },
-        "CO-STAR": {
-            "difficulty": "Intermediate",
-            "fields": ["Context", "Objective", "Style", "Tone", "Audience", "Response"],
-            "description": "Comprehensive prompt scaffold balancing goals, voice, and response formatting.",
-            "use_cases": "marketing copy, executive communication, polished deliverables",
-            "advantages": ["high control over output style", "strong audience alignment"],
-            "considerations": ["can be verbose for quick tasks", "response field should be explicit about format"],
-            "example": "Context: Product launch for a workflow automation app.\nObjective: Announce GA availability.\nStyle: Clear and persuasive.\nTone: Confident and practical.\nAudience: Operations leaders at SMBs.\nResponse: 3-paragraph launch email plus 5 subject line options.",
-            "assembly": "Context: {Context}\nObjective: {Objective}\nStyle: {Style}\nTone: {Tone}\nAudience: {Audience}\nResponse: {Response}",
-        },
-        "CRAFT": {
-            "difficulty": "Intermediate",
-            "fields": ["Context", "Role", "Action", "Result", "Tone"],
-            "description": "Balanced framework for assigning perspective, task, and intended outcome.",
-            "use_cases": "strategy drafts, proposal writing, narrative transformation",
-            "advantages": ["good balance of control and speed", "result field clarifies deliverable"],
-            "considerations": ["role and tone should not conflict", "result should be measurable where possible"],
-            "example": "Context: Preparing quarterly board update.\nRole: Senior finance partner.\nAction: Analyze budget variance trends.\nResult: Executive summary with top 3 risks and mitigations.\nTone: Professional and concise.",
-            "assembly": "Context: {Context}\nRole: {Role}\nAction: {Action}\nResult: {Result}\nTone: {Tone}",
-        },
-        "CRISPE": {
-            "difficulty": "Intermediate",
-            "fields": ["Context", "Role", "Instruction", "Steps", "Parameters"],
-            "description": "Procedural framework that combines role framing with execution guidance.",
-            "use_cases": "workflow design, multi-step analysis, reproducible processes",
-            "advantages": ["strong process clarity", "helps generate repeatable outputs"],
-            "considerations": ["steps should be ordered and concrete", "parameters should define limits or format"],
-            "example": "Context: Customer feedback from Q1 NPS survey.\nRole: UX researcher.\nInstruction: Identify top usability themes.\nSteps: Cluster comments, quantify frequency, map to user journey.\nParameters: Return a table plus 5 prioritized recommendations.",
-            "assembly": "Context: {Context}\nRole: {Role}\nInstruction: {Instruction}\nSteps: {Steps}\nParameters: {Parameters}",
-        },
-        "RACE": {
-            "difficulty": "Intermediate",
-            "fields": ["Role", "Action", "Context", "Expectations"],
-            "description": "Role-based framework that adds environment and outcome expectations.",
-            "use_cases": "analysis, brainstorming, planning",
-            "advantages": ["adds perspective and constraints", "quick to complete"],
-            "considerations": ["context should include relevant constraints", "expectations should specify output structure"],
-            "example": "Role: Product analyst.\nAction: Evaluate this roadmap.\nContext: Team of 4 engineers and one quarter timeline.\nExpectations: Prioritized recommendations with rationale.",
-            "assembly": "Role: {Role}\nAction: {Action}\nContext: {Context}\nExpectations: {Expectations}",
-        },
-        "ROSE": {
-            "difficulty": "Beginner",
-            "fields": ["Role", "Objective", "Style", "Example"],
-            "description": "Simple creative/communication framework for goal-driven outputs with style guidance.",
-            "use_cases": "content drafting, tone adaptation, response templating",
-            "advantages": ["easy for non-technical users", "example field boosts output alignment"],
-            "considerations": ["provide a realistic example", "objective should be specific"],
-            "example": "Role: Technical writer.\nObjective: Explain API rate limiting to new developers.\nStyle: Friendly and practical.\nExample: Use a traffic-light analogy and include a short FAQ.",
-            "assembly": "Role: {Role}\nObjective: {Objective}\nStyle: {Style}\nExample: {Example}",
-        },
-        "SMART": {
-            "difficulty": "Intermediate",
-            "fields": ["Specific", "Measurable", "Achievable", "Relevant", "Time-bound"],
-            "description": "Goal-definition framework useful for objective planning and accountability.",
-            "use_cases": "project planning, KPI definition, performance objectives",
-            "advantages": ["clarifies success criteria", "enforces practical constraints"],
-            "considerations": ["measurable metrics must be explicit", "time-bound target should include date"],
-            "example": "Specific: Improve onboarding completion.\nMeasurable: Raise completion from 62% to 80%.\nAchievable: Add guided checklist and reminder emails.\nRelevant: Supports activation and retention goals.\nTime-bound: Achieve by September 30.",
-            "assembly": "Specific: {Specific}\nMeasurable: {Measurable}\nAchievable: {Achievable}\nRelevant: {Relevant}\nTime-bound: {Time-bound}",
-        },
-        "TAG": {
-            "difficulty": "Beginner",
-            "fields": ["Task", "Audience", "Guardrails"],
-            "description": "Compact framework for constrained outputs with clear task and safety boundaries.",
-            "use_cases": "policy-sensitive drafts, concise content generation, controlled responses",
-            "advantages": ["quick to set up", "guardrails reduce off-target output"],
-            "considerations": ["guardrails should be concrete", "audience must match reading level expectations"],
-            "example": "Task: Draft a release note summary.\nAudience: Non-technical account managers.\nGuardrails: Max 150 words, no internal code names, include one customer benefit.",
-            "assembly": "Task: {Task}\nAudience: {Audience}\nGuardrails: {Guardrails}",
-        },
-    }
+    LINE_BREAK = chr(10)
+    FRAMEWORK_REGISTRY_JSON = json.dumps(FRAMEWORK_REGISTRY, ensure_ascii=False)
 
     def __init__(self, deck_window: "EchoDeck", parent=None):
         super().__init__(parent)
         self._deck = deck_window
         self._field_edits: dict[str, QTextEdit] = {}
         self._active_values: dict[str, str] = {}
+        self.FRAMEWORK_DEFINITIONS = json.loads(self.FRAMEWORK_REGISTRY_JSON)
         lay = QVBoxLayout(self)
         top = QHBoxLayout()
         self._mode = QComboBox(); self._mode.addItems(["Builder", "Guide"])
@@ -10271,14 +10203,17 @@ class FrameworksToolTab(QWidget):
         self._builder_scroll = QScrollArea()
         self._builder_scroll.setWidgetResizable(True)
         self._builder_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._builder_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._builder_panel = QWidget()
         self._builder_layout = QVBoxLayout(self._builder_panel)
         self._builder_layout.setContentsMargins(0, 0, 0, 0)
         self._builder_layout.setSpacing(8)
         self._builder_scroll.setWidget(self._builder_panel)
         self._guide = QTextEdit(); self._guide.setReadOnly(True)
+        self._guide.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._preview = QTextEdit(); self._preview.setReadOnly(True)
         self._preview.setMinimumHeight(140)
+        self._preview.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._send = _gothic_btn("Send")
         lay.addWidget(self._builder_scroll, 2)
         lay.addWidget(self._guide, 1)
@@ -10303,7 +10238,8 @@ class FrameworksToolTab(QWidget):
         for field in data["fields"]:
             label = QLabel(field)
             edit = QTextEdit()
-            edit.setPlaceholderText(f"Enter {field}...")
+            ex = (data.get("field_examples", {}) or {}).get(field, f"Enter {field}...")
+            edit.setPlaceholderText(ex)
             edit.setMinimumHeight(self.FIELD_MIN_HEIGHT)
             edit.setMaximumHeight(self.FIELD_MAX_HEIGHT)
             edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -10323,15 +10259,24 @@ class FrameworksToolTab(QWidget):
         if self._mode.currentText() == "Guide":
             self._builder_scroll.hide()
             self._guide.show()
-            self._guide.setPlainText(
-                f"Framework: {self._pick.currentText()}\\nDifficulty: {data['difficulty']}\\n"
-                f"Description: {data['description']}\\n"
-                f"Best use cases: {data['use_cases']}\\n"
-                f"Component breakdown: {', '.join(data['fields'])}\\n\\n"
-                f"Advantages:\\n- " + "\\n- ".join(data['advantages']) + "\\n\\n"
-                f"Considerations:\\n- " + "\\n- ".join(data['considerations']) + "\\n\\n"
-                f"Example prompt:\\n{data['example']}"
-            )
+            lb = self.LINE_BREAK
+            guide_sections = [
+                f"Framework: {data['name']}",
+                f"Difficulty: {data['difficulty']}",
+                f"Description: {data['description']}",
+                f"Best use cases: {data['use_cases']}",
+                f"Component breakdown: {', '.join(data['fields'])}",
+                "",
+                "Advantages:",
+                *[f"- {item}" for item in data['advantages']],
+                "",
+                "Considerations:",
+                *[f"- {item}" for item in data['considerations']],
+                "",
+                "Example prompt:",
+                data["example_prompt"],
+            ]
+            self._guide.setPlainText(lb.join(guide_sections))
         else:
             self._builder_scroll.show()
             self._guide.hide()
@@ -10351,15 +10296,15 @@ class FrameworksToolTab(QWidget):
         for field, edit in self._field_edits.items():
             self._active_values[field] = (edit.toPlainText() or "").strip()
         if not any(self._active_values.values()):
-            return data["example"]
-        return data["assembly"].format(**self._active_values)
+            return data["example_prompt"]
+        return data["assembly_template"].format(**self._active_values)
 
     def _preview_builder_prompt(self) -> None:
         self._preview.setPlainText(self._build_prompt())
 
     def _send_prompt(self) -> None:
         prompt = self._build_prompt()
-        prompt = f"Follow the structured instruction exactly.\\n\\n{prompt}"
+        prompt = f"Follow the structured instruction exactly.{self.LINE_BREAK}{self.LINE_BREAK}{prompt}"
         if hasattr(self._deck, "_input_field"):
             if hasattr(self._deck._input_field, "setPlainText"):
                 self._deck._input_field.setPlainText(prompt)
