@@ -9499,6 +9499,7 @@ import hashlib
 import hmac
 import importlib.util
 import traceback
+import zlib
 """,
         "runtime imports for module system",
     )
