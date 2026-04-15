@@ -8596,6 +8596,124 @@ class EchoDeck(QMainWindow):
     )
     source = _replace_once(
         source,
+        """        # ── GPU master bar (full width) ───────────────────────────────
+        layout.addWidget(section_label("❧ INFERNAL ENGINE"))
+
+        gpu_master_frame = QFrame()
+        gpu_master_frame.setStyleSheet(
+            f"background: {C_PANEL}; border: 1px solid {C_BORDER}; border-radius: 2px;"
+        )
+        gm = QVBoxLayout(gpu_master_frame)
+        gm.setContentsMargins(8, 5, 8, 5)
+        gm.setSpacing(1)
+
+        self.lbl_gpu_name = QLabel("GPU")
+        self.lbl_gpu_name.setStyleSheet(
+            f"color: {C_SILVER}; font-size: 11px; font-family: {DECK_FONT}, serif; font-weight: bold; border: none;"
+        )
+        self.lbl_gpu_usage = QLabel("0%")
+        self.lbl_gpu_usage.setStyleSheet(
+            f"color: {C_TEXT_DIM}; font-size: 10px; font-family: {DECK_FONT}, serif; border: none;"
+        )
+        gm.addWidget(self.lbl_gpu_name)
+        gm.addWidget(self.lbl_gpu_usage)
+
+        self.gauge_gpu_master = GaugeWidget("GPU LOAD", "%", 100.0, C_CRIMSON)
+        self.gauge_gpu_master.setMaximumHeight(55)
+        gm.addWidget(self.gauge_gpu_master)
+
+        layout.addWidget(gpu_master_frame)
+
+        self._gpu_name_font_min = 7
+        self._gpu_name_font_max = 13
+        self._gpu_name_padding = 6
+        self._update_gpu_name_font()
+
+        layout.addStretch()
+""",
+        """        # ── GPU master bar (full width) ───────────────────────────────
+        layout.addWidget(section_label("❧ INFERNAL ENGINE"))
+
+        gpu_master_frame = QFrame()
+        gpu_master_frame.setStyleSheet(
+            f"background: {C_PANEL}; border: 1px solid {C_BORDER}; border-radius: 2px;"
+        )
+        gm = QVBoxLayout(gpu_master_frame)
+        gm.setContentsMargins(8, 5, 8, 5)
+        gm.setSpacing(1)
+
+        self.lbl_gpu_name = QLabel("GPU")
+        self.lbl_gpu_name.setStyleSheet(
+            f"color: {C_SILVER}; font-size: 11px; font-family: {DECK_FONT}, serif; font-weight: bold; border: none;"
+        )
+        self.lbl_gpu_usage = QLabel("0%")
+        self.lbl_gpu_usage.setStyleSheet(
+            f"color: {C_TEXT_DIM}; font-size: 10px; font-family: {DECK_FONT}, serif; border: none;"
+        )
+        gm.addWidget(self.lbl_gpu_name)
+        gm.addWidget(self.lbl_gpu_usage)
+
+        self.gauge_gpu_master = GaugeWidget("GPU LOAD", "%", 100.0, C_CRIMSON)
+        self.gauge_gpu_master.setMaximumHeight(55)
+        gm.addWidget(self.gauge_gpu_master)
+
+        layout.addWidget(gpu_master_frame)
+
+        self._gpu_name_font_min = 7
+        self._gpu_name_font_max = 13
+        self._gpu_name_padding = 6
+        self._update_gpu_name_font()
+
+        # ── Power telemetry ────────────────────────────────────────────
+        layout.addWidget(section_label("❧ POWER"))
+        power_frame = QFrame()
+        power_frame.setStyleSheet(
+            f"background: {C_PANEL}; border: 1px solid {C_BORDER}; border-radius: 2px;"
+        )
+        pf = QVBoxLayout(power_frame)
+        pf.setContentsMargins(8, 4, 8, 4)
+        pf.setSpacing(2)
+        self.lbl_power_has_battery = QLabel("✦ HAS BATTERY: N/A")
+        self.lbl_power_percent = QLabel("✦ BATTERY: N/A")
+        self.lbl_power_state = QLabel("✦ POWER STATE: N/A")
+        self.lbl_power_time = QLabel("✦ REMAINING: N/A")
+        self.lbl_power_direction = QLabel("✦ DIRECTION: N/A")
+        for lbl in (self.lbl_power_has_battery, self.lbl_power_percent, self.lbl_power_state, self.lbl_power_time, self.lbl_power_direction):
+            lbl.setStyleSheet(
+                f"color: {C_TEXT_DIM}; font-size: 10px; "
+                f"font-family: {DECK_FONT}, serif; border: none;"
+            )
+            pf.addWidget(lbl)
+        layout.addWidget(power_frame)
+
+        # ── Network telemetry ──────────────────────────────────────────
+        layout.addWidget(section_label("❧ NETWORK"))
+        network_frame = QFrame()
+        network_frame.setStyleSheet(
+            f"background: {C_PANEL}; border: 1px solid {C_BORDER}; border-radius: 2px;"
+        )
+        nf = QVBoxLayout(network_frame)
+        nf.setContentsMargins(8, 4, 8, 4)
+        nf.setSpacing(2)
+        self.lbl_net_connected = QLabel("✦ CONNECTED: N/A")
+        self.lbl_net_wifi = QLabel("✦ WI-FI: N/A")
+        self.lbl_net_iface = QLabel("✦ ADAPTER: N/A")
+        self.lbl_net_ssid = QLabel("✦ SSID: N/A")
+        self.lbl_net_throughput = QLabel("✦ THROUGHPUT: N/A")
+        for lbl in (self.lbl_net_connected, self.lbl_net_wifi, self.lbl_net_iface, self.lbl_net_ssid, self.lbl_net_throughput):
+            lbl.setStyleSheet(
+                f"color: {C_TEXT_DIM}; font-size: 10px; "
+                f"font-family: {DECK_FONT}, serif; border: none;"
+            )
+            nf.addWidget(lbl)
+        layout.addWidget(network_frame)
+
+        layout.addStretch()
+""",
+        "instruments panel power+network sections (gpu frame variant)",
+    )
+    source = _replace_once(
+        source,
         "    def update_stats(self) -> None:\n",
         "    def _fmt_secs(self, secs: int) -> str:\n"
         "        if secs is None or secs < 0:\n"
