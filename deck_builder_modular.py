@@ -10425,7 +10425,9 @@ Guardrails: {Guardrails}''',
 
     def _send_prompt(self) -> None:
         prompt = self._build_prompt()
-        prompt = f"Follow the structured instruction exactly.\n\n{prompt}"
+        prompt = f"""Follow the structured instruction exactly.
+
+{prompt}"""
         if hasattr(self._deck, "_input_field"):
             if hasattr(self._deck._input_field, "setPlainText"):
                 self._deck._input_field.setPlainText(prompt)
