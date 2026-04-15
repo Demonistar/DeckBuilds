@@ -10159,12 +10159,8 @@ class FrameworksToolTab(QWidget):
             "use_cases": "stakeholder updates, training docs, customer-facing summaries",
             "advantages": ["simple structure", "keeps tone audience-appropriate", "reduces ambiguity"],
             "considerations": ["define audience precisely", "execution should include output format"],
-            "example": '''Audience: New support hires
-Context: Onboarding for ticket triage
-Execution: Create a one-page SOP with examples for severity levels.''',
-            "assembly": '''Audience: {Audience}
-Context: {Context}
-Execution: {Execution}''',
+            "example": "Audience: New support hires\nContext: Onboarding for ticket triage\nExecution: Create a one-page SOP with examples for severity levels.",
+            "assembly": "Audience: {Audience}\nContext: {Context}\nExecution: {Execution}",
         },
         "APE": {
             "difficulty": "Beginner",
@@ -10173,12 +10169,8 @@ Execution: {Execution}''',
             "use_cases": "quick clarifications, rewrites, simple drafting",
             "advantages": ["fast and approachable", "minimal cognitive overhead", "easy to teach"],
             "considerations": ["can be too lightweight for complex tasks", "expectation field should define constraints"],
-            "example": '''Action: Summarize this meeting transcript.
-Purpose: Send a concise update.
-Expectation: Bullet list with owners and deadlines.''',
-            "assembly": '''Action: {Action}
-Purpose: {Purpose}
-Expectation: {Expectation}''',
+            "example": "Action: Summarize this meeting transcript.\nPurpose: Send a concise update.\nExpectation: Bullet list with owners and deadlines.",
+            "assembly": "Action: {Action}\nPurpose: {Purpose}\nExpectation: {Expectation}",
         },
         "CHAIN": {
             "difficulty": "Advanced",
@@ -10187,16 +10179,8 @@ Expectation: {Expectation}''',
             "use_cases": "decision support, exploratory analysis, complex reasoning tasks",
             "advantages": ["promotes transparent logic", "improves consistency of complex outputs"],
             "considerations": ["requires more time to fill out", "hypothesis should be testable"],
-            "example": '''Context: Revenue dipped 12% QoQ.
-Hypothesis: Churn in mid-market accounts is primary driver.
-Analysis: Compare churn cohorts by segment and tenure.
-Inference: Identify highest-impact churn vectors.
-Narration: Present findings and 90-day recovery plan.''',
-            "assembly": '''Context: {Context}
-Hypothesis: {Hypothesis}
-Analysis: {Analysis}
-Inference: {Inference}
-Narration: {Narration}''',
+            "example": "Context: Revenue dipped 12% QoQ.\nHypothesis: Churn in mid-market accounts is primary driver.\nAnalysis: Compare churn cohorts by segment and tenure.\nInference: Identify highest-impact churn vectors.\nNarration: Present findings and 90-day recovery plan.",
+            "assembly": "Context: {Context}\nHypothesis: {Hypothesis}\nAnalysis: {Analysis}\nInference: {Inference}\nNarration: {Narration}",
         },
         "CO-STAR": {
             "difficulty": "Intermediate",
@@ -10205,18 +10189,8 @@ Narration: {Narration}''',
             "use_cases": "marketing copy, executive communication, polished deliverables",
             "advantages": ["high control over output style", "strong audience alignment"],
             "considerations": ["can be verbose for quick tasks", "response field should be explicit about format"],
-            "example": '''Context: Product launch for a workflow automation app.
-Objective: Announce GA availability.
-Style: Clear and persuasive.
-Tone: Confident and practical.
-Audience: Operations leaders at SMBs.
-Response: 3-paragraph launch email plus 5 subject line options.''',
-            "assembly": '''Context: {Context}
-Objective: {Objective}
-Style: {Style}
-Tone: {Tone}
-Audience: {Audience}
-Response: {Response}''',
+            "example": "Context: Product launch for a workflow automation app.\nObjective: Announce GA availability.\nStyle: Clear and persuasive.\nTone: Confident and practical.\nAudience: Operations leaders at SMBs.\nResponse: 3-paragraph launch email plus 5 subject line options.",
+            "assembly": "Context: {Context}\nObjective: {Objective}\nStyle: {Style}\nTone: {Tone}\nAudience: {Audience}\nResponse: {Response}",
         },
         "CRAFT": {
             "difficulty": "Intermediate",
@@ -10225,16 +10199,8 @@ Response: {Response}''',
             "use_cases": "strategy drafts, proposal writing, narrative transformation",
             "advantages": ["good balance of control and speed", "result field clarifies deliverable"],
             "considerations": ["role and tone should not conflict", "result should be measurable where possible"],
-            "example": '''Context: Preparing quarterly board update.
-Role: Senior finance partner.
-Action: Analyze budget variance trends.
-Result: Executive summary with top 3 risks and mitigations.
-Tone: Professional and concise.''',
-            "assembly": '''Context: {Context}
-Role: {Role}
-Action: {Action}
-Result: {Result}
-Tone: {Tone}''',
+            "example": "Context: Preparing quarterly board update.\nRole: Senior finance partner.\nAction: Analyze budget variance trends.\nResult: Executive summary with top 3 risks and mitigations.\nTone: Professional and concise.",
+            "assembly": "Context: {Context}\nRole: {Role}\nAction: {Action}\nResult: {Result}\nTone: {Tone}",
         },
         "CRISPE": {
             "difficulty": "Intermediate",
@@ -10243,16 +10209,8 @@ Tone: {Tone}''',
             "use_cases": "workflow design, multi-step analysis, reproducible processes",
             "advantages": ["strong process clarity", "helps generate repeatable outputs"],
             "considerations": ["steps should be ordered and concrete", "parameters should define limits or format"],
-            "example": '''Context: Customer feedback from Q1 NPS survey.
-Role: UX researcher.
-Instruction: Identify top usability themes.
-Steps: Cluster comments, quantify frequency, map to user journey.
-Parameters: Return a table plus 5 prioritized recommendations.''',
-            "assembly": '''Context: {Context}
-Role: {Role}
-Instruction: {Instruction}
-Steps: {Steps}
-Parameters: {Parameters}''',
+            "example": "Context: Customer feedback from Q1 NPS survey.\nRole: UX researcher.\nInstruction: Identify top usability themes.\nSteps: Cluster comments, quantify frequency, map to user journey.\nParameters: Return a table plus 5 prioritized recommendations.",
+            "assembly": "Context: {Context}\nRole: {Role}\nInstruction: {Instruction}\nSteps: {Steps}\nParameters: {Parameters}",
         },
         "RACE": {
             "difficulty": "Intermediate",
@@ -10261,14 +10219,8 @@ Parameters: {Parameters}''',
             "use_cases": "analysis, brainstorming, planning",
             "advantages": ["adds perspective and constraints", "quick to complete"],
             "considerations": ["context should include relevant constraints", "expectations should specify output structure"],
-            "example": '''Role: Product analyst.
-Action: Evaluate this roadmap.
-Context: Team of 4 engineers and one quarter timeline.
-Expectations: Prioritized recommendations with rationale.''',
-            "assembly": '''Role: {Role}
-Action: {Action}
-Context: {Context}
-Expectations: {Expectations}''',
+            "example": "Role: Product analyst.\nAction: Evaluate this roadmap.\nContext: Team of 4 engineers and one quarter timeline.\nExpectations: Prioritized recommendations with rationale.",
+            "assembly": "Role: {Role}\nAction: {Action}\nContext: {Context}\nExpectations: {Expectations}",
         },
         "ROSE": {
             "difficulty": "Beginner",
@@ -10277,14 +10229,8 @@ Expectations: {Expectations}''',
             "use_cases": "content drafting, tone adaptation, response templating",
             "advantages": ["easy for non-technical users", "example field boosts output alignment"],
             "considerations": ["provide a realistic example", "objective should be specific"],
-            "example": '''Role: Technical writer.
-Objective: Explain API rate limiting to new developers.
-Style: Friendly and practical.
-Example: Use a traffic-light analogy and include a short FAQ.''',
-            "assembly": '''Role: {Role}
-Objective: {Objective}
-Style: {Style}
-Example: {Example}''',
+            "example": "Role: Technical writer.\nObjective: Explain API rate limiting to new developers.\nStyle: Friendly and practical.\nExample: Use a traffic-light analogy and include a short FAQ.",
+            "assembly": "Role: {Role}\nObjective: {Objective}\nStyle: {Style}\nExample: {Example}",
         },
         "SMART": {
             "difficulty": "Intermediate",
@@ -10293,16 +10239,8 @@ Example: {Example}''',
             "use_cases": "project planning, KPI definition, performance objectives",
             "advantages": ["clarifies success criteria", "enforces practical constraints"],
             "considerations": ["measurable metrics must be explicit", "time-bound target should include date"],
-            "example": '''Specific: Improve onboarding completion.
-Measurable: Raise completion from 62% to 80%.
-Achievable: Add guided checklist and reminder emails.
-Relevant: Supports activation and retention goals.
-Time-bound: Achieve by September 30.''',
-            "assembly": '''Specific: {Specific}
-Measurable: {Measurable}
-Achievable: {Achievable}
-Relevant: {Relevant}
-Time-bound: {Time-bound}''',
+            "example": "Specific: Improve onboarding completion.\nMeasurable: Raise completion from 62% to 80%.\nAchievable: Add guided checklist and reminder emails.\nRelevant: Supports activation and retention goals.\nTime-bound: Achieve by September 30.",
+            "assembly": "Specific: {Specific}\nMeasurable: {Measurable}\nAchievable: {Achievable}\nRelevant: {Relevant}\nTime-bound: {Time-bound}",
         },
         "TAG": {
             "difficulty": "Beginner",
@@ -10311,12 +10249,8 @@ Time-bound: {Time-bound}''',
             "use_cases": "policy-sensitive drafts, concise content generation, controlled responses",
             "advantages": ["quick to set up", "guardrails reduce off-target output"],
             "considerations": ["guardrails should be concrete", "audience must match reading level expectations"],
-            "example": '''Task: Draft a release note summary.
-Audience: Non-technical account managers.
-Guardrails: Max 150 words, no internal code names, include one customer benefit.''',
-            "assembly": '''Task: {Task}
-Audience: {Audience}
-Guardrails: {Guardrails}''',
+            "example": "Task: Draft a release note summary.\nAudience: Non-technical account managers.\nGuardrails: Max 150 words, no internal code names, include one customer benefit.",
+            "assembly": "Task: {Task}\nAudience: {Audience}\nGuardrails: {Guardrails}",
         },
     }
 
@@ -10425,9 +10359,7 @@ Guardrails: {Guardrails}''',
 
     def _send_prompt(self) -> None:
         prompt = self._build_prompt()
-        prompt = f"""Follow the structured instruction exactly.
-
-{prompt}"""
+        prompt = f"Follow the structured instruction exactly.\\n\\n{prompt}"
         if hasattr(self._deck, "_input_field"):
             if hasattr(self._deck._input_field, "setPlainText"):
                 self._deck._input_field.setPlainText(prompt)
