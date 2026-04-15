@@ -9514,7 +9514,7 @@ import zlib
     # Signed .edm module manager for runtime install/load.
 
     DECK_API_VERSION = "1.0"
-    ALLOWED_HOOKS = {"on_startup", "on_shutdown", "on_message", "on_tick", "on_install", "on_uninstall"}
+    ALLOWED_HOOKS = {"on_startup", "on_shutdown", "on_message", "on_tick", "on_install", "on_uninstall", "on_event"}
 
     def __init__(self, deck_window: "EchoDeck"):
         self._deck = deck_window
@@ -9522,6 +9522,9 @@ import zlib
         self._modules_dir.mkdir(parents=True, exist_ok=True)
         self._installed: dict[str, dict] = {}
         self._hooks: dict[str, list] = {k: [] for k in self.ALLOWED_HOOKS}
+        self._event_listeners: list[dict] = []
+        self._event_queue: list[dict] = []
+        self._event_dispatch_scheduled = False
 
     def _log(self, msg: str) -> None:
         try:
@@ -9546,6 +9549,78 @@ import zlib
 
     def _api_compatible(self, version: str) -> bool:
         return str(version or "").strip() == self.DECK_API_VERSION
+
+    def _event_type_matches(self, pattern: str, event_type: str) -> bool:
+        pattern = str(pattern or "").strip()
+        event_type = str(event_type or "").strip()
+        if not pattern or not event_type:
+            return False
+        if pattern == "*":
+            return True
+        if pattern.endswith(".*"):
+            return event_type.startswith(pattern[:-1])
+        return pattern == event_type
+
+    def listen(self, event_pattern: str, callback, listener_module: str = "", domains=None) -> bool:
+        if not callable(callback):
+            return False
+        pattern = str(event_pattern or "").strip() or "*"
+        domain_set = None
+        if isinstance(domains, (list, tuple, set)):
+            domain_values = {str(d).strip().lower() for d in domains if str(d).strip()}
+            domain_set = domain_values or None
+        self._event_listeners.append({
+            "pattern": pattern,
+            "callback": callback,
+            "listener_module": str(listener_module or "").strip().lower(),
+            "domains": domain_set,
+        })
+        return True
+
+    def _schedule_event_dispatch(self) -> None:
+        if self._event_dispatch_scheduled:
+            return
+        self._event_dispatch_scheduled = True
+        QTimer.singleShot(0, self._drain_event_queue)
+
+    def broadcast(self, event_envelope: dict) -> bool:
+        if not isinstance(event_envelope, dict):
+            return False
+        if not str(event_envelope.get("event_type") or "").strip():
+            return False
+        self._event_queue.append(event_envelope)
+        self._schedule_event_dispatch()
+        return True
+
+    def _drain_event_queue(self) -> None:
+        self._event_dispatch_scheduled = False
+        while self._event_queue:
+            envelope = self._event_queue.pop(0)
+            event_type = str(envelope.get("event_type") or "").strip()
+            event_domain = str(envelope.get("domain") or "").strip().lower()
+            origin_module = str(envelope.get("origin_module") or "").strip().lower()
+            for sub in list(self._event_listeners):
+                listener_module = str(sub.get("listener_module") or "").strip().lower()
+                if origin_module and listener_module and origin_module == listener_module:
+                    continue
+                pattern = str(sub.get("pattern") or "*")
+                if not self._event_type_matches(pattern, event_type):
+                    continue
+                allowed_domains = sub.get("domains")
+                if isinstance(allowed_domains, set) and allowed_domains and event_domain not in allowed_domains:
+                    continue
+                try:
+                    self._log(
+                        f"[EVENT BUS] event_type={event_type} "
+                        f"origin_module={origin_module or 'unknown'} "
+                        f"listener_module={listener_module or 'unknown'}"
+                    )
+                    sub["callback"](envelope)
+                except Exception as ex:
+                    self._log(
+                        f"[EVENT BUS][WARN] listener failed "
+                        f"event_type={event_type} listener_module={listener_module or 'unknown'} err={ex}"
+                    )
 
     def _unpack_payload(self, payload_b64: str) -> dict:
         blob = zlib.decompress(base64.b64decode(payload_b64.encode("ascii")))
@@ -9586,6 +9661,7 @@ import zlib
         available = self.scan_available()
         self._installed = {}
         self._hooks = {k: [] for k in self.ALLOWED_HOOKS}
+        self._event_listeners = []
         for key in CFG.get("modules", {}).get("installed", []):
             item = available.get(key)
             if not item:
@@ -9606,10 +9682,26 @@ import zlib
                     raise RuntimeError("entry did not return dict")
                 if str(contract.get("deck_api_version") or "") != self.DECK_API_VERSION:
                     raise RuntimeError("module contract API mismatch")
-                self._installed[key] = {"manifest": manifest, "contract": contract, "payload": payload}
+                self._installed[key] = {
+                    "manifest": manifest,
+                    "contract": contract,
+                    "payload": payload,
+                    "emits": list(manifest.get("emits") or []),
+                    "listens_for": list(manifest.get("listens_for") or []),
+                }
                 for hook_name, hook_fn in (contract.get("hooks") or {}).items():
                     if hook_name in self._hooks and callable(hook_fn):
                         self._hooks[hook_name].append((key, hook_fn))
+                on_event_callback = contract.get("on_event")
+                if not callable(on_event_callback):
+                    on_event_callback = (contract.get("hooks") or {}).get("on_event")
+                for sub in manifest.get("listens_for") or []:
+                    if not isinstance(sub, dict):
+                        continue
+                    event_pattern = str(sub.get("event_type") or "*").strip() or "*"
+                    domains = sub.get("domains")
+                    if callable(on_event_callback):
+                        self.listen(event_pattern, on_event_callback, listener_module=key, domains=domains)
             except Exception as ex:
                 self._log(f"[MODULE][WARN] load skipped for {key}: {ex}")
                 self._log(traceback.format_exc())
@@ -9626,6 +9718,13 @@ import zlib
             "create_label": lambda text: QLabel(str(text)),
             "request_ai_interpretation": self.request_ai_interpretation,
             "restart": self._deck._restart_for_module_change,
+            "broadcast": self.broadcast,
+            "listen": lambda event_pattern, callback, domains=None, module_key="": self.listen(
+                event_pattern,
+                callback,
+                listener_module=(module_key or ""),
+                domains=domains,
+            ),
         }
 
     def request_ai_interpretation(self, source_module_key: str, context: dict) -> bool:
@@ -9883,6 +9982,17 @@ class EchoDeck(QMainWindow):
             if str(tab.get("id")) in ids:
                 continue
             self._spell_tab_defs.append(tab)
+
+    def listen(self, event_pattern: str, callback, domains=None, listener_module: str = "") -> bool:
+        return self._deck_module_manager.listen(
+            event_pattern,
+            callback,
+            listener_module=listener_module,
+            domains=domains,
+        )
+
+    def broadcast(self, event_envelope: dict) -> bool:
+        return self._deck_module_manager.broadcast(event_envelope)
 
     def _restart_for_module_change(self, reason: str = "module update") -> None:
         self._append_chat("SYSTEM", f"[MODULE] restart triggered: {reason}")
