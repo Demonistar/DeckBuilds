@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -82,39 +81,74 @@ def _fingerprint(payload: dict[str, Any], keys: list[str]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-@dataclass
 class CalendarRecord:
-    id: str
-    title: str
-    description: str
-    start_at: str
-    end_at: str
-    recurrence: str
-    status: str
-    source: str
-    google_event_id: str
-    sync_status: str
-    last_synced_at: str
-    metadata: dict[str, Any]
-    origin: str
-    fingerprint: str
+    def __init__(
+        self,
+        id: str,
+        title: str,
+        description: str,
+        start_at: str,
+        end_at: str,
+        recurrence: str,
+        status: str,
+        source: str,
+        google_event_id: str,
+        sync_status: str,
+        last_synced_at: str,
+        metadata: dict[str, Any],
+        origin: str,
+        fingerprint: str,
+    ):
+        self.id = id
+        self.title = title
+        self.description = description
+        self.start_at = start_at
+        self.end_at = end_at
+        self.recurrence = recurrence
+        self.status = status
+        self.source = source
+        self.google_event_id = google_event_id
+        self.sync_status = sync_status
+        self.last_synced_at = last_synced_at
+        self.metadata = metadata
+        self.origin = origin
+        self.fingerprint = fingerprint
 
 
-@dataclass
 class TaskRecord:
-    id: str
-    title: str
-    notes: str
-    due_at: str
-    recurrence: str
-    status: str
-    source: str
-    google_task_id: str
-    sync_status: str
-    last_synced_at: str
-    metadata: dict[str, Any]
-    origin: str
-    fingerprint: str
+    def __init__(
+        self,
+        id: str,
+        title: str,
+        notes: str,
+        due_at: str,
+        recurrence: str,
+        status: str,
+        source: str,
+        google_task_id: str,
+        sync_status: str,
+        last_synced_at: str,
+        metadata: dict[str, Any],
+        origin: str,
+        fingerprint: str,
+    ):
+        self.id = id
+        self.title = title
+        self.notes = notes
+        self.due_at = due_at
+        self.recurrence = recurrence
+        self.status = status
+        self.source = source
+        self.google_task_id = google_task_id
+        self.sync_status = sync_status
+        self.last_synced_at = last_synced_at
+        self.metadata = metadata
+        self.origin = origin
+        self.fingerprint = fingerprint
+
+
+def asdict(record: Any) -> dict[str, Any]:
+    return dict(vars(record))
 
 
 class GoogleCalendarRuntime:
