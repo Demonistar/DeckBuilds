@@ -9495,9 +9495,11 @@ import html
         """import ast
 import operator
 import html
+import base64
 import hashlib
 import hmac
-import importlib.util
+import shutil
+import subprocess
 import traceback
 import zlib
 """,
