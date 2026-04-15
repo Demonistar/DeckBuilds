@@ -10148,80 +10148,192 @@ import zlib
 
 
 class FrameworksToolTab(QWidget):
-    _FRAMEWORKS = {
+    FRAMEWORK_DEFINITIONS = {
+        "ACE": {
+            "difficulty": "Beginner",
+            "fields": ["Audience", "Context", "Execution"],
+            "description": "Audience-first framing that keeps outputs tuned to who will consume them.",
+            "use_cases": "stakeholder updates, training docs, customer-facing summaries",
+            "advantages": ["simple structure", "keeps tone audience-appropriate", "reduces ambiguity"],
+            "considerations": ["define audience precisely", "execution should include output format"],
+            "example": "Audience: New support hires\nContext: Onboarding for ticket triage\nExecution: Create a one-page SOP with examples for severity levels.",
+            "assembly": "Audience: {Audience}\nContext: {Context}\nExecution: {Execution}",
+        },
         "APE": {
             "difficulty": "Beginner",
+            "fields": ["Action", "Purpose", "Expectation"],
+            "description": "A concise framework for quick prompting with clear intent and expected output.",
             "use_cases": "quick clarifications, rewrites, simple drafting",
-            "components": "Action, Purpose, Expectation",
-            "example": "Action: Summarize this meeting transcript. Purpose: Send a concise update. Expectation: Bullet list with owners and deadlines.",
-            "pros": "fast and approachable",
+            "advantages": ["fast and approachable", "minimal cognitive overhead", "easy to teach"],
+            "considerations": ["can be too lightweight for complex tasks", "expectation field should define constraints"],
+            "example": "Action: Summarize this meeting transcript.\nPurpose: Send a concise update.\nExpectation: Bullet list with owners and deadlines.",
+            "assembly": "Action: {Action}\nPurpose: {Purpose}\nExpectation: {Expectation}",
+        },
+        "CHAIN": {
+            "difficulty": "Advanced",
+            "fields": ["Context", "Hypothesis", "Analysis", "Inference", "Narration"],
+            "description": "Structured reasoning flow that separates assumptions, analysis, and final narrative.",
+            "use_cases": "decision support, exploratory analysis, complex reasoning tasks",
+            "advantages": ["promotes transparent logic", "improves consistency of complex outputs"],
+            "considerations": ["requires more time to fill out", "hypothesis should be testable"],
+            "example": "Context: Revenue dipped 12% QoQ.\nHypothesis: Churn in mid-market accounts is primary driver.\nAnalysis: Compare churn cohorts by segment and tenure.\nInference: Identify highest-impact churn vectors.\nNarration: Present findings and 90-day recovery plan.",
+            "assembly": "Context: {Context}\nHypothesis: {Hypothesis}\nAnalysis: {Analysis}\nInference: {Inference}\nNarration: {Narration}",
+        },
+        "CO-STAR": {
+            "difficulty": "Intermediate",
+            "fields": ["Context", "Objective", "Style", "Tone", "Audience", "Response"],
+            "description": "Comprehensive prompt scaffold balancing goals, voice, and response formatting.",
+            "use_cases": "marketing copy, executive communication, polished deliverables",
+            "advantages": ["high control over output style", "strong audience alignment"],
+            "considerations": ["can be verbose for quick tasks", "response field should be explicit about format"],
+            "example": "Context: Product launch for a workflow automation app.\nObjective: Announce GA availability.\nStyle: Clear and persuasive.\nTone: Confident and practical.\nAudience: Operations leaders at SMBs.\nResponse: 3-paragraph launch email plus 5 subject line options.",
+            "assembly": "Context: {Context}\nObjective: {Objective}\nStyle: {Style}\nTone: {Tone}\nAudience: {Audience}\nResponse: {Response}",
+        },
+        "CRAFT": {
+            "difficulty": "Intermediate",
+            "fields": ["Context", "Role", "Action", "Result", "Tone"],
+            "description": "Balanced framework for assigning perspective, task, and intended outcome.",
+            "use_cases": "strategy drafts, proposal writing, narrative transformation",
+            "advantages": ["good balance of control and speed", "result field clarifies deliverable"],
+            "considerations": ["role and tone should not conflict", "result should be measurable where possible"],
+            "example": "Context: Preparing quarterly board update.\nRole: Senior finance partner.\nAction: Analyze budget variance trends.\nResult: Executive summary with top 3 risks and mitigations.\nTone: Professional and concise.",
+            "assembly": "Context: {Context}\nRole: {Role}\nAction: {Action}\nResult: {Result}\nTone: {Tone}",
+        },
+        "CRISPE": {
+            "difficulty": "Intermediate",
+            "fields": ["Context", "Role", "Instruction", "Steps", "Parameters"],
+            "description": "Procedural framework that combines role framing with execution guidance.",
+            "use_cases": "workflow design, multi-step analysis, reproducible processes",
+            "advantages": ["strong process clarity", "helps generate repeatable outputs"],
+            "considerations": ["steps should be ordered and concrete", "parameters should define limits or format"],
+            "example": "Context: Customer feedback from Q1 NPS survey.\nRole: UX researcher.\nInstruction: Identify top usability themes.\nSteps: Cluster comments, quantify frequency, map to user journey.\nParameters: Return a table plus 5 prioritized recommendations.",
+            "assembly": "Context: {Context}\nRole: {Role}\nInstruction: {Instruction}\nSteps: {Steps}\nParameters: {Parameters}",
         },
         "RACE": {
             "difficulty": "Intermediate",
+            "fields": ["Role", "Action", "Context", "Expectations"],
+            "description": "Role-based framework that adds environment and outcome expectations.",
             "use_cases": "analysis, brainstorming, planning",
-            "components": "Role, Action, Context, Expectation",
-            "example": "Role: Product analyst. Action: Evaluate this roadmap. Context: Team of 4 engineers. Expectation: Prioritized recommendations.",
-            "pros": "adds perspective and constraints",
+            "advantages": ["adds perspective and constraints", "quick to complete"],
+            "considerations": ["context should include relevant constraints", "expectations should specify output structure"],
+            "example": "Role: Product analyst.\nAction: Evaluate this roadmap.\nContext: Team of 4 engineers and one quarter timeline.\nExpectations: Prioritized recommendations with rationale.",
+            "assembly": "Role: {Role}\nAction: {Action}\nContext: {Context}\nExpectations: {Expectations}",
         },
-        "ROSES": {
+        "ROSE": {
+            "difficulty": "Beginner",
+            "fields": ["Role", "Objective", "Style", "Example"],
+            "description": "Simple creative/communication framework for goal-driven outputs with style guidance.",
+            "use_cases": "content drafting, tone adaptation, response templating",
+            "advantages": ["easy for non-technical users", "example field boosts output alignment"],
+            "considerations": ["provide a realistic example", "objective should be specific"],
+            "example": "Role: Technical writer.\nObjective: Explain API rate limiting to new developers.\nStyle: Friendly and practical.\nExample: Use a traffic-light analogy and include a short FAQ.",
+            "assembly": "Role: {Role}\nObjective: {Objective}\nStyle: {Style}\nExample: {Example}",
+        },
+        "SMART": {
             "difficulty": "Intermediate",
-            "use_cases": "retrospectives and coaching",
-            "components": "Role, Objective, Situation, Expectations, Steps",
-            "example": "Role: Leadership coach. Objective: Improve 1:1s. Situation: New manager, remote team. Expectations: clear cadence and script. Steps: first 30 days.",
-            "pros": "strong for guided execution",
+            "fields": ["Specific", "Measurable", "Achievable", "Relevant", "Time-bound"],
+            "description": "Goal-definition framework useful for objective planning and accountability.",
+            "use_cases": "project planning, KPI definition, performance objectives",
+            "advantages": ["clarifies success criteria", "enforces practical constraints"],
+            "considerations": ["measurable metrics must be explicit", "time-bound target should include date"],
+            "example": "Specific: Improve onboarding completion.\nMeasurable: Raise completion from 62% to 80%.\nAchievable: Add guided checklist and reminder emails.\nRelevant: Supports activation and retention goals.\nTime-bound: Achieve by September 30.",
+            "assembly": "Specific: {Specific}\nMeasurable: {Measurable}\nAchievable: {Achievable}\nRelevant: {Relevant}\nTime-bound: {Time-bound}",
         },
-        "TRACE": {
-            "difficulty": "Advanced",
-            "use_cases": "complex synthesis and decision support",
-            "components": "Task, Requirements, Assumptions, Constraints, Evaluation",
-            "example": "Task: Compare three CRM options. Requirements: SMB budget. Assumptions: existing Google Workspace. Constraints: 2-week migration window. Evaluation: scorecard with recommendation.",
-            "pros": "excellent rigor for complex work",
+        "TAG": {
+            "difficulty": "Beginner",
+            "fields": ["Task", "Audience", "Guardrails"],
+            "description": "Compact framework for constrained outputs with clear task and safety boundaries.",
+            "use_cases": "policy-sensitive drafts, concise content generation, controlled responses",
+            "advantages": ["quick to set up", "guardrails reduce off-target output"],
+            "considerations": ["guardrails should be concrete", "audience must match reading level expectations"],
+            "example": "Task: Draft a release note summary.\nAudience: Non-technical account managers.\nGuardrails: Max 150 words, no internal code names, include one customer benefit.",
+            "assembly": "Task: {Task}\nAudience: {Audience}\nGuardrails: {Guardrails}",
         },
     }
 
     def __init__(self, deck_window: "EchoDeck", parent=None):
         super().__init__(parent)
         self._deck = deck_window
+        self._field_edits: dict[str, QTextEdit] = {}
+        self._active_values: dict[str, str] = {}
         lay = QVBoxLayout(self)
         top = QHBoxLayout()
         self._mode = QComboBox(); self._mode.addItems(["Builder", "Guide"])
-        self._pick = QComboBox(); self._pick.addItems(sorted(self._FRAMEWORKS.keys()))
+        self._pick = QComboBox(); self._pick.addItems(sorted(self.FRAMEWORK_DEFINITIONS.keys()))
         self._difficulty = QLabel()
         top.addWidget(QLabel("Mode")); top.addWidget(self._mode)
         top.addWidget(QLabel("Framework")); top.addWidget(self._pick)
         top.addWidget(self._difficulty); top.addStretch(1)
         lay.addLayout(top)
-        self._fields = QPlainTextEdit()
-        self._fields.setPlaceholderText("Enter details here (one bullet per line).")
-        self._out = QTextEdit(); self._out.setReadOnly(True)
+        self._builder_panel = QWidget()
+        self._builder_layout = QVBoxLayout(self._builder_panel)
+        self._builder_layout.setContentsMargins(0, 0, 0, 0)
+        self._builder_layout.setSpacing(8)
+        self._guide = QTextEdit(); self._guide.setReadOnly(True)
+        self._preview = QTextEdit(); self._preview.setReadOnly(True)
         self._send = _gothic_btn("Send")
-        lay.addWidget(self._fields, 1); lay.addWidget(self._out, 1); lay.addWidget(self._send, 0, Qt.AlignmentFlag.AlignRight)
+        lay.addWidget(self._builder_panel, 1)
+        lay.addWidget(self._guide, 1)
+        lay.addWidget(QLabel("Assembled Prompt Preview"))
+        lay.addWidget(self._preview, 1)
+        lay.addWidget(self._send, 0, Qt.AlignmentFlag.AlignRight)
         self._mode.currentTextChanged.connect(self._refresh)
-        self._pick.currentTextChanged.connect(self._refresh)
+        self._pick.currentTextChanged.connect(self._on_framework_changed)
         self._send.clicked.connect(self._send_prompt)
+        self._on_framework_changed()
+        self._refresh()
+
+    def _on_framework_changed(self) -> None:
+        while self._builder_layout.count():
+            item = self._builder_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._field_edits = {}
+        self._active_values = {}
+        data = self.FRAMEWORK_DEFINITIONS[self._pick.currentText()]
+        for field in data["fields"]:
+            label = QLabel(field)
+            edit = QTextEdit()
+            edit.setPlaceholderText(f"Enter {field}...")
+            edit.setMinimumHeight(70)
+            edit.textChanged.connect(self._preview_builder_prompt)
+            self._builder_layout.addWidget(label)
+            self._builder_layout.addWidget(edit)
+            self._field_edits[field] = edit
+            self._active_values[field] = ""
         self._refresh()
 
     def _refresh(self) -> None:
-        data = self._FRAMEWORKS[self._pick.currentText()]
+        data = self.FRAMEWORK_DEFINITIONS[self._pick.currentText()]
         self._difficulty.setText(f"Difficulty: {data['difficulty']}")
         if self._mode.currentText() == "Guide":
-            self._fields.hide()
-            self._out.setPlainText(
+            self._builder_panel.hide()
+            self._guide.show()
+            self._guide.setPlainText(
                 f"Framework: {self._pick.currentText()}\\nDifficulty: {data['difficulty']}\\n"
-                f"Best use cases: {data['use_cases']}\\nComponents: {data['components']}\\n"
-                f"Example prompt:\\n{data['example']}\\n\\nAdvantages / considerations: {data['pros']}."
+                f"Description: {data['description']}\\n"
+                f"Best use cases: {data['use_cases']}\\n"
+                f"Component breakdown: {', '.join(data['fields'])}\\n\\n"
+                f"Advantages:\\n- " + "\\n- ".join(data['advantages']) + "\\n\\n"
+                f"Considerations:\\n- " + "\\n- ".join(data['considerations']) + "\\n\\n"
+                f"Example prompt:\\n{data['example']}"
             )
         else:
-            self._fields.show()
-            built = self._build_prompt()
-            self._out.setPlainText(built)
+            self._builder_panel.show()
+            self._guide.hide()
+        self._preview_builder_prompt()
 
     def _build_prompt(self) -> str:
-        data = self._FRAMEWORKS[self._pick.currentText()]
-        user = (self._fields.toPlainText() or "").strip()
-        if not user:
+        data = self.FRAMEWORK_DEFINITIONS[self._pick.currentText()]
+        for field, edit in self._field_edits.items():
+            self._active_values[field] = (edit.toPlainText() or "").strip()
+        if not any(self._active_values.values()):
             return data["example"]
-        return f"Framework: {self._pick.currentText()}\\nComponents: {data['components']}\\nUser Inputs:\\n{user}"
+        return data["assembly"].format(**self._active_values)
+
+    def _preview_builder_prompt(self) -> None:
+        self._preview.setPlainText(self._build_prompt())
 
     def _send_prompt(self) -> None:
         prompt = self._build_prompt()
