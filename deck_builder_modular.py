@@ -9606,6 +9606,197 @@ class DiceTrayDie(QFrame):
     )
     source = _replace_once(
         source,
+        """def _init_spell_category_framework(self) -> None:
+        self._system_spell_tab_ids = {"instruments", "diagnostics", "settings"}
+        self._protected_categories = {"SYSTEM"}
+        self._active_category = "SYSTEM"
+        self._category_map: dict[str, dict] = {}
+        self._rebuild_spell_category_map()
+
+    def _rebuild_spell_category_map(self) -> None:
+        category_map: dict[str, dict] = {"SYSTEM": {"tabs": [], "protected": True}}
+        for tab in self._spell_tab_defs:
+            category = self._normalize_spell_category(tab.get("category", "SYSTEM"))
+            tab["category"] = category
+            tab.setdefault("secondary_categories", [])
+            tab["protected_category"] = bool(tab.get("protected_category", False) or category == "SYSTEM")
+            bucket = category_map.setdefault(category, {"tabs": [], "protected": bool(tab["protected_category"])})
+            bucket["protected"] = bool(bucket.get("protected", False) or tab["protected_category"])
+            bucket["tabs"].append(tab["id"])
+
+        # Guarantee SYSTEM exists and always carries core tabs.
+        system_bucket = category_map.setdefault("SYSTEM", {"tabs": [], "protected": True})
+        for tab_id in self._system_spell_tab_ids:
+            if tab_id not in system_bucket["tabs"]:
+                system_bucket["tabs"].append(tab_id)
+
+        # Remove non-protected categories with no tabs.
+        for cat in list(category_map.keys()):
+            if cat == "SYSTEM":
+                continue
+            if category_map[cat].get("tabs"):
+                continue
+            if category_map[cat].get("protected"):
+                continue
+            category_map.pop(cat, None)
+
+        self._category_map = category_map
+        if self._active_category not in self._category_map:
+            self._active_category = "SYSTEM" if "SYSTEM" in self._category_map else next(iter(self._category_map.keys()), "SYSTEM")
+        self._rebuild_category_strip()
+
+    def _category_ordered_list(self) -> list[str]:
+        cats = [c for c in self._category_map.keys() if c != "SYSTEM"]
+        cats.sort()
+        return ["SYSTEM", *cats] if "SYSTEM" in self._category_map else cats
+
+    def _rebuild_category_strip(self) -> None:
+        if not hasattr(self, "_category_strip_layout"):
+            return
+        while self._category_strip_layout.count():
+            item = self._category_strip_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        for cat in self._category_ordered_list():
+            btn = QToolButton(self._category_strip)
+            btn.setText(cat)
+            btn.setCheckable(True)
+            btn.setChecked(cat == self._active_category)
+            btn.setStyleSheet(
+                f"QToolButton{{padding:4px 10px; border:1px solid {C_CRIMSON_DIM}; background:{C_BG2}; color:{C_TEXT_DIM}; font-family:{DECK_FONT}, serif; font-size:10px; letter-spacing:1px;}}"
+                f"QToolButton:checked{{background:{C_CRIMSON_DIM}; color:{C_GOLD}; border:1px solid {C_CRIMSON};}}"
+                f"QToolButton:hover{{color:{C_TEXT}; border:1px solid {C_CRIMSON};}}"
+            )
+            btn.clicked.connect(lambda _checked=False, c=cat: self._select_spell_category(c))
+            self._category_strip_layout.addWidget(btn)
+        self._category_strip_layout.addStretch(1)
+""",
+        """def _init_spell_category_framework(self) -> None:
+        self._system_spell_tab_ids = {"instruments", "diagnostics"}
+        self._protected_categories = {"SYSTEM", "SETTINGS", "TOOLS"}
+        self._category_order_key = "module_category_order"
+        self._active_category = "SYSTEM"
+        self._category_map: dict[str, dict] = {}
+        self._rebuild_spell_category_map()
+
+    def _protected_category_order(self) -> list[str]:
+        return ["SYSTEM", "SETTINGS", "TOOLS"]
+
+    def _append_secondary_injections(self, tab: dict, category_map: dict[str, dict]) -> None:
+        tab_id = str(tab.get("id") or "")
+        for secondary in tab.get("secondary_categories") or []:
+            cat = self._normalize_spell_category(secondary)
+            if not cat or cat not in category_map:
+                continue
+            if tab_id not in category_map[cat]["tabs"]:
+                category_map[cat]["tabs"].append(tab_id)
+
+    def _rebuild_spell_category_map(self) -> None:
+        category_map: dict[str, dict] = {}
+        for protected in self._protected_category_order():
+            category_map[protected] = {"tabs": [], "protected": True}
+
+        for tab in self._spell_tab_defs:
+            category = self._normalize_spell_category(tab.get("category", "SYSTEM"))
+            tab["category"] = category
+            tab.setdefault("secondary_categories", [])
+            tab["protected_category"] = bool(tab.get("protected_category", False) or category in self._protected_categories)
+            bucket = category_map.setdefault(category, {"tabs": [], "protected": bool(tab["protected_category"])})
+            bucket["protected"] = bool(bucket.get("protected", False) or tab["protected_category"] or category in self._protected_categories)
+            if tab["id"] not in bucket["tabs"]:
+                bucket["tabs"].append(tab["id"])
+
+        settings_bucket = category_map.setdefault("SETTINGS", {"tabs": [], "protected": True})
+        for tab in self._spell_tab_defs:
+            if bool(tab.get("inject_settings", False)):
+                if tab["id"] not in settings_bucket["tabs"]:
+                    settings_bucket["tabs"].append(tab["id"])
+
+        for tab in self._spell_tab_defs:
+            self._append_secondary_injections(tab, category_map)
+
+        system_bucket = category_map.setdefault("SYSTEM", {"tabs": [], "protected": True})
+        for tab_id in self._system_spell_tab_ids:
+            if tab_id not in system_bucket["tabs"]:
+                system_bucket["tabs"].append(tab_id)
+
+        for cat in list(category_map.keys()):
+            if cat in self._protected_categories:
+                continue
+            if category_map[cat].get("tabs"):
+                continue
+            category_map.pop(cat, None)
+
+        self._category_map = category_map
+        if self._active_category not in self._category_map:
+            self._active_category = "SYSTEM" if "SYSTEM" in self._category_map else next(iter(self._category_map.keys()), "SYSTEM")
+        self._rebuild_category_strip()
+
+    def _category_ordered_list(self) -> list[str]:
+        cfg_order = CFG.get(self._category_order_key, [])
+        manual = [self._normalize_spell_category(x) for x in cfg_order] if isinstance(cfg_order, list) else []
+        seen = set()
+        ordered = []
+        for cat in manual:
+            if cat in self._category_map and cat not in seen:
+                ordered.append(cat); seen.add(cat)
+        for cat in self._protected_category_order():
+            if cat in self._category_map and cat not in seen:
+                ordered.append(cat); seen.add(cat)
+        for cat in sorted(self._category_map.keys()):
+            if cat not in seen:
+                ordered.append(cat); seen.add(cat)
+        return ordered
+
+    def _move_category(self, category: str, direction: int) -> None:
+        ordered = self._category_ordered_list()
+        if category not in ordered:
+            return
+        idx = ordered.index(category)
+        swap = idx + direction
+        if swap < 0 or swap >= len(ordered):
+            return
+        ordered[idx], ordered[swap] = ordered[swap], ordered[idx]
+        CFG[self._category_order_key] = ordered
+        save_config(CFG)
+        self._rebuild_category_strip()
+
+    def _rebuild_category_strip(self) -> None:
+        if not hasattr(self, "_category_strip_layout"):
+            return
+        while self._category_strip_layout.count():
+            item = self._category_strip_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        for cat in self._category_ordered_list():
+            btn = QToolButton(self._category_strip)
+            btn.setText(cat)
+            btn.setCheckable(True)
+            btn.setChecked(cat == self._active_category)
+            btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+            menu = QMenu(btn)
+            move_left = menu.addAction("Move Left")
+            move_right = menu.addAction("Move Right")
+            move_left.triggered.connect(lambda _=False, c=cat: self._move_category(c, -1))
+            move_right.triggered.connect(lambda _=False, c=cat: self._move_category(c, +1))
+            btn.setMenu(menu)
+            btn.setStyleSheet(
+                f"QToolButton{{padding:4px 10px; border:1px solid {C_CRIMSON_DIM}; background:{C_BG2}; color:{C_TEXT_DIM}; font-family:{DECK_FONT}, serif; font-size:10px; letter-spacing:1px;}}"
+                f"QToolButton:checked{{background:{C_CRIMSON_DIM}; color:{C_GOLD}; border:1px solid {C_CRIMSON};}}"
+                f"QToolButton:hover{{color:{C_TEXT}; border:1px solid {C_CRIMSON};}}"
+            )
+            btn.clicked.connect(lambda _checked=False, c=cat: self._select_spell_category(c))
+            self._category_strip_layout.addWidget(btn)
+        self._category_strip_layout.addStretch(1)
+""",
+        "top-level protected category architecture + ordering + injection rules",
+    )
+    source = _replace_once(
+        source,
         """import ast
 import operator
 import html
@@ -9902,7 +10093,15 @@ import zlib
                 if not isinstance(widget, QWidget):
                     self._log(f"[MODULE][WARN] tab factory must return QWidget: {tab_id}")
                     continue
-                tab_defs.append({"id": tab_id, "title": tab_name, "widget": widget, "category": home_category, "default_order": 500})
+                tab_defs.append({
+                    "id": tab_id,
+                    "title": tab_name,
+                    "widget": widget,
+                    "category": home_category,
+                    "secondary_categories": list(t.get("secondary_categories") or []),
+                    "inject_settings": bool(t.get("inject_settings", False)),
+                    "default_order": 500,
+                })
         return tab_defs
 
     def build_settings_sections(self) -> list[dict]:
@@ -9948,11 +10147,265 @@ import zlib
         save_config(CFG)
 
 
+class FrameworksToolTab(QWidget):
+    _FRAMEWORKS = {
+        "APE": {
+            "difficulty": "Beginner",
+            "use_cases": "quick clarifications, rewrites, simple drafting",
+            "components": "Action, Purpose, Expectation",
+            "example": "Action: Summarize this meeting transcript. Purpose: Send a concise update. Expectation: Bullet list with owners and deadlines.",
+            "pros": "fast and approachable",
+        },
+        "RACE": {
+            "difficulty": "Intermediate",
+            "use_cases": "analysis, brainstorming, planning",
+            "components": "Role, Action, Context, Expectation",
+            "example": "Role: Product analyst. Action: Evaluate this roadmap. Context: Team of 4 engineers. Expectation: Prioritized recommendations.",
+            "pros": "adds perspective and constraints",
+        },
+        "ROSES": {
+            "difficulty": "Intermediate",
+            "use_cases": "retrospectives and coaching",
+            "components": "Role, Objective, Situation, Expectations, Steps",
+            "example": "Role: Leadership coach. Objective: Improve 1:1s. Situation: New manager, remote team. Expectations: clear cadence and script. Steps: first 30 days.",
+            "pros": "strong for guided execution",
+        },
+        "TRACE": {
+            "difficulty": "Advanced",
+            "use_cases": "complex synthesis and decision support",
+            "components": "Task, Requirements, Assumptions, Constraints, Evaluation",
+            "example": "Task: Compare three CRM options. Requirements: SMB budget. Assumptions: existing Google Workspace. Constraints: 2-week migration window. Evaluation: scorecard with recommendation.",
+            "pros": "excellent rigor for complex work",
+        },
+    }
+
+    def __init__(self, deck_window: "EchoDeck", parent=None):
+        super().__init__(parent)
+        self._deck = deck_window
+        lay = QVBoxLayout(self)
+        top = QHBoxLayout()
+        self._mode = QComboBox(); self._mode.addItems(["Builder", "Guide"])
+        self._pick = QComboBox(); self._pick.addItems(sorted(self._FRAMEWORKS.keys()))
+        self._difficulty = QLabel()
+        top.addWidget(QLabel("Mode")); top.addWidget(self._mode)
+        top.addWidget(QLabel("Framework")); top.addWidget(self._pick)
+        top.addWidget(self._difficulty); top.addStretch(1)
+        lay.addLayout(top)
+        self._fields = QPlainTextEdit()
+        self._fields.setPlaceholderText("Enter details here (one bullet per line).")
+        self._out = QTextEdit(); self._out.setReadOnly(True)
+        self._send = _gothic_btn("Send")
+        lay.addWidget(self._fields, 1); lay.addWidget(self._out, 1); lay.addWidget(self._send, 0, Qt.AlignmentFlag.AlignRight)
+        self._mode.currentTextChanged.connect(self._refresh)
+        self._pick.currentTextChanged.connect(self._refresh)
+        self._send.clicked.connect(self._send_prompt)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        data = self._FRAMEWORKS[self._pick.currentText()]
+        self._difficulty.setText(f"Difficulty: {data['difficulty']}")
+        if self._mode.currentText() == "Guide":
+            self._fields.hide()
+            self._out.setPlainText(
+                f"Framework: {self._pick.currentText()}\\nDifficulty: {data['difficulty']}\\n"
+                f"Best use cases: {data['use_cases']}\\nComponents: {data['components']}\\n"
+                f"Example prompt:\\n{data['example']}\\n\\nAdvantages / considerations: {data['pros']}."
+            )
+        else:
+            self._fields.show()
+            built = self._build_prompt()
+            self._out.setPlainText(built)
+
+    def _build_prompt(self) -> str:
+        data = self._FRAMEWORKS[self._pick.currentText()]
+        user = (self._fields.toPlainText() or "").strip()
+        if not user:
+            return data["example"]
+        return f"Framework: {self._pick.currentText()}\\nComponents: {data['components']}\\nUser Inputs:\\n{user}"
+
+    def _send_prompt(self) -> None:
+        prompt = self._build_prompt()
+        if hasattr(self._deck, "_input_field"):
+            if hasattr(self._deck._input_field, "setPlainText"):
+                self._deck._input_field.setPlainText(prompt)
+            else:
+                self._deck._input_field.setText(prompt)
+        if hasattr(self._deck, "_send_message"):
+            self._deck._send_message()
+
+
+class CalculatorsToolTab(QWidget):
+    def __init__(self, deck_window: "EchoDeck", parent=None):
+        super().__init__(parent)
+        self._deck = deck_window
+        root = QVBoxLayout(self)
+        row = QHBoxLayout()
+        self._mode = QComboBox(); self._mode.addItems(["Basic", "Scientific"])
+        self._expr = QPlainTextEdit(); self._expr.setPlaceholderText("Type expression")
+        self._result = QLineEdit(); self._result.setReadOnly(True)
+        self._calc = _gothic_btn("Compute")
+        self._clear = _gothic_btn("Clear")
+        self._send_result = _gothic_btn("Send Result")
+        self._send_full = _gothic_btn("Send Expr + Result")
+        row.addWidget(QLabel("Mode")); row.addWidget(self._mode); row.addStretch(1)
+        root.addLayout(row)
+        root.addWidget(self._expr, 1); root.addWidget(self._result)
+        btn = QHBoxLayout(); btn.addWidget(self._calc); btn.addWidget(self._clear); btn.addWidget(self._send_result); btn.addWidget(self._send_full); btn.addStretch(1)
+        root.addLayout(btn)
+        self._calc.clicked.connect(self._compute)
+        self._clear.clicked.connect(lambda: (self._expr.clear(), self._result.clear()))
+        self._send_result.clicked.connect(lambda: self._handoff(False))
+        self._send_full.clicked.connect(lambda: self._handoff(True))
+
+    def _safe_eval(self, expr: str) -> float:
+        allowed_funcs = {"sin": math.sin, "cos": math.cos, "tan": math.tan, "log": math.log10, "ln": math.log, "sqrt": math.sqrt, "abs": abs}
+        allowed_names = {"pi": math.pi, "e": math.e}
+        node = ast.parse(expr, mode="eval")
+        def _eval(n):
+            if isinstance(n, ast.Expression): return _eval(n.body)
+            if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)): return float(n.value)
+            if isinstance(n, ast.Name) and n.id in allowed_names: return float(allowed_names[n.id])
+            if isinstance(n, ast.BinOp) and type(n.op) in (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod):
+                a, b = _eval(n.left), _eval(n.right)
+                return {ast.Add:a+b, ast.Sub:a-b, ast.Mult:a*b, ast.Div:a/b, ast.Pow:a**b, ast.Mod:a%b}[type(n.op)]
+            if isinstance(n, ast.UnaryOp) and type(n.op) in (ast.UAdd, ast.USub):
+                v = _eval(n.operand); return v if isinstance(n.op, ast.UAdd) else -v
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in allowed_funcs:
+                args = [_eval(x) for x in n.args]; return float(allowed_funcs[n.func.id](*args))
+            raise ValueError("Unsupported expression")
+        return float(_eval(node))
+
+    def _compute(self) -> None:
+        expr = (self._expr.toPlainText() or "").strip()
+        if not expr:
+            return
+        try:
+            value = self._safe_eval(expr)
+            self._result.setText(str(value))
+        except Exception as ex:
+            self._result.setText(f"Error: {ex}")
+
+    def _handoff(self, include_expr: bool) -> None:
+        expr = (self._expr.toPlainText() or "").strip()
+        result = (self._result.text() or "").strip()
+        if not result:
+            return
+        payload = {"calculator_expression": expr, "calculator_result": result, "calculator_verified": True}
+        text = f"Verified calculator result: {result}" if not include_expr else f"Verified calculator output\\nExpression: {expr}\\nResult: {result}"
+        if hasattr(self._deck, "_queue_hidden_runtime_event"):
+            self._deck._queue_hidden_runtime_event("calculator.result", json.dumps(payload), "verified calculator result")
+        if hasattr(self._deck, "_input_field"):
+            if hasattr(self._deck._input_field, "setPlainText"): self._deck._input_field.setPlainText(text)
+            else: self._deck._input_field.setText(text)
+        self._deck._send_message()
+
+
+class TasksToolTab(QWidget):
+    def __init__(self, deck_window: "EchoDeck", parent=None):
+        super().__init__(parent)
+        self._deck = deck_window
+        self._path = cfg_path("memories") / "tasks_module.json"
+        self._data = self._load()
+        root = QVBoxLayout(self)
+        self._title = QLineEdit(); self._title.setPlaceholderText("Task title")
+        self._notes = QPlainTextEdit(); self._notes.setPlaceholderText("Notes")
+        self._due = QLineEdit(); self._due.setPlaceholderText("Due at (YYYY-MM-DD HH:MM optional)")
+        self._recurrence = QComboBox(); self._recurrence.addItems(["none", "daily", "weekly", "monthly"])
+        self._reminder = QLineEdit(); self._reminder.setPlaceholderText("Reminder offset minutes (default 30)")
+        self._list = QListWidget()
+        add_btn = _gothic_btn("Create / Update")
+        complete_btn = _gothic_btn("Complete")
+        delete_btn = _gothic_btn("Delete")
+        root.addWidget(self._title); root.addWidget(self._notes); root.addWidget(self._due); root.addWidget(self._recurrence); root.addWidget(self._reminder); root.addWidget(self._list, 1)
+        row = QHBoxLayout(); row.addWidget(add_btn); row.addWidget(complete_btn); row.addWidget(delete_btn); row.addStretch(1); root.addLayout(row)
+        add_btn.clicked.connect(self._upsert); complete_btn.clicked.connect(self._complete); delete_btn.clicked.connect(self._delete)
+        self._timer = QTimer(self); self._timer.timeout.connect(self._tick); self._timer.start(30000)
+        self._refresh()
+
+    def _load(self) -> dict:
+        base = {"tasks": []}
+        try:
+            if self._path.exists():
+                raw = json.loads(self._path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict) and isinstance(raw.get("tasks"), list):
+                    base["tasks"] = raw["tasks"]
+        except Exception:
+            pass
+        return base
+
+    def _save(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _emit_task_event(self, event_type: str, task: dict) -> None:
+        if hasattr(self._deck, "broadcast"):
+            self._deck.broadcast({"event_type": event_type, "domain": "tasks", "origin_module": "tasks_tool", "payload": task})
+
+    def _refresh(self) -> None:
+        self._list.clear()
+        for t in sorted(self._data.get("tasks", []), key=lambda x: str(x.get("due_at") or "")):
+            self._list.addItem(f"{t.get('id')} | {t.get('status')} | {t.get('title')} | due {t.get('due_at')}")
+
+    def _selected_id(self) -> str:
+        item = self._list.currentItem()
+        if not item: return ""
+        return item.text().split("|", 1)[0].strip()
+
+    def _upsert(self) -> None:
+        title = self._title.text().strip()
+        if not title: return
+        now = datetime.now().isoformat()
+        task_id = self._selected_id() or str(uuid.uuid4())[:8]
+        tasks = self._data.setdefault("tasks", [])
+        existing = next((x for x in tasks if x.get("id") == task_id), None)
+        payload = {
+            "id": task_id, "title": title, "description": self._notes.toPlainText().strip(), "due_at": self._due.text().strip(),
+            "recurrence": self._recurrence.currentText(), "status": "open" if existing is None else existing.get("status", "open"),
+            "reminder_offset": int(self._reminder.text().strip() or "30"), "reminder_repeat_interval": 600, "tags": [],
+            "created_at": existing.get("created_at", now) if existing else now, "updated_at": now,
+        }
+        if existing: existing.update(payload); self._emit_task_event("task.updated", existing)
+        else: tasks.append(payload); self._emit_task_event("task.created", payload)
+        self._save(); self._refresh()
+
+    def _complete(self) -> None:
+        sid = self._selected_id()
+        for t in self._data.get("tasks", []):
+            if t.get("id") == sid:
+                t["status"] = "completed"; t["updated_at"] = datetime.now().isoformat(); self._emit_task_event("task.completed", t); break
+        self._save(); self._refresh()
+
+    def _delete(self) -> None:
+        sid = self._selected_id()
+        keep = []
+        for t in self._data.get("tasks", []):
+            if t.get("id") == sid: self._emit_task_event("task.deleted", t); continue
+            keep.append(t)
+        self._data["tasks"] = keep
+        self._save(); self._refresh()
+
+    def _tick(self) -> None:
+        now = datetime.now()
+        for t in self._data.get("tasks", []):
+            if t.get("status") != "open": continue
+            due_txt = str(t.get("due_at") or "").strip()
+            if not due_txt: continue
+            try:
+                due = datetime.fromisoformat(due_txt.replace(" ", "T"))
+            except Exception:
+                continue
+            mins = int(t.get("reminder_offset") or 30)
+            if now >= (due - timedelta(minutes=max(0, mins))):
+                self._emit_task_event("task.due", t)
+
+
 class ModuleImportManagerTab(QWidget):
     def __init__(self, deck_window: "EchoDeck", manager: EchoDeckModuleManager, parent=None):
         super().__init__(parent)
         self._deck = deck_window
         self._manager = manager
+        self._pending_paths: list[Path] = []
+        self.setAcceptDrops(True)
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(6)
@@ -9960,25 +10413,55 @@ class ModuleImportManagerTab(QWidget):
         root.addWidget(QLabel("Installed"))
         self._installed = QListWidget()
         root.addWidget(self._installed, 1)
-
-        root.addWidget(QLabel("New"))
+        root.addWidget(QLabel("New / Pending"))
         self._new = QListWidget()
         root.addWidget(self._new, 1)
+        root.addWidget(QLabel("Selected files waiting to install"))
+        self._pending = QListWidget()
+        root.addWidget(self._pending, 1)
 
         btn_row = QHBoxLayout()
-        self._btn_install = _gothic_btn("Install Selected")
+        self._btn_pick = _gothic_btn("Browse .edm")
+        self._btn_install = _gothic_btn("Install Queue")
         self._btn_uninstall = _gothic_btn("Uninstall")
         self._btn_purge = _gothic_btn("Full Purge")
-        btn_row.addWidget(self._btn_install)
-        btn_row.addWidget(self._btn_uninstall)
-        btn_row.addWidget(self._btn_purge)
-        btn_row.addStretch(1)
+        btn_row.addWidget(self._btn_pick); btn_row.addWidget(self._btn_install); btn_row.addWidget(self._btn_uninstall); btn_row.addWidget(self._btn_purge); btn_row.addStretch(1)
         root.addLayout(btn_row)
 
+        self._btn_pick.clicked.connect(self._pick_files)
         self._btn_install.clicked.connect(self._do_install)
         self._btn_uninstall.clicked.connect(lambda: self._do_remove(False))
         self._btn_purge.clicked.connect(lambda: self._do_remove(True))
         self.refresh_lists()
+
+    def dragEnterEvent(self, event):
+        md = event.mimeData()
+        if md.hasUrls() and any(u.isLocalFile() and u.toLocalFile().lower().endswith(".edm") for u in md.urls()):
+            event.acceptProposedAction(); return
+        super().dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        md = event.mimeData()
+        if not md.hasUrls(): return
+        for u in md.urls():
+            if u.isLocalFile():
+                p = Path(u.toLocalFile())
+                if p.suffix.lower() == ".edm":
+                    self._pending_paths.append(p)
+        self._rebuild_pending()
+
+    def _pick_files(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(self, "Select EDM modules", str(Path.home()), "Echo Deck Modules (*.edm)")
+        for p in paths:
+            self._pending_paths.append(Path(p))
+        self._rebuild_pending()
+
+    def _rebuild_pending(self) -> None:
+        rows = sorted({str(p): p for p in self._pending_paths}.values(), key=lambda x: x.name.lower())
+        self._pending_paths = rows
+        self._pending.clear()
+        for p in rows:
+            self._pending.addItem(p.name)
 
     def refresh_lists(self) -> None:
         available = self._manager.scan_available()
@@ -9986,36 +10469,41 @@ class ModuleImportManagerTab(QWidget):
         self._installed.clear(); self._new.clear()
         for key, item in sorted(available.items()):
             label = f"{item['manifest'].get('display_name', key)} ({key})"
-            if key in installed:
-                self._installed.addItem(label)
-            else:
-                self._new.addItem(label)
+            if key in installed: self._installed.addItem(label)
+            else: self._new.addItem(label)
 
     def _selected_key(self, lw: QListWidget) -> str:
         item = lw.currentItem()
-        if not item:
-            return ""
+        if not item: return ""
         txt = item.text()
-        if txt.endswith(")") and "(" in txt:
-            return txt.rsplit("(", 1)[-1][:-1]
+        if txt.endswith(")") and "(" in txt: return txt.rsplit("(", 1)[-1][:-1]
         return txt.strip().lower().replace(" ", "_")
 
     def _do_install(self) -> None:
-        key = self._selected_key(self._new)
-        if not key:
+        if self._pending_paths:
+            needs_restart = False
+            for path in sorted(self._pending_paths, key=lambda p: p.name.lower()):
+                ok, msg = self._manager.install_from_drop(path)
+                self._deck._append_chat("SYSTEM", f"[MODULE] {msg}")
+                needs_restart = needs_restart or bool(ok)
+            self._pending_paths.clear()
+            self._rebuild_pending()
+            self.refresh_lists()
+            if needs_restart:
+                self._deck._restart_for_module_change("module queue install")
             return
+        key = self._selected_key(self._new)
+        if not key: return
         mods = CFG.setdefault("modules", {})
         installed = mods.setdefault("installed", [])
         if key not in installed:
-            installed.append(key)
-            save_config(CFG)
+            installed.append(key); save_config(CFG)
         self._deck._append_chat("SYSTEM", f"[MODULE] install registered: {key}")
         self._deck._restart_for_module_change("module install")
 
     def _do_remove(self, full_purge: bool) -> None:
         key = self._selected_key(self._installed)
-        if not key:
-            return
+        if not key: return
         self._manager.uninstall_module(key, full_purge=full_purge)
         self._deck._restart_for_module_change("module uninstall")
 
@@ -10051,10 +10539,13 @@ class EchoDeck(QMainWindow):
         source,
         """            {"id": "settings", "title": "Settings", "widget": self._settings_tab, "default_order": 12},
 """,
-        """            {"id": "module_imports", "title": "Import Modules", "widget": self._module_import_tab, "default_order": 12, "category": "SYSTEM"},
-            {"id": "settings", "title": "Settings", "widget": self._settings_tab, "default_order": 13},
+        """            {"id": "module_imports", "title": "Module Installer", "widget": self._module_import_tab, "default_order": 12, "category": "TOOLS", "secondary_categories": [], "protected_category": True},
+            {"id": "frameworks_tool", "title": "Frameworks", "widget": self._frameworks_tool_tab, "default_order": 13, "category": "TOOLS", "secondary_categories": [], "protected_category": True},
+            {"id": "calculators_tool", "title": "Calculators", "widget": self._calculators_tool_tab, "default_order": 14, "category": "TOOLS", "secondary_categories": [], "protected_category": True},
+            {"id": "tasks_tool", "title": "Tasks", "widget": self._tasks_tool_tab, "default_order": 15, "category": "TOOLS", "secondary_categories": [], "protected_category": True},
+            {"id": "settings", "title": "Settings", "widget": self._settings_tab, "default_order": 16, "category": "SETTINGS", "secondary_categories": [], "protected_category": True},
 """,
-        "add import modules tab",
+        "add tools + settings category tabs",
     )
 
     source = _replace_once(
@@ -10065,8 +10556,41 @@ class EchoDeck(QMainWindow):
         """        # ── Module Tracker tab ─────────────────────────────────────────
         self._module_tracker = ModuleTrackerTab()
         self._module_import_tab = ModuleImportManagerTab(self, self._deck_module_manager)
+        self._frameworks_tool_tab = FrameworksToolTab(self)
+        self._calculators_tool_tab = CalculatorsToolTab(self)
+        self._tasks_tool_tab = TasksToolTab(self)
 """,
-        "instantiate module import manager tab",
+        "instantiate tools category tabs",
+    )
+    source = _replace_once(
+        source,
+        """self._spell_tab_defs = [
+            {"id": "instruments", "title": "Instruments", "widget": self._hw_panel, "default_order": 0, "category": "SYSTEM", "secondary_categories": [], "protected_category": True},
+            {"id": "diagnostics", "title": "Diagnostics", "widget": self._diag_tab, "default_order": 8, "category": "SYSTEM", "secondary_categories": [], "protected_category": True},
+            {"id": "settings", "title": "Settings", "widget": self._settings_tab, "default_order": 9, "category": "SYSTEM", "secondary_categories": [], "protected_category": True},
+        ]
+""",
+        """self._spell_tab_defs = [
+            {"id": "instruments", "title": "Instruments", "widget": self._hw_panel, "default_order": 0, "category": "SYSTEM", "secondary_categories": [], "protected_category": True},
+            {"id": "diagnostics", "title": "Diagnostics", "widget": self._diag_tab, "default_order": 8, "category": "SYSTEM", "secondary_categories": [], "protected_category": True},
+            {"id": "settings", "title": "Settings", "widget": self._settings_tab, "default_order": 9, "category": "SETTINGS", "secondary_categories": [], "protected_category": True},
+            {"id": "module_imports", "title": "Module Installer", "widget": self._module_import_tab, "default_order": 12, "category": "TOOLS", "secondary_categories": [], "protected_category": True},
+            {"id": "frameworks_tool", "title": "Frameworks", "widget": self._frameworks_tool_tab, "default_order": 13, "category": "TOOLS", "secondary_categories": [], "protected_category": True},
+            {"id": "calculators_tool", "title": "Calculators", "widget": self._calculators_tool_tab, "default_order": 14, "category": "TOOLS", "secondary_categories": [], "protected_category": True},
+            {"id": "tasks_tool", "title": "Tasks", "widget": self._tasks_tool_tab, "default_order": 15, "category": "TOOLS", "secondary_categories": [], "protected_category": True},
+        ]
+""",
+        "core spell tab defs for SYSTEM/SETTINGS/TOOLS",
+    )
+    source = _replace_once(
+        source,
+        '            {"id": "settings", "title": "Settings", "widget": self._settings_tab, "default_order": 9, "category": "SYSTEM", "secondary_categories": [], "protected_category": True},\n',
+        '            {"id": "settings", "title": "Settings", "widget": self._settings_tab, "default_order": 9, "category": "SETTINGS", "secondary_categories": [], "protected_category": True},\n'
+        '            {"id": "module_imports", "title": "Module Installer", "widget": self._module_import_tab, "default_order": 12, "category": "TOOLS", "secondary_categories": [], "protected_category": True},\n'
+        '            {"id": "frameworks_tool", "title": "Frameworks", "widget": self._frameworks_tool_tab, "default_order": 13, "category": "TOOLS", "secondary_categories": [], "protected_category": True},\n'
+        '            {"id": "calculators_tool", "title": "Calculators", "widget": self._calculators_tool_tab, "default_order": 14, "category": "TOOLS", "secondary_categories": [], "protected_category": True},\n'
+        '            {"id": "tasks_tool", "title": "Tasks", "widget": self._tasks_tool_tab, "default_order": 15, "category": "TOOLS", "secondary_categories": [], "protected_category": True},\n',
+        "inject tools + settings categories into spell tab defs",
     )
 
     source = _replace_once(
