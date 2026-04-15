@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QFileDialog,
     QDateTimeEdit,
     QFormLayout,
     QGroupBox,
@@ -60,6 +61,10 @@ MODULE_MANIFEST = {
 
 
 UTC = timezone.utc
+GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/tasks",
+]
 
 
 def _now_iso() -> str:
@@ -173,6 +178,9 @@ class GoogleCalendarRuntime:
             "auth_status": "unknown",
         }
         self._storage_path = self._resolve_storage_path()
+        self._google_storage_dir = self._resolve_google_storage_dir()
+        self._token_path = self._google_storage_dir / "token.json" if self._google_storage_dir else None
+        self._credentials_path = self._google_storage_dir / "google_credentials.json" if self._google_storage_dir else None
         self._load_state()
 
     def _resolve_storage_path(self) -> Optional[Path]:
@@ -219,6 +227,19 @@ class GoogleCalendarRuntime:
         if isinstance(state, dict):
             self.sync_state.update(state)
 
+    def _resolve_google_storage_dir(self) -> Optional[Path]:
+        if not callable(self._cfg_path):
+            return None
+        try:
+            token_candidate = self._cfg_path("google_auth/token.json")
+            if token_candidate:
+                storage_dir = Path(token_candidate).parent
+                storage_dir.mkdir(parents=True, exist_ok=True)
+                return storage_dir
+        except Exception as ex:
+            self._log(f"GoogleCalendar token storage path unavailable: {ex}")
+        return None
+
     def _save_state(self) -> None:
         payload = {
             "calendar_records": [asdict(x) for x in self.calendar_records.values()],
@@ -256,8 +277,10 @@ class GoogleCalendarRuntime:
         shared = self._cfg_get("modules.shared_resources.google_auth", {})
         if not isinstance(shared, dict):
             shared = {}
-        token_present = bool(shared.get("token_present") or shared.get("token_path"))
-        creds_present = bool(shared.get("credentials_present") or shared.get("credentials_path"))
+        local_token_present = bool(self._token_path and self._token_path.exists())
+        local_creds_present = bool(self._credentials_path and self._credentials_path.exists())
+        token_present = bool(shared.get("token_present") or shared.get("token_path") or local_token_present)
+        creds_present = bool(shared.get("credentials_present") or shared.get("credentials_path") or local_creds_present)
         refreshable = bool(shared.get("refreshable", True))
         valid = bool(shared.get("token_valid", token_present))
         return {
@@ -267,10 +290,101 @@ class GoogleCalendarRuntime:
             "refreshable": refreshable,
         }
 
+    def _set_shared_auth_state(self, token_valid: bool, token_present: bool, credentials_present: bool, credentials_path: str = "") -> None:
+        payload = {
+            "token_valid": bool(token_valid),
+            "token_present": bool(token_present),
+            "credentials_present": bool(credentials_present),
+            "refreshable": True,
+            "token_path": str(self._token_path) if token_present and self._token_path else "",
+            "credentials_path": credentials_path if credentials_path else (str(self._credentials_path) if credentials_present and self._credentials_path else ""),
+        }
+        try:
+            self._cfg_set("modules.shared_resources.google_auth", payload)
+        except Exception:
+            pass
+
+    def authenticate_google(self, selected_credentials_path: str) -> tuple[bool, str]:
+        if not self._google_storage_dir or not self._token_path or not self._credentials_path:
+            return False, "Google auth storage location is unavailable."
+        if not selected_credentials_path:
+            return False, "No credentials file selected."
+        selected_path = Path(selected_credentials_path)
+        if not selected_path.exists():
+            return False, "Selected credentials file does not exist."
+
+        try:
+            self._credentials_path.write_text(selected_path.read_text(encoding="utf-8"), encoding="utf-8")
+        except Exception as ex:
+            self.sync_state["mode"] = "local_only"
+            self.sync_state["auth_status"] = "missing"
+            self.sync_state["last_error"] = f"Failed to store credentials: {ex}"
+            self._save_state()
+            return False, self.sync_state["last_error"]
+
+        try:
+            from google.auth.transport.requests import Request
+            from google.oauth2.credentials import Credentials
+            from google_auth_oauthlib.flow import InstalledAppFlow
+            from googleapiclient.discovery import build
+        except Exception as ex:
+            self.sync_state["mode"] = "local_only"
+            self.sync_state["auth_status"] = "missing"
+            self.sync_state["last_error"] = f"Google auth dependencies unavailable: {ex}"
+            self._save_state()
+            return False, self.sync_state["last_error"]
+
+        creds = None
+        try:
+            if self._token_path.exists():
+                try:
+                    creds = Credentials.from_authorized_user_file(str(self._token_path), GOOGLE_SCOPES)
+                except Exception:
+                    creds = None
+
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+
+            if not creds or not creds.valid:
+                flow = InstalledAppFlow.from_client_secrets_file(str(self._credentials_path), GOOGLE_SCOPES)
+                creds = flow.run_local_server(port=0)
+
+            self._token_path.write_text(creds.to_json(), encoding="utf-8")
+            # Build clients once to validate token/scopes.
+            build("calendar", "v3", credentials=creds)
+            build("tasks", "v1", credentials=creds)
+
+            self.sync_state["auth_status"] = "authenticated"
+            self.sync_state["mode"] = "google_connected"
+            self.sync_state["last_error"] = ""
+            self._set_shared_auth_state(
+                token_valid=True,
+                token_present=True,
+                credentials_present=True,
+                credentials_path=str(self._credentials_path),
+            )
+            self._save_state()
+            self._log("GoogleCalendar authentication successful; token.json generated.")
+            return True, "Authentication successful."
+        except Exception as ex:
+            self.sync_state["mode"] = "local_only"
+            self.sync_state["auth_status"] = "missing"
+            self.sync_state["last_error"] = f"Google authentication failed: {ex}"
+            self._set_shared_auth_state(
+                token_valid=False,
+                token_present=bool(self._token_path.exists()),
+                credentials_present=bool(self._credentials_path.exists()),
+                credentials_path=str(self._credentials_path),
+            )
+            self._save_state()
+            self._log(self.sync_state["last_error"])
+            return False, self.sync_state["last_error"]
+
     def evaluate_auth_status(self) -> str:
         auth = self._google_auth_snapshot()
         if auth["token_present"] and auth["token_valid"]:
-            self.sync_state["auth_status"] = "token_ready"
+            if self.sync_state.get("auth_status") != "authenticated":
+                self.sync_state["auth_status"] = "token_ready"
             self.sync_state["mode"] = "google_connected"
         elif auth["credentials_present"]:
             self.sync_state["auth_status"] = "credentials_only"
@@ -695,14 +809,17 @@ class GoogleCalendarTab(QWidget):
         self.sync_label.setWordWrap(True)
         layout.addWidget(self.sync_label)
 
+        self.auth_google_btn = QPushButton("Authenticate Google", panel)
         self.sync_now_btn = QPushButton("Run Sync Now", panel)
         self.sync_refresh_btn = QPushButton("Refresh Status", panel)
         self.reminders_btn = QPushButton("Scan Upcoming Reminders", panel)
+        layout.addWidget(self.auth_google_btn)
         layout.addWidget(self.sync_now_btn)
         layout.addWidget(self.sync_refresh_btn)
         layout.addWidget(self.reminders_btn)
         layout.addStretch(1)
 
+        self.auth_google_btn.clicked.connect(self._authenticate_google)
         self.sync_now_btn.clicked.connect(self._run_sync)
         self.sync_refresh_btn.clicked.connect(self.refresh_sync)
         self.reminders_btn.clicked.connect(self._scan_reminders)
@@ -837,6 +954,22 @@ class GoogleCalendarTab(QWidget):
         self.runtime.sync_once()
         self.refresh_all()
 
+    def _authenticate_google(self) -> None:
+        selected_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Google OAuth Credentials",
+            "",
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not selected_path:
+            return
+        ok, message = self.runtime.authenticate_google(selected_path)
+        if ok:
+            QMessageBox.information(self, "Google Authentication", message)
+        else:
+            QMessageBox.critical(self, "Google Authentication Failed", message)
+        self.refresh_sync()
+
     def _scan_reminders(self) -> None:
         reminders = self.runtime.due_reminders()
         QMessageBox.information(self, "Reminder Scan", f"Detected {len(reminders)} upcoming reminder(s).")
@@ -870,6 +1003,7 @@ class GoogleCalendarTab(QWidget):
         self.runtime.evaluate_auth_status()
         state = self.runtime.sync_state
         auth = self.runtime._google_auth_snapshot()
+        self.auth_google_btn.setVisible(state.get("auth_status") == "missing")
         text = (
             f"Mode: {state.get('mode')}\n"
             f"Auth status: {state.get('auth_status')}\n"
