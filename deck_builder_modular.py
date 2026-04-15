@@ -10148,6 +10148,9 @@ import zlib
 
 
 class FrameworksToolTab(QWidget):
+    FIELD_MIN_HEIGHT = 72
+    FIELD_MAX_HEIGHT = 220
+
     FRAMEWORK_DEFINITIONS = {
         "ACE": {
             "difficulty": "Beginner",
@@ -10331,14 +10334,19 @@ Guardrails: {Guardrails}''',
         top.addWidget(QLabel("Framework")); top.addWidget(self._pick)
         top.addWidget(self._difficulty); top.addStretch(1)
         lay.addLayout(top)
+        self._builder_scroll = QScrollArea()
+        self._builder_scroll.setWidgetResizable(True)
+        self._builder_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._builder_panel = QWidget()
         self._builder_layout = QVBoxLayout(self._builder_panel)
         self._builder_layout.setContentsMargins(0, 0, 0, 0)
         self._builder_layout.setSpacing(8)
+        self._builder_scroll.setWidget(self._builder_panel)
         self._guide = QTextEdit(); self._guide.setReadOnly(True)
         self._preview = QTextEdit(); self._preview.setReadOnly(True)
+        self._preview.setMinimumHeight(140)
         self._send = _gothic_btn("Send")
-        lay.addWidget(self._builder_panel, 1)
+        lay.addWidget(self._builder_scroll, 2)
         lay.addWidget(self._guide, 1)
         lay.addWidget(QLabel("Assembled Prompt Preview"))
         lay.addWidget(self._preview, 1)
@@ -10362,19 +10370,24 @@ Guardrails: {Guardrails}''',
             label = QLabel(field)
             edit = QTextEdit()
             edit.setPlaceholderText(f"Enter {field}...")
-            edit.setMinimumHeight(70)
+            edit.setMinimumHeight(self.FIELD_MIN_HEIGHT)
+            edit.setMaximumHeight(self.FIELD_MAX_HEIGHT)
+            edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             edit.textChanged.connect(self._preview_builder_prompt)
+            edit.textChanged.connect(lambda _=None, editor=edit: self._resize_field_editor(editor))
             self._builder_layout.addWidget(label)
             self._builder_layout.addWidget(edit)
             self._field_edits[field] = edit
             self._active_values[field] = ""
+            self._resize_field_editor(edit)
+        self._builder_layout.addStretch(1)
         self._refresh()
 
     def _refresh(self) -> None:
         data = self.FRAMEWORK_DEFINITIONS[self._pick.currentText()]
         self._difficulty.setText(f"Difficulty: {data['difficulty']}")
         if self._mode.currentText() == "Guide":
-            self._builder_panel.hide()
+            self._builder_scroll.hide()
             self._guide.show()
             self._guide.setPlainText(
                 f"Framework: {self._pick.currentText()}\\nDifficulty: {data['difficulty']}\\n"
@@ -10386,9 +10399,18 @@ Guardrails: {Guardrails}''',
                 f"Example prompt:\\n{data['example']}"
             )
         else:
-            self._builder_panel.show()
+            self._builder_scroll.show()
             self._guide.hide()
         self._preview_builder_prompt()
+
+    def _resize_field_editor(self, editor: QTextEdit) -> None:
+        doc_height = int(editor.document().size().height()) + 16
+        target_height = max(self.FIELD_MIN_HEIGHT, min(self.FIELD_MAX_HEIGHT, doc_height))
+        editor.setFixedHeight(target_height)
+        if target_height >= self.FIELD_MAX_HEIGHT:
+            editor.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        else:
+            editor.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def _build_prompt(self) -> str:
         data = self.FRAMEWORK_DEFINITIONS[self._pick.currentText()]
