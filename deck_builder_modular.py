@@ -10159,7 +10159,9 @@ class FrameworksToolTab(QWidget):
             "example": '''Audience: New support hires
 Context: Onboarding for ticket triage
 Execution: Create a one-page SOP with examples for severity levels.''',
-            "assembly": "Audience: {Audience}\nContext: {Context}\nExecution: {Execution}",
+            "assembly": '''Audience: {Audience}
+Context: {Context}
+Execution: {Execution}''',
         },
         "APE": {
             "difficulty": "Beginner",
@@ -10171,7 +10173,9 @@ Execution: Create a one-page SOP with examples for severity levels.''',
             "example": '''Action: Summarize this meeting transcript.
 Purpose: Send a concise update.
 Expectation: Bullet list with owners and deadlines.''',
-            "assembly": "Action: {Action}\nPurpose: {Purpose}\nExpectation: {Expectation}",
+            "assembly": '''Action: {Action}
+Purpose: {Purpose}
+Expectation: {Expectation}''',
         },
         "CHAIN": {
             "difficulty": "Advanced",
@@ -10185,7 +10189,11 @@ Hypothesis: Churn in mid-market accounts is primary driver.
 Analysis: Compare churn cohorts by segment and tenure.
 Inference: Identify highest-impact churn vectors.
 Narration: Present findings and 90-day recovery plan.''',
-            "assembly": "Context: {Context}\nHypothesis: {Hypothesis}\nAnalysis: {Analysis}\nInference: {Inference}\nNarration: {Narration}",
+            "assembly": '''Context: {Context}
+Hypothesis: {Hypothesis}
+Analysis: {Analysis}
+Inference: {Inference}
+Narration: {Narration}''',
         },
         "CO-STAR": {
             "difficulty": "Intermediate",
@@ -10200,7 +10208,12 @@ Style: Clear and persuasive.
 Tone: Confident and practical.
 Audience: Operations leaders at SMBs.
 Response: 3-paragraph launch email plus 5 subject line options.''',
-            "assembly": "Context: {Context}\nObjective: {Objective}\nStyle: {Style}\nTone: {Tone}\nAudience: {Audience}\nResponse: {Response}",
+            "assembly": '''Context: {Context}
+Objective: {Objective}
+Style: {Style}
+Tone: {Tone}
+Audience: {Audience}
+Response: {Response}''',
         },
         "CRAFT": {
             "difficulty": "Intermediate",
@@ -10214,7 +10227,11 @@ Role: Senior finance partner.
 Action: Analyze budget variance trends.
 Result: Executive summary with top 3 risks and mitigations.
 Tone: Professional and concise.''',
-            "assembly": "Context: {Context}\nRole: {Role}\nAction: {Action}\nResult: {Result}\nTone: {Tone}",
+            "assembly": '''Context: {Context}
+Role: {Role}
+Action: {Action}
+Result: {Result}
+Tone: {Tone}''',
         },
         "CRISPE": {
             "difficulty": "Intermediate",
@@ -10228,7 +10245,11 @@ Role: UX researcher.
 Instruction: Identify top usability themes.
 Steps: Cluster comments, quantify frequency, map to user journey.
 Parameters: Return a table plus 5 prioritized recommendations.''',
-            "assembly": "Context: {Context}\nRole: {Role}\nInstruction: {Instruction}\nSteps: {Steps}\nParameters: {Parameters}",
+            "assembly": '''Context: {Context}
+Role: {Role}
+Instruction: {Instruction}
+Steps: {Steps}
+Parameters: {Parameters}''',
         },
         "RACE": {
             "difficulty": "Intermediate",
@@ -10241,7 +10262,10 @@ Parameters: Return a table plus 5 prioritized recommendations.''',
 Action: Evaluate this roadmap.
 Context: Team of 4 engineers and one quarter timeline.
 Expectations: Prioritized recommendations with rationale.''',
-            "assembly": "Role: {Role}\nAction: {Action}\nContext: {Context}\nExpectations: {Expectations}",
+            "assembly": '''Role: {Role}
+Action: {Action}
+Context: {Context}
+Expectations: {Expectations}''',
         },
         "ROSE": {
             "difficulty": "Beginner",
@@ -10254,7 +10278,10 @@ Expectations: Prioritized recommendations with rationale.''',
 Objective: Explain API rate limiting to new developers.
 Style: Friendly and practical.
 Example: Use a traffic-light analogy and include a short FAQ.''',
-            "assembly": "Role: {Role}\nObjective: {Objective}\nStyle: {Style}\nExample: {Example}",
+            "assembly": '''Role: {Role}
+Objective: {Objective}
+Style: {Style}
+Example: {Example}''',
         },
         "SMART": {
             "difficulty": "Intermediate",
@@ -10268,7 +10295,11 @@ Measurable: Raise completion from 62% to 80%.
 Achievable: Add guided checklist and reminder emails.
 Relevant: Supports activation and retention goals.
 Time-bound: Achieve by September 30.''',
-            "assembly": "Specific: {Specific}\nMeasurable: {Measurable}\nAchievable: {Achievable}\nRelevant: {Relevant}\nTime-bound: {Time-bound}",
+            "assembly": '''Specific: {Specific}
+Measurable: {Measurable}
+Achievable: {Achievable}
+Relevant: {Relevant}
+Time-bound: {Time-bound}''',
         },
         "TAG": {
             "difficulty": "Beginner",
@@ -10280,7 +10311,9 @@ Time-bound: Achieve by September 30.''',
             "example": '''Task: Draft a release note summary.
 Audience: Non-technical account managers.
 Guardrails: Max 150 words, no internal code names, include one customer benefit.''',
-            "assembly": "Task: {Task}\nAudience: {Audience}\nGuardrails: {Guardrails}",
+            "assembly": '''Task: {Task}
+Audience: {Audience}
+Guardrails: {Guardrails}''',
         },
     }
 
