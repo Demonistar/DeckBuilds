@@ -459,6 +459,29 @@ class GoogleCalendarRuntime:
         self._emit("calendar.item.created", asdict(rec))
         return rec
 
+    def create_calendar_immediate(self, title: str, description: str, start_at: str, end_at: str, recurrence: str) -> CalendarRecord:
+        self.evaluate_auth_status()
+        if self.sync_state.get("mode") != "google_connected":
+            raise RuntimeError("Google Calendar is not connected. Authenticate first.")
+
+        rec = self._make_calendar_record(title, description, start_at, end_at, recurrence)
+        result = self._push_google_item("calendar", "create", asdict(rec))
+        if not result.get("ok"):
+            raise RuntimeError(str(result.get("reason") or "Google Calendar create failed."))
+
+        rec.google_event_id = str(result.get("external_id") or "")
+        rec.sync_status = "synced"
+        rec.last_synced_at = _now_iso()
+        rec.source = "local"
+        rec.origin = "local_user"
+        rec.metadata = dict(rec.metadata or {})
+        rec.metadata["source_calendar_id"] = "primary"
+        rec.metadata["source_calendar_name"] = "Primary"
+        self.calendar_records[rec.id] = rec
+        self._save_state()
+        self._emit("calendar.item.created", asdict(rec))
+        return rec
+
     def update_calendar(self, rec_id: str, title: str, description: str, start_at: str, end_at: str, recurrence: str) -> Optional[CalendarRecord]:
         rec = self.calendar_records.get(rec_id)
         if not rec:
@@ -476,12 +499,81 @@ class GoogleCalendarRuntime:
         self._emit("calendar.item.updated", asdict(rec))
         return rec
 
+    def update_calendar_immediate(
+        self, rec_id: str, title: str, description: str, start_at: str, end_at: str, recurrence: str
+    ) -> Optional[CalendarRecord]:
+        rec = self.calendar_records.get(rec_id)
+        if not rec:
+            return None
+
+        self.evaluate_auth_status()
+        if self.sync_state.get("mode") != "google_connected":
+            raise RuntimeError("Google Calendar is not connected. Authenticate first.")
+
+        proposed = asdict(rec)
+        proposed.update(
+            {
+                "title": title,
+                "description": description,
+                "start_at": start_at,
+                "end_at": end_at,
+                "recurrence": recurrence,
+                "status": "active",
+            }
+        )
+        op = "update" if rec.google_event_id else "create"
+        result = self._push_google_item("calendar", op, proposed)
+        if not result.get("ok"):
+            raise RuntimeError(str(result.get("reason") or "Google Calendar update failed."))
+
+        rec.title = title
+        rec.description = description
+        rec.start_at = start_at
+        rec.end_at = end_at
+        rec.recurrence = recurrence
+        if not rec.google_event_id:
+            rec.google_event_id = str(result.get("external_id") or "")
+        rec.sync_status = "synced"
+        rec.last_synced_at = _now_iso()
+        rec.source = "local"
+        rec.origin = "local_edit"
+        rec.metadata = dict(rec.metadata or {})
+        rec.metadata["source_calendar_id"] = "primary"
+        rec.metadata["source_calendar_name"] = "Primary"
+        rec.fingerprint = _fingerprint(asdict(rec), ["title", "description", "start_at", "end_at", "recurrence", "status"])
+        self._save_state()
+        self._emit("calendar.item.updated", asdict(rec))
+        return rec
+
     def cancel_calendar(self, rec_id: str) -> Optional[CalendarRecord]:
         rec = self.calendar_records.get(rec_id)
         if not rec:
             return None
         rec.status = "cancelled"
         rec.sync_status = "pending_delete" if rec.google_event_id else "local_cancelled"
+        rec.source = "local"
+        rec.origin = "local_delete"
+        rec.fingerprint = _fingerprint(asdict(rec), ["title", "description", "start_at", "end_at", "recurrence", "status"])
+        self._save_state()
+        self._emit("calendar.item.deleted", asdict(rec))
+        return rec
+
+    def cancel_calendar_immediate(self, rec_id: str) -> Optional[CalendarRecord]:
+        rec = self.calendar_records.get(rec_id)
+        if not rec:
+            return None
+
+        self.evaluate_auth_status()
+        if rec.google_event_id:
+            if self.sync_state.get("mode") != "google_connected":
+                raise RuntimeError("Google Calendar is not connected. Authenticate first.")
+            result = self._push_google_item("calendar", "delete", asdict(rec))
+            if not result.get("ok"):
+                raise RuntimeError(str(result.get("reason") or "Google Calendar delete failed."))
+
+        rec.status = "cancelled"
+        rec.sync_status = "synced"
+        rec.last_synced_at = _now_iso()
         rec.source = "local"
         rec.origin = "local_delete"
         rec.fingerprint = _fingerprint(asdict(rec), ["title", "description", "start_at", "end_at", "recurrence", "status"])
@@ -1429,17 +1521,32 @@ class GoogleCalendarWorkspaceModule:
         self.task_recur.setCurrentText(self._recurrence_label(rec.recurrence))
         self.task_status.setCurrentText(rec.status if rec.status in {"open", "completed"} else "open")
 
+    @staticmethod
+    def _ui_datetime_to_utc_iso(value: datetime) -> str:
+        dt = value
+        if dt.tzinfo is None:
+            local_tz = datetime.now().astimezone().tzinfo
+            dt = dt.replace(tzinfo=local_tz or UTC)
+        return dt.astimezone(UTC).isoformat()
+
     def _add_calendar(self) -> None:
         if not hasattr(self, "cal_title") or not self.cal_title.text().strip():
             QMessageBox.warning(self.panel_widget or QWidget(), "Missing title", "Please provide an event title.")
             return
-        rec = self.runtime.create_calendar(
-            title=self.cal_title.text().strip(),
-            description=self.cal_desc.toPlainText().strip(),
-            start_at=self.cal_start.dateTime().toPython().replace(tzinfo=UTC).isoformat(),
-            end_at=self.cal_end.dateTime().toPython().replace(tzinfo=UTC).isoformat(),
-            recurrence=self._recurrence_value(self.cal_recur.currentText()),
-        )
+        try:
+            rec = self.runtime.create_calendar_immediate(
+                title=self.cal_title.text().strip(),
+                description=self.cal_desc.toPlainText().strip(),
+                start_at=self._ui_datetime_to_utc_iso(self.cal_start.dateTime().toPython()),
+                end_at=self._ui_datetime_to_utc_iso(self.cal_end.dateTime().toPython()),
+                recurrence=self._recurrence_value(self.cal_recur.currentText()),
+            )
+        except Exception as ex:
+            self._log(f"GoogleCalendar New Event failed: {ex}")
+            QMessageBox.critical(self.panel_widget or QWidget(), "Create Event Failed", str(ex))
+            self._set_action_status(f"Create event failed: {ex}", log=True)
+            self.refresh_all()
+            return
         self.selected_calendar_id = rec.id
         self._set_action_status(f"Created event '{rec.title}'.", log=True)
         self.refresh_all()
@@ -1448,14 +1555,21 @@ class GoogleCalendarWorkspaceModule:
         rec_id = self.selected_calendar_id or self._selected_id(getattr(self, "calendar_day_list", None))
         if not rec_id:
             return
-        self.runtime.update_calendar(
-            rec_id=rec_id,
-            title=self.cal_title.text().strip() or "Untitled Event",
-            description=self.cal_desc.toPlainText().strip(),
-            start_at=self.cal_start.dateTime().toPython().replace(tzinfo=UTC).isoformat(),
-            end_at=self.cal_end.dateTime().toPython().replace(tzinfo=UTC).isoformat(),
-            recurrence=self._recurrence_value(self.cal_recur.currentText()),
-        )
+        try:
+            self.runtime.update_calendar_immediate(
+                rec_id=rec_id,
+                title=self.cal_title.text().strip() or "Untitled Event",
+                description=self.cal_desc.toPlainText().strip(),
+                start_at=self._ui_datetime_to_utc_iso(self.cal_start.dateTime().toPython()),
+                end_at=self._ui_datetime_to_utc_iso(self.cal_end.dateTime().toPython()),
+                recurrence=self._recurrence_value(self.cal_recur.currentText()),
+            )
+        except Exception as ex:
+            self._log(f"GoogleCalendar Update Selected failed: {ex}")
+            QMessageBox.critical(self.panel_widget or QWidget(), "Update Event Failed", str(ex))
+            self._set_action_status(f"Update selected event failed: {ex}", log=True)
+            self.refresh_all()
+            return
         self._set_action_status("Updated selected event.", log=True)
         self.refresh_all()
 
@@ -1463,7 +1577,14 @@ class GoogleCalendarWorkspaceModule:
         rec_id = self.selected_calendar_id or self._selected_id(getattr(self, "calendar_day_list", None))
         if not rec_id:
             return
-        self.runtime.cancel_calendar(rec_id)
+        try:
+            self.runtime.cancel_calendar_immediate(rec_id)
+        except Exception as ex:
+            self._log(f"GoogleCalendar Delete Selected failed: {ex}")
+            QMessageBox.critical(self.panel_widget or QWidget(), "Delete Event Failed", str(ex))
+            self._set_action_status(f"Delete selected event failed: {ex}", log=True)
+            self.refresh_all()
+            return
         self.selected_calendar_id = ""
         self._set_action_status("Deleted selected event.", log=True)
         self.refresh_all()
