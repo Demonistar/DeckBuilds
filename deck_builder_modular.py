@@ -9824,6 +9824,7 @@ import zlib
 
     DECK_API_VERSION = "1.0"
     ALLOWED_HOOKS = {"on_startup", "on_shutdown", "on_message", "on_tick", "on_install", "on_uninstall", "on_event"}
+    MAX_WORKSPACE_TABS = 5
 
     def __init__(self, deck_window: "EchoDeck"):
         self._deck = deck_window
@@ -9834,6 +9835,8 @@ import zlib
         self._event_listeners: list[dict] = []
         self._event_queue: list[dict] = []
         self._event_dispatch_scheduled = False
+        self._active_workspace_owner_key: str = ""
+        self._active_workspace_claim: dict = {}
 
     def _log(self, msg: str) -> None:
         try:
@@ -9971,6 +9974,8 @@ import zlib
         self._installed = {}
         self._hooks = {k: [] for k in self.ALLOWED_HOOKS}
         self._event_listeners = []
+        self._active_workspace_owner_key = ""
+        self._active_workspace_claim = {}
         for key in CFG.get("modules", {}).get("installed", []):
             item = available.get(key)
             if not item:
@@ -10017,6 +10022,94 @@ import zlib
         self._resolve_shared_resource_owners()
         return self._installed
 
+    def _module_workspace_contract(self, module_key: str) -> dict:
+        key = str(module_key or "").strip().lower()
+        contract = (self._installed.get(key) or {}).get("contract") or {}
+        workspace = contract.get("workspace") if isinstance(contract.get("workspace"), dict) else {}
+        if workspace:
+            return workspace
+        if bool(contract.get("supports_workspaces")):
+            tabs = list(contract.get("workspace_tabs") or contract.get("workspaces") or [])
+            ribbon_fn = contract.get("build_ribbon") or contract.get("get_ribbon") or contract.get("ribbon_widget")
+            return {
+                "tabs": tabs,
+                "build_ribbon": ribbon_fn if callable(ribbon_fn) else None,
+                "on_activate": contract.get("on_workspace_activate"),
+                "on_deactivate": contract.get("on_workspace_deactivate"),
+                "on_release": contract.get("on_workspace_release"),
+            }
+        return {}
+
+    def claim_workspaces_for_active_module(self, module_key: str) -> dict:
+        key = str(module_key or "").strip().lower()
+        if not key:
+            self.release_workspaces()
+            return {}
+        workspace_contract = self._module_workspace_contract(key)
+        tabs_raw = list(workspace_contract.get("tabs") or [])
+        claim_tabs = []
+        for idx, row in enumerate(tabs_raw[:self.MAX_WORKSPACE_TABS]):
+            if not isinstance(row, dict):
+                continue
+            claim_tabs.append({
+                "slot": idx + 1,
+                "label": str(row.get("label") or row.get("title") or f"Workspace {idx + 1}"),
+                "build": row.get("build") or row.get("factory") or row.get("get_content"),
+                "id": str(row.get("id") or f"{key}_workspace_{idx + 1}"),
+                "meta": dict(row.get("meta") or {}),
+            })
+        if not claim_tabs:
+            self.release_workspaces()
+            return {}
+        if self._active_workspace_owner_key and self._active_workspace_owner_key != key:
+            self.release_workspaces()
+        self._active_workspace_owner_key = key
+        self._active_workspace_claim = {
+            "module_key": key,
+            "tabs": claim_tabs,
+            "build_ribbon": workspace_contract.get("build_ribbon"),
+            "hooks": {
+                "on_activate": workspace_contract.get("on_activate"),
+                "on_deactivate": workspace_contract.get("on_deactivate"),
+                "on_release": workspace_contract.get("on_release"),
+            },
+        }
+        hook = self._active_workspace_claim["hooks"].get("on_activate")
+        if callable(hook):
+            try:
+                hook(dict(self._active_workspace_claim))
+            except Exception as ex:
+                self._log(f"[MODULE][WARN] workspace activate hook failed for {key}: {ex}")
+        return dict(self._active_workspace_claim)
+
+    def release_workspaces(self) -> None:
+        if not self._active_workspace_owner_key:
+            self._active_workspace_claim = {}
+            return
+        key = self._active_workspace_owner_key
+        hook = ((self._active_workspace_claim.get("hooks") or {}).get("on_release"))
+        if callable(hook):
+            try:
+                hook(dict(self._active_workspace_claim))
+            except Exception as ex:
+                self._log(f"[MODULE][WARN] workspace release hook failed for {key}: {ex}")
+        self._active_workspace_owner_key = ""
+        self._active_workspace_claim = {}
+
+    def deactivate_workspace_owner(self, module_key: str) -> None:
+        key = str(module_key or "").strip().lower()
+        if not key or key != self._active_workspace_owner_key:
+            return
+        hook = ((self._active_workspace_claim.get("hooks") or {}).get("on_deactivate"))
+        if callable(hook):
+            try:
+                hook(dict(self._active_workspace_claim))
+            except Exception as ex:
+                self._log(f"[MODULE][WARN] workspace deactivate hook failed for {key}: {ex}")
+
+    def active_workspace_claim(self) -> dict:
+        return dict(self._active_workspace_claim) if self._active_workspace_owner_key else {}
+
     def _build_deck_api(self) -> dict:
         return {
             "deck_api_version": self.DECK_API_VERSION,
@@ -10026,8 +10119,11 @@ import zlib
             "cfg_path": lambda name: cfg_path(name),
             "create_label": lambda text: QLabel(str(text)),
             "request_ai_interpretation": self.request_ai_interpretation,
+            "send_to_session": self.request_ai_interpretation,
             "restart": self._deck._restart_for_module_change,
             "broadcast": self.broadcast,
+            "claim_workspaces": self.claim_workspaces_for_active_module,
+            "release_workspaces": self.release_workspaces,
             "listen": lambda event_pattern, callback, domains=None, module_key="": self.listen(
                 event_pattern,
                 callback,
@@ -10057,6 +10153,15 @@ import zlib
             f"module={payload['source_module_key']} payload={payload}"
         )
         return False
+
+    def handoff_workspace_context(self, source_module_key: str, payload: dict, return_to_session: bool = True) -> bool:
+        ok = self.request_ai_interpretation(source_module_key, payload if isinstance(payload, dict) else {})
+        if ok and return_to_session and hasattr(self._deck, "_focus_session_tab"):
+            try:
+                self._deck._focus_session_tab()
+            except Exception:
+                pass
+        return ok
 
     def _resolve_shared_resource_owners(self) -> None:
         owners = {}
@@ -10095,6 +10200,7 @@ import zlib
                     continue
                 tab_defs.append({
                     "id": tab_id,
+                    "module_key": key,
                     "title": tab_name,
                     "widget": widget,
                     "category": home_category,
@@ -10692,18 +10798,206 @@ class EchoDeck(QMainWindow):
 """,
         """    def _load_runtime_modules(self) -> None:
         self._runtime_module_contracts = self._deck_module_manager.load_installed()
+        self._runtime_tab_module_owners: dict[str, str] = {}
+        self._workspace_host_initialized = False
         if hasattr(self, "_module_import_tab") and self._module_import_tab is not None:
             self._module_import_tab.refresh_lists()
 
     def _mount_runtime_module_tabs(self) -> None:
         runtime_tabs = self._deck_module_manager.build_runtime_tab_defs()
         if not runtime_tabs:
+            self._init_workspace_host()
             return
         ids = {str(t.get("id")) for t in self._spell_tab_defs}
         for tab in runtime_tabs:
-            if str(tab.get("id")) in ids:
+            tab_id = str(tab.get("id"))
+            if tab_id in ids:
                 continue
             self._spell_tab_defs.append(tab)
+            owner = str(tab.get("module_key") or "").strip().lower()
+            if owner:
+                self._runtime_tab_module_owners[tab_id] = owner
+        self._init_workspace_host()
+        if hasattr(self, "_spell_tabs") and self._spell_tabs is not None:
+            try:
+                self._spell_tabs.currentChanged.connect(self._sync_workspace_owner_from_active_tab)
+            except Exception:
+                pass
+
+    def _init_workspace_host(self) -> None:
+        if self._workspace_host_initialized:
+            return
+        self._workspace_host_initialized = True
+        self._workspace_tab_bank: list[dict] = []
+        self._workspace_owner_key = ""
+        self._active_workspace_claim = {}
+        self._ribbon_mount = None
+        self._session_tab_index = None
+        self._self_tab_index = None
+        self._dialogue_tabs = self._find_dialogue_tab_widget()
+        if self._dialogue_tabs is not None:
+            self._ensure_workspace_tabs(self._dialogue_tabs)
+            self._capture_base_tab_indexes(self._dialogue_tabs)
+
+    def _find_dialogue_tab_widget(self):
+        candidates = self.findChildren(QTabWidget)
+        for tabs in candidates:
+            titles = [tabs.tabText(i).strip().lower() for i in range(tabs.count())]
+            if "session" in titles and "self" in titles:
+                return tabs
+        return None
+
+    def _capture_base_tab_indexes(self, tabs) -> None:
+        self._session_tab_index = None
+        self._self_tab_index = None
+        for idx in range(tabs.count()):
+            name = tabs.tabText(idx).strip().lower()
+            if name == "session":
+                self._session_tab_index = idx
+            elif name == "self":
+                self._self_tab_index = idx
+
+    def _ensure_workspace_tabs(self, tabs) -> None:
+        existing = {str(row.get("slot")): row for row in self._workspace_tab_bank}
+        for slot in range(1, 6):
+            k = str(slot)
+            if k in existing:
+                continue
+            page = QWidget()
+            lay = QVBoxLayout(page)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(0)
+            row = {"slot": slot, "widget": page, "label": f"Workspace {slot}", "mounted": None}
+            self._workspace_tab_bank.append(row)
+        self._workspace_tab_bank.sort(key=lambda x: int(x.get("slot") or 0))
+
+    def _clear_workspace_mounts(self) -> None:
+        for row in self._workspace_tab_bank:
+            page = row.get("widget")
+            if page is None:
+                continue
+            lay = page.layout()
+            if lay is None:
+                continue
+            while lay.count():
+                item = lay.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.setParent(None)
+            row["mounted"] = None
+
+    def _workspace_tabs_hidden(self) -> None:
+        tabs = self._dialogue_tabs
+        if tabs is None:
+            return
+        for row in sorted(self._workspace_tab_bank, key=lambda r: int(r.get("slot") or 0), reverse=True):
+            page = row.get("widget")
+            idx = tabs.indexOf(page)
+            if idx >= 0:
+                tabs.removeTab(idx)
+
+    def _focus_session_tab(self) -> None:
+        tabs = self._dialogue_tabs
+        if tabs is None:
+            return
+        for idx in range(tabs.count()):
+            if tabs.tabText(idx).strip().lower() == "session":
+                tabs.setCurrentIndex(idx)
+                break
+
+    def _set_workspace_ribbon(self, module_key: str, claim: dict) -> None:
+        # Host-side ribbon mount point is optional and lazily discovered.
+        if self._ribbon_mount is None:
+            self._ribbon_mount = self.findChild(QWidget, "moduleRibbonMount")
+        mount = self._ribbon_mount
+        if mount is None:
+            return
+        if mount.layout() is None:
+            mount.setLayout(QHBoxLayout())
+            mount.layout().setContentsMargins(0, 0, 0, 0)
+            mount.layout().setSpacing(4)
+        while mount.layout().count():
+            item = mount.layout().takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+        ribbon_builder = claim.get("build_ribbon")
+        ribbon_widget = None
+        if callable(ribbon_builder):
+            try:
+                ribbon_widget = ribbon_builder()
+            except Exception as ex:
+                self._append_chat("SYSTEM", f"[MODULE][WARN] ribbon build failed for {module_key}: {ex}")
+        if isinstance(ribbon_widget, QWidget):
+            mount.layout().addWidget(ribbon_widget)
+            mount.setVisible(True)
+        else:
+            mount.setVisible(False)
+
+    def _apply_workspace_claim(self, module_key: str, claim: dict) -> None:
+        self._workspace_owner_key = module_key
+        self._active_workspace_claim = dict(claim or {})
+        self._workspace_tabs_hidden()
+        self._clear_workspace_mounts()
+        tabs = self._dialogue_tabs
+        if tabs is None:
+            return
+        for row in sorted(self._workspace_tab_bank, key=lambda r: int(r.get("slot") or 0)):
+            page = row.get("widget")
+            if tabs.indexOf(page) >= 0:
+                tabs.removeTab(tabs.indexOf(page))
+        for tab in claim.get("tabs") or []:
+            slot = int(tab.get("slot") or 0)
+            if slot < 1 or slot > 5:
+                continue
+            row = self._workspace_tab_bank[slot - 1]
+            label = str(tab.get("label") or f"Workspace {slot}")
+            row["label"] = label
+            page = row["widget"]
+            builder = tab.get("build")
+            built = None
+            if callable(builder):
+                try:
+                    built = builder()
+                except Exception as ex:
+                    self._append_chat("SYSTEM", f"[MODULE][WARN] workspace build failed ({module_key}, slot={slot}): {ex}")
+            if isinstance(built, QWidget):
+                page.layout().addWidget(built)
+                row["mounted"] = built
+            tabs.addTab(page, label)
+        self._set_workspace_ribbon(module_key, claim)
+
+    def _clear_active_module_workspaces(self) -> None:
+        if self._workspace_owner_key:
+            self._deck_module_manager.deactivate_workspace_owner(self._workspace_owner_key)
+        self._workspace_owner_key = ""
+        self._active_workspace_claim = {}
+        self._workspace_tabs_hidden()
+        self._clear_workspace_mounts()
+        self._set_workspace_ribbon("", {})
+
+    def _sync_workspace_owner_from_active_tab(self, _idx: int) -> None:
+        if not hasattr(self, "_spell_tabs") or self._spell_tabs is None:
+            return
+        idx = self._spell_tabs.currentIndex()
+        tab_id = str(self._spell_tabs.tabBar().tabData(idx) or "").strip().lower()
+        owner = str(self._runtime_tab_module_owners.get(tab_id) or "").strip().lower()
+        if not owner:
+            self._clear_active_module_workspaces()
+            self._deck_module_manager.release_workspaces()
+            return
+        claim = self._deck_module_manager.claim_workspaces_for_active_module(owner)
+        if claim:
+            self._apply_workspace_claim(owner, claim)
+        else:
+            self._clear_active_module_workspaces()
+
+    def module_send_to_session(self, source_module_key: str, payload: dict, return_focus_to_session: bool = True) -> bool:
+        return self._deck_module_manager.handoff_workspace_context(
+            source_module_key,
+            payload if isinstance(payload, dict) else {},
+            return_to_session=bool(return_focus_to_session),
+        )
 
     def listen(self, event_pattern: str, callback, domains=None, listener_module: str = "") -> bool:
         return self._deck_module_manager.listen(
