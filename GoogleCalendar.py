@@ -923,11 +923,20 @@ class GoogleCalendarRuntime:
             return {"ok": False, "reason": str(ex), "external_id": google_id}
 
     def _reconcile_google_calendar_item(self, item: dict[str, Any]) -> None:
+        def _is_cancelled_or_deleted(payload: dict[str, Any]) -> bool:
+            status = str(payload.get("status") or "").strip().lower()
+            if status in {"cancelled", "deleted"}:
+                return True
+            if bool(payload.get("deleted")):
+                return True
+            return False
+
         google_id = str(item.get("id") or "")
         if not google_id:
             return
         source_calendar_id = str(item.get("source_calendar_id") or "")
         source_calendar_name = str(item.get("source_calendar_name") or "")
+        is_cancelled = _is_cancelled_or_deleted(item)
 
         mapped = next(
             (
@@ -941,14 +950,35 @@ class GoogleCalendarRuntime:
             ),
             None,
         )
+        if mapped is None:
+            mapped = next((r for r in self.calendar_records.values() if r.google_event_id == google_id), None)
+
         if mapped:
             self._log(f"GoogleCalendar reconcile mapping reuse for google_event_id={google_id}.")
+            if is_cancelled:
+                mapped.status = "cancelled"
+                mapped.source = "google"
+                mapped.origin = "google_sync"
+                mapped.sync_status = "synced"
+                mapped.last_synced_at = _now_iso()
+                mapped.metadata = dict(mapped.metadata or {})
+                if source_calendar_id:
+                    mapped.metadata["source_calendar_id"] = source_calendar_id
+                if source_calendar_name:
+                    mapped.metadata["source_calendar_name"] = source_calendar_name
+                mapped.fingerprint = _fingerprint(asdict(mapped), ["title", "description", "start_at", "end_at", "recurrence", "status"])
+                self._emit("calendar.item.deleted", asdict(mapped))
+                # Purge cancelled/deleted inbound mappings so they are not counted as active reminders/events.
+                self.calendar_records.pop(mapped.id, None)
+                self._save_state()
+                return
+
             mapped.title = str(item.get("title") or mapped.title)
             mapped.description = str(item.get("description") or mapped.description)
             mapped.start_at = str(item.get("start_at") or mapped.start_at)
             mapped.end_at = str(item.get("end_at") or mapped.end_at)
             mapped.recurrence = str(item.get("recurrence") or mapped.recurrence)
-            mapped.status = "cancelled" if item.get("status") in {"cancelled", "deleted"} else str(item.get("status") or "active")
+            mapped.status = str(item.get("status") or "active")
             mapped.source = "google"
             mapped.origin = "google_sync"
             mapped.sync_status = "synced"
@@ -960,6 +990,15 @@ class GoogleCalendarRuntime:
                 mapped.metadata["source_calendar_name"] = source_calendar_name
             mapped.fingerprint = _fingerprint(asdict(mapped), ["title", "description", "start_at", "end_at", "recurrence", "status"])
             self._emit("calendar.item.updated", asdict(mapped))
+            self._save_state()
+            return
+
+        if is_cancelled:
+            self._log(
+                f"GoogleCalendar reconcile inbound cancellation for google_event_id={google_id} "
+                "(no local mapping found; no local create)."
+            )
+            self._save_state()
             return
 
         # New inbound from Google: create local record with mapping.
@@ -972,7 +1011,7 @@ class GoogleCalendarRuntime:
             recurrence=str(item.get("recurrence") or "none"),
         )
         rec.google_event_id = google_id
-        rec.status = "cancelled" if item.get("status") in {"cancelled", "deleted"} else str(item.get("status") or "active")
+        rec.status = str(item.get("status") or "active")
         rec.source = "google"
         rec.origin = "google_sync"
         rec.sync_status = "synced"
@@ -984,6 +1023,7 @@ class GoogleCalendarRuntime:
             rec.metadata["source_calendar_name"] = source_calendar_name
         self.calendar_records[rec.id] = rec
         self._emit("calendar.item.created", asdict(rec))
+        self._save_state()
 
     def _reconcile_google_task_item(self, item: dict[str, Any]) -> None:
         google_id = str(item.get("id") or "")
