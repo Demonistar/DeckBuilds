@@ -704,7 +704,12 @@ class GoogleCalendarWorkspaceModule:
     def __init__(self, runtime: GoogleCalendarRuntime, deck_api: dict[str, Any]):
         self.runtime = runtime
         self._deck_api = deck_api
+        self._log: Callable[[str], None] = deck_api.get("log") if callable(deck_api.get("log")) else (lambda _msg: None)
+        self._claim_workspaces = deck_api.get("claim_workspaces") if callable(deck_api.get("claim_workspaces")) else None
         self._request_ai = deck_api.get("request_ai_interpretation") if callable(deck_api.get("request_ai_interpretation")) else None
+        self._send_to_session = deck_api.get("send_to_session") if callable(deck_api.get("send_to_session")) else None
+        self._module_send_to_session = deck_api.get("module_send_to_session") if callable(deck_api.get("module_send_to_session")) else None
+        self._handoff_workspace_context = deck_api.get("handoff_workspace_context") if callable(deck_api.get("handoff_workspace_context")) else None
         self._module_key = "google_calendar"
 
         self.active_view = "Month"
@@ -716,6 +721,8 @@ class GoogleCalendarWorkspaceModule:
         self.calendar_workspace_widget: Optional[QWidget] = None
         self.tasks_workspace_widget: Optional[QWidget] = None
         self.ribbon_widget: Optional[QWidget] = None
+        self.workspace_claim_status = "Workspace claim pending."
+        self.last_action_status = "Ready."
 
     # ---- Builders ---------------------------------------------------------
     def build_module_panel(self) -> QWidget:
@@ -771,6 +778,11 @@ class GoogleCalendarWorkspaceModule:
         sync_layout.addLayout(sync_btn_row)
         root.addWidget(sync_box)
 
+        self.action_status_label = QLabel(panel)
+        self.action_status_label.setWordWrap(True)
+        self.action_status_label.setText(self.last_action_status)
+        root.addWidget(self.action_status_label)
+
         editor_tabs = QTabWidget(panel)
         editor_tabs.addTab(self._build_panel_event_editor(editor_tabs), "Event Controls")
         editor_tabs.addTab(self._build_panel_task_editor(editor_tabs), "Task Controls")
@@ -809,11 +821,13 @@ class GoogleCalendarWorkspaceModule:
         self.cal_start = QDateTimeEdit(form_box)
         self.cal_start.setCalendarPopup(True)
         self.cal_start.setDateTime(datetime.now())
+        self.cal_start.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.cal_end = QDateTimeEdit(form_box)
         self.cal_end.setCalendarPopup(True)
         self.cal_end.setDateTime(datetime.now() + timedelta(hours=1))
-        self.cal_recur = QLineEdit(form_box)
-        self.cal_recur.setPlaceholderText("none / daily / weekly / RRULE...")
+        self.cal_end.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.cal_recur = QComboBox(form_box)
+        self.cal_recur.addItems(["None", "Daily", "Weekly", "Monthly", "Yearly"])
         form.addRow("Title", self.cal_title)
         form.addRow("Description", self.cal_desc)
         form.addRow("Start", self.cal_start)
@@ -849,9 +863,11 @@ class GoogleCalendarWorkspaceModule:
         self.task_due = QDateTimeEdit(form_box)
         self.task_due.setCalendarPopup(True)
         self.task_due.setDateTime(datetime.now() + timedelta(hours=2))
-        self.task_recur = QLineEdit(form_box)
-        self.task_status = QLineEdit(form_box)
-        self.task_status.setPlaceholderText("open / completed")
+        self.task_due.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.task_recur = QComboBox(form_box)
+        self.task_recur.addItems(["None", "Daily", "Weekly", "Monthly", "Yearly"])
+        self.task_status = QComboBox(form_box)
+        self.task_status.addItems(["open", "completed"])
         form.addRow("Title", self.task_title)
         form.addRow("Notes", self.task_notes)
         form.addRow("Due", self.task_due)
@@ -889,6 +905,9 @@ class GoogleCalendarWorkspaceModule:
         self.calendar_day_summary = QLabel(page)
         self.calendar_day_summary.setWordWrap(True)
         layout.addWidget(self.calendar_day_summary)
+        self.calendar_workspace_status = QLabel(page)
+        self.calendar_workspace_status.setWordWrap(True)
+        layout.addWidget(self.calendar_workspace_status)
 
         self.calendar_picker = QCalendarWidget(page)
         self.calendar_picker.selectionChanged.connect(self._on_calendar_date_changed)
@@ -926,6 +945,9 @@ class GoogleCalendarWorkspaceModule:
         self.task_workspace_status = QLabel(page)
         self.task_workspace_status.setWordWrap(True)
         layout.addWidget(self.task_workspace_status)
+        self.tasks_workspace_debug = QLabel(page)
+        self.tasks_workspace_debug.setWordWrap(True)
+        layout.addWidget(self.tasks_workspace_debug)
 
         self.task_list = QListWidget(page)
         self.task_list.itemSelectionChanged.connect(self._on_task_workspace_selection)
@@ -985,6 +1007,8 @@ class GoogleCalendarWorkspaceModule:
 
     # ---- Workspace lifecycle hooks ----------------------------------------
     def on_workspace_activate(self, _claim: dict[str, Any]) -> None:
+        self.workspace_claim_status = "Workspace claim active: Calendar (slot 1), Tasks (slot 2)."
+        self._set_action_status(self.workspace_claim_status, log=True)
         self.refresh_all()
 
     def on_workspace_deactivate(self, _claim: dict[str, Any]) -> None:
@@ -993,6 +1017,8 @@ class GoogleCalendarWorkspaceModule:
     def on_workspace_release(self, _claim: dict[str, Any]) -> None:
         self.selected_calendar_id = ""
         self.selected_task_id = ""
+        self.workspace_claim_status = "Workspace claim released."
+        self._set_action_status(self.workspace_claim_status, log=True)
 
     # ---- UI event handlers -------------------------------------------------
     def _selected_id(self, widget: Optional[QListWidget]) -> str:
@@ -1072,7 +1098,7 @@ class GoogleCalendarWorkspaceModule:
             self.cal_start.setDateTime(start.replace(tzinfo=None))
         if end:
             self.cal_end.setDateTime(end.replace(tzinfo=None))
-        self.cal_recur.setText(rec.recurrence)
+        self.cal_recur.setCurrentText(self._recurrence_label(rec.recurrence))
 
     def _populate_task_editor(self, rec: TaskRecord) -> None:
         if not hasattr(self, "task_title"):
@@ -1082,8 +1108,8 @@ class GoogleCalendarWorkspaceModule:
         due = _iso_to_dt(rec.due_at)
         if due:
             self.task_due.setDateTime(due.replace(tzinfo=None))
-        self.task_recur.setText(rec.recurrence)
-        self.task_status.setText(rec.status)
+        self.task_recur.setCurrentText(self._recurrence_label(rec.recurrence))
+        self.task_status.setCurrentText(rec.status if rec.status in {"open", "completed"} else "open")
 
     def _add_calendar(self) -> None:
         if not hasattr(self, "cal_title") or not self.cal_title.text().strip():
@@ -1094,9 +1120,10 @@ class GoogleCalendarWorkspaceModule:
             description=self.cal_desc.toPlainText().strip(),
             start_at=self.cal_start.dateTime().toPython().replace(tzinfo=UTC).isoformat(),
             end_at=self.cal_end.dateTime().toPython().replace(tzinfo=UTC).isoformat(),
-            recurrence=self.cal_recur.text().strip() or "none",
+            recurrence=self._recurrence_value(self.cal_recur.currentText()),
         )
         self.selected_calendar_id = rec.id
+        self._set_action_status(f"Created event '{rec.title}'.", log=True)
         self.refresh_all()
 
     def _update_calendar(self) -> None:
@@ -1109,8 +1136,9 @@ class GoogleCalendarWorkspaceModule:
             description=self.cal_desc.toPlainText().strip(),
             start_at=self.cal_start.dateTime().toPython().replace(tzinfo=UTC).isoformat(),
             end_at=self.cal_end.dateTime().toPython().replace(tzinfo=UTC).isoformat(),
-            recurrence=self.cal_recur.text().strip() or "none",
+            recurrence=self._recurrence_value(self.cal_recur.currentText()),
         )
+        self._set_action_status("Updated selected event.", log=True)
         self.refresh_all()
 
     def _cancel_calendar(self) -> None:
@@ -1119,6 +1147,7 @@ class GoogleCalendarWorkspaceModule:
             return
         self.runtime.cancel_calendar(rec_id)
         self.selected_calendar_id = ""
+        self._set_action_status("Deleted selected event.", log=True)
         self.refresh_all()
 
     def _add_task(self) -> None:
@@ -1129,9 +1158,10 @@ class GoogleCalendarWorkspaceModule:
             title=self.task_title.text().strip(),
             notes=self.task_notes.toPlainText().strip(),
             due_at=self.task_due.dateTime().toPython().replace(tzinfo=UTC).isoformat(),
-            recurrence=self.task_recur.text().strip() or "none",
+            recurrence=self._recurrence_value(self.task_recur.currentText()),
         )
         self.selected_task_id = rec.id
+        self._set_action_status(f"Created task '{rec.title}'.", log=True)
         self.refresh_all()
 
     def _update_task(self) -> None:
@@ -1143,9 +1173,10 @@ class GoogleCalendarWorkspaceModule:
             title=self.task_title.text().strip() or "Untitled Task",
             notes=self.task_notes.toPlainText().strip(),
             due_at=self.task_due.dateTime().toPython().replace(tzinfo=UTC).isoformat(),
-            recurrence=self.task_recur.text().strip() or "none",
-            status=(self.task_status.text().strip() or "open"),
+            recurrence=self._recurrence_value(self.task_recur.currentText()),
+            status=self.task_status.currentText(),
         )
+        self._set_action_status("Updated selected task.", log=True)
         self.refresh_all()
 
     def _complete_task(self) -> None:
@@ -1163,6 +1194,7 @@ class GoogleCalendarWorkspaceModule:
             recurrence=rec.recurrence,
             status="completed",
         )
+        self._set_action_status("Marked selected task complete.", log=True)
         self.refresh_all()
 
     def _delete_task(self) -> None:
@@ -1171,10 +1203,12 @@ class GoogleCalendarWorkspaceModule:
             return
         self.runtime.delete_task(rec_id)
         self.selected_task_id = ""
+        self._set_action_status("Deleted selected task.", log=True)
         self.refresh_all()
 
     def _run_sync(self) -> None:
         self.runtime.sync_once()
+        self._set_action_status("Run Sync Now completed.", log=True)
         self.refresh_all()
 
     def _authenticate_google(self) -> None:
@@ -1189,28 +1223,29 @@ class GoogleCalendarWorkspaceModule:
         ok, message = self.runtime.authenticate_google(selected_path)
         if ok:
             QMessageBox.information(self.panel_widget or QWidget(), "Google Authentication", message)
+            self._set_action_status("Google authentication succeeded.", log=True)
         else:
             QMessageBox.critical(self.panel_widget or QWidget(), "Google Authentication Failed", message)
+            self._set_action_status(f"Google authentication failed: {message}", log=True)
         self.refresh_sync()
 
     def _scan_reminders(self) -> None:
         reminders = self.runtime.due_reminders()
         QMessageBox.information(self.panel_widget or QWidget(), "Reminder Scan", f"Detected {len(reminders)} upcoming reminder(s).")
+        self._set_action_status(f"Reminder scan complete: {len(reminders)} upcoming.", log=True)
         self.refresh_sync()
 
     def _send_selected_to_ai(self) -> None:
         payload = self._build_selected_payload()
+        self._update_send_ai_enabled()
         if payload is None:
-            QMessageBox.information(self.panel_widget or QWidget(), "Send to AI", "Select an event or task first.")
+            self._set_action_status("Send to AI blocked: select an event or task first.", log=True)
             return
-        if not callable(self._request_ai):
-            QMessageBox.warning(self.panel_widget or QWidget(), "Send to AI", "AI handoff bridge is unavailable.")
-            return
-        ok = bool(self._request_ai(self._module_key, payload))
+        ok = self._send_payload_to_ai(payload)
         if ok:
-            QMessageBox.information(self.panel_widget or QWidget(), "Send to AI", "Selected item sent to AI workspace.")
-        else:
-            QMessageBox.warning(self.panel_widget or QWidget(), "Send to AI", "Failed to handoff selected context.")
+            self._set_action_status("Send to AI succeeded via host handoff.", log=True)
+            return
+        self._set_action_status("Send to AI failed: no host handoff path available.", log=True)
 
     def _build_selected_payload(self) -> Optional[dict[str, Any]]:
         rec = self.runtime.calendar_records.get(self.selected_calendar_id)
@@ -1245,6 +1280,48 @@ class GoogleCalendarWorkspaceModule:
                 "record_id": task.id,
             }
         return None
+
+    def _send_payload_to_ai(self, payload: dict[str, Any]) -> bool:
+        try:
+            if callable(self._module_send_to_session):
+                return bool(self._module_send_to_session(self._module_key, payload, True))
+            if callable(self._handoff_workspace_context):
+                return bool(self._handoff_workspace_context(self._module_key, payload, True))
+            if callable(self._send_to_session):
+                return bool(self._send_to_session(self._module_key, payload))
+            if callable(self._request_ai):
+                return bool(self._request_ai(self._module_key, payload))
+        except Exception as ex:
+            self._set_action_status(f"Send to AI failed with exception: {ex}", log=True)
+            return False
+        return False
+
+    def _set_action_status(self, text: str, log: bool = False) -> None:
+        self.last_action_status = text
+        if hasattr(self, "action_status_label"):
+            self.action_status_label.setText(text)
+        if log:
+            self._log(f"GoogleCalendar UI: {text}")
+
+    def _recurrence_label(self, recurrence_value: str) -> str:
+        normalized = str(recurrence_value or "none").strip().lower()
+        mapping = {
+            "none": "None",
+            "daily": "Daily",
+            "weekly": "Weekly",
+            "monthly": "Monthly",
+            "yearly": "Yearly",
+        }
+        return mapping.get(normalized, "None")
+
+    def _recurrence_value(self, recurrence_label: str) -> str:
+        return str(recurrence_label or "None").strip().lower() or "none"
+
+    def _update_send_ai_enabled(self) -> None:
+        if not hasattr(self, "send_ai_btn"):
+            return
+        selected = bool(self._build_selected_payload())
+        self.send_ai_btn.setEnabled(selected)
 
     # ---- Rendering helpers -------------------------------------------------
     def _calendar_row(self, rec: CalendarRecord) -> str:
@@ -1314,10 +1391,15 @@ class GoogleCalendarWorkspaceModule:
             f"Date: {selected_date.isoformat()} | View: {self.active_view} | "
             f"Events today: {day_count} | Total active events: {len(rows)}"
         )
+        self.calendar_workspace_status.setText(
+            f"{self.workspace_claim_status}\n"
+            f"Calendar fetch: loaded={len(rows)} records, selected_date={selected_date.isoformat()}."
+        )
         self.day_events_label.setText(f"Selected Day Events ({day_count})")
 
         rec = self.runtime.calendar_records.get(self.selected_calendar_id)
         self._update_calendar_details(rec)
+        self._update_send_ai_enabled()
 
     def refresh_tasks_workspace(self) -> None:
         if not hasattr(self, "task_list"):
@@ -1342,8 +1424,13 @@ class GoogleCalendarWorkspaceModule:
             f"Tasks: {len(rows)} total | {open_count} open | {synced_count} synced | "
             f"Mode: {self.runtime.sync_state.get('mode')}"
         )
+        self.tasks_workspace_debug.setText(
+            f"{self.workspace_claim_status}\n"
+            f"Tasks fetch: loaded={len(rows)} records; completed={len([r for r in rows if r.status == 'completed'])}."
+        )
         rec = self.runtime.task_records.get(self.selected_task_id)
         self._update_task_details(rec)
+        self._update_send_ai_enabled()
 
     def refresh_sync(self) -> None:
         if not hasattr(self, "sync_label"):
@@ -1359,6 +1446,11 @@ class GoogleCalendarWorkspaceModule:
             f"Credentials present: {auth.get('credentials_present')}\n"
             f"Last sync: {state.get('last_sync_at') or 'never'}\n"
             f"Last error: {state.get('last_error') or 'none'}"
+        )
+        self._set_action_status(
+            f"Status refreshed. Auth={state.get('auth_status')}, mode={state.get('mode')}, "
+            f"events={len(self.runtime.calendar_records)}, tasks={len(self.runtime.task_records)}.",
+            log=True,
         )
 
     def refresh_all(self) -> None:
@@ -1378,6 +1470,14 @@ def register(deck_api: dict) -> dict:
     def _on_startup() -> None:
         runtime.evaluate_auth_status()
         runtime._save_state()
+        if callable(ui._claim_workspaces):
+            try:
+                ui._claim_workspaces("google_calendar")
+                ui.workspace_claim_status = "Workspace claim requested on startup."
+                ui._log("GoogleCalendar workspace claim requested on startup.")
+            except Exception as ex:
+                ui.workspace_claim_status = f"Workspace claim request failed: {ex}"
+                ui._log(f"GoogleCalendar workspace claim request failed: {ex}")
 
     def _on_message(message: Any) -> None:
         if not isinstance(message, dict):
@@ -1432,6 +1532,15 @@ def register(deck_api: dict) -> dict:
             "on_deactivate": ui.on_workspace_deactivate,
             "on_release": ui.on_workspace_release,
         },
+        "supports_workspaces": True,
+        "workspace_tabs": [
+            {"id": "google_calendar_workspace_calendar", "label": "Calendar", "build": ui.build_calendar_workspace},
+            {"id": "google_calendar_workspace_tasks", "label": "Tasks", "build": ui.build_tasks_workspace},
+        ],
+        "build_ribbon": ui.build_ribbon,
+        "on_workspace_activate": ui.on_workspace_activate,
+        "on_workspace_deactivate": ui.on_workspace_deactivate,
+        "on_workspace_release": ui.on_workspace_release,
         "hooks": {
             "on_startup": _on_startup,
             "on_message": _on_message,
