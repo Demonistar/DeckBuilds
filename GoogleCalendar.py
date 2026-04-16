@@ -178,6 +178,7 @@ class GoogleCalendarRuntime:
         self.task_records: dict[str, TaskRecord] = {}
         self.sync_state: dict[str, Any] = {
             "calendar_sync_token": "",
+            "calendar_sync_tokens": {},
             "tasks_sync_token": "",
             "last_sync_at": "",
             "last_error": "",
@@ -186,6 +187,8 @@ class GoogleCalendarRuntime:
             "last_calendar_fetched_count": 0,
             "last_calendar_visible_count": 0,
             "last_calendar_sync_mode": "none",
+            "last_calendar_scanned_count": 0,
+            "last_calendar_included_ids": [],
         }
         self._storage_path = self._resolve_storage_path()
         self._google_storage_dir = self._resolve_google_storage_dir()
@@ -236,6 +239,10 @@ class GoogleCalendarRuntime:
         state = payload.get("sync_state", {})
         if isinstance(state, dict):
             self.sync_state.update(state)
+        if not isinstance(self.sync_state.get("calendar_sync_tokens"), dict):
+            self.sync_state["calendar_sync_tokens"] = {}
+        if not isinstance(self.sync_state.get("last_calendar_included_ids"), list):
+            self.sync_state["last_calendar_included_ids"] = []
 
     def _resolve_google_storage_dir(self) -> Optional[Path]:
         if not callable(self._cfg_path):
@@ -584,29 +591,72 @@ class GoogleCalendarRuntime:
         window_end = now + timedelta(days=365)
         return window_start <= start_at <= window_end
 
-    def _fetch_google_changes(self, kind: str, sync_token: str) -> tuple[list[dict[str, Any]], str]:
-        if kind != "calendar":
-            return [], sync_token
+    def _discover_sync_calendars(self, service: Any) -> list[dict[str, str]]:
+        calendar_api = service.calendarList()
+        page_token = ""
+        discovered: list[dict[str, str]] = []
+        while True:
+            params: dict[str, Any] = {"showHidden": False, "showDeleted": False, "minAccessRole": "reader"}
+            if page_token:
+                params["pageToken"] = page_token
+            response = calendar_api.list(**params).execute()
+            for raw in response.get("items", []):
+                calendar_id = str(raw.get("id") or "").strip()
+                if not calendar_id:
+                    continue
+                hidden = bool(raw.get("hidden", False))
+                selected = raw.get("selected")
+                summary = str(raw.get("summaryOverride") or raw.get("summary") or calendar_id)
+                if hidden:
+                    continue
+                if selected is None:
+                    include = True
+                else:
+                    include = bool(selected)
+                if not include:
+                    continue
+                discovered.append(
+                    {
+                        "id": calendar_id,
+                        "summary": summary,
+                    }
+                )
+            page_token = str(response.get("nextPageToken") or "")
+            if not page_token:
+                break
+        if not discovered:
+            discovered = [{"id": "primary", "summary": "Primary"}]
+        self._log(
+            "GoogleCalendar discovered calendars="
+            + json.dumps([{"id": x["id"], "name": x["summary"]} for x in discovered], ensure_ascii=False)
+        )
+        return discovered
 
-        try:
-            from googleapiclient.errors import HttpError
-        except Exception as ex:
-            raise RuntimeError(f"google-api-python-client unavailable: {ex}") from ex
-
-        service = self._calendar_service()
-        events_api = service.events()
+    def _fetch_calendar_changes_for_calendar(
+        self,
+        events_api: Any,
+        calendar_id: str,
+        calendar_name: str,
+        sync_token: str,
+    ) -> tuple[list[dict[str, Any]], str, str, int]:
         page_token = ""
         events_out: list[dict[str, Any]] = []
         next_sync_token = sync_token
         using_incremental = bool(sync_token)
         if using_incremental:
-            self._log(f"GoogleCalendar incremental sync start (syncToken only): token_present={bool(sync_token)}.")
+            self._log(
+                "GoogleCalendar incremental sync start "
+                f"(calendar={calendar_id}, syncToken only): token_present={bool(sync_token)}."
+            )
         else:
-            self._log("GoogleCalendar full sync bootstrap start (no timeMin/timeMax, no server-side date filters).")
+            self._log(
+                "GoogleCalendar full sync bootstrap start "
+                f"(calendar={calendar_id}, no timeMin/timeMax, no server-side date filters)."
+            )
 
         while True:
             params: dict[str, Any] = {
-                "calendarId": "primary",
+                "calendarId": calendar_id,
                 "showDeleted": True,
                 "maxResults": 2500,
             }
@@ -620,17 +670,22 @@ class GoogleCalendarRuntime:
             )
             try:
                 response = events_api.list(**params).execute()
-            except HttpError as ex:
+            except Exception as ex:
                 status = int(getattr(getattr(ex, "resp", None), "status", 0) or 0)
                 if status == 410:
-                    self._log("GoogleCalendar sync token expired (HTTP 410); forcing full bootstrap resync.")
+                    self._log(
+                        "GoogleCalendar sync token expired (HTTP 410); "
+                        f"calendar={calendar_id}; forcing full bootstrap resync."
+                    )
                     raise ValueError("sync_token_invalid") from ex
-                raise
+                raise RuntimeError(f"Google calendar fetch failed for {calendar_id} (status={status}): {ex}") from ex
             for raw_item in response.get("items", []):
                 start_at, end_at = self._event_start_end_to_iso(raw_item)
                 events_out.append(
                     {
                         "id": str(raw_item.get("id") or ""),
+                        "source_calendar_id": calendar_id,
+                        "source_calendar_name": calendar_name,
                         "title": str(raw_item.get("summary") or "Untitled Event"),
                         "description": str(raw_item.get("description") or ""),
                         "start_at": start_at,
@@ -646,17 +701,82 @@ class GoogleCalendarRuntime:
 
         fetched_count = len(events_out)
         visible_items = [x for x in events_out if self._local_calendar_visibility_filter(x)]
-        self.sync_state["last_calendar_fetched_count"] = fetched_count
-        self.sync_state["last_calendar_visible_count"] = len(visible_items)
-        self.sync_state["last_calendar_sync_mode"] = "incremental" if using_incremental else "full"
         self._log(
-            f"GoogleCalendar sync fetched={fetched_count} before local filter; visible={len(visible_items)} after local filter."
+            "GoogleCalendar per-calendar sync result "
+            f"calendar={calendar_id} name={calendar_name!r} fetched={fetched_count} visible={len(visible_items)}."
         )
         if next_sync_token:
-            self._log("GoogleCalendar nextSyncToken stored successfully.")
+            self._log(f"GoogleCalendar nextSyncToken stored successfully for calendar={calendar_id}.")
         else:
-            self._log("GoogleCalendar warning: no nextSyncToken returned by Google.")
-        return visible_items, next_sync_token
+            self._log(f"GoogleCalendar warning: no nextSyncToken returned by Google for calendar={calendar_id}.")
+        return visible_items, next_sync_token, ("incremental" if using_incremental else "full"), fetched_count
+
+    def _fetch_google_changes(self, kind: str, sync_token: str) -> tuple[list[dict[str, Any]], str]:
+        if kind != "calendar":
+            return [], sync_token
+
+        service = self._calendar_service()
+        events_api = service.events()
+        calendars = self._discover_sync_calendars(service)
+        self.sync_state["last_calendar_scanned_count"] = len(calendars)
+        self.sync_state["last_calendar_included_ids"] = [c["id"] for c in calendars]
+        self._log(
+            "GoogleCalendar included calendars for sync="
+            + json.dumps(self.sync_state["last_calendar_included_ids"], ensure_ascii=False)
+        )
+
+        token_map = self.sync_state.get("calendar_sync_tokens") or {}
+        if not isinstance(token_map, dict):
+            token_map = {}
+
+        all_visible: list[dict[str, Any]] = []
+        total_fetched = 0
+        modes: set[str] = set()
+        for cal in calendars:
+            cal_id = cal["id"]
+            cal_name = cal["summary"]
+            cal_token = str(token_map.get(cal_id) or "")
+            try:
+                cal_items, cal_next_token, mode, fetched_count = self._fetch_calendar_changes_for_calendar(
+                    events_api=events_api,
+                    calendar_id=cal_id,
+                    calendar_name=cal_name,
+                    sync_token=cal_token,
+                )
+            except ValueError as ex:
+                if "sync_token_invalid" not in str(ex):
+                    raise
+                token_map[cal_id] = ""
+                self._log(f"GoogleCalendar cleared invalid sync token for calendar={cal_id}; retrying bootstrap.")
+                cal_items, cal_next_token, mode, fetched_count = self._fetch_calendar_changes_for_calendar(
+                    events_api=events_api,
+                    calendar_id=cal_id,
+                    calendar_name=cal_name,
+                    sync_token="",
+                )
+            token_map[cal_id] = cal_next_token
+            self._log(f"GoogleCalendar token update calendar={cal_id} token_present={bool(cal_next_token)}.")
+            all_visible.extend(cal_items)
+            total_fetched += fetched_count
+            modes.add(mode)
+
+        self.sync_state["calendar_sync_tokens"] = token_map
+        # Retain legacy single-token field for backwards compatibility (primary if present).
+        self.sync_state["calendar_sync_token"] = str(token_map.get("primary") or "")
+        self.sync_state["last_calendar_fetched_count"] = total_fetched
+        self.sync_state["last_calendar_visible_count"] = len(all_visible)
+        if modes == {"incremental"}:
+            self.sync_state["last_calendar_sync_mode"] = "incremental"
+        elif "incremental" in modes and "full" in modes:
+            self.sync_state["last_calendar_sync_mode"] = "mixed"
+        else:
+            self.sync_state["last_calendar_sync_mode"] = "full"
+        self._log(
+            "GoogleCalendar aggregate sync "
+            f"calendars={len(calendars)} fetched_total={total_fetched} visible_total={len(all_visible)} "
+            f"mode={self.sync_state['last_calendar_sync_mode']}."
+        )
+        return all_visible, self.sync_state["calendar_sync_token"]
 
     def _push_google_item(self, kind: str, operation: str, record: dict[str, Any]) -> dict[str, Any]:
         if kind != "calendar":
@@ -714,8 +834,21 @@ class GoogleCalendarRuntime:
         google_id = str(item.get("id") or "")
         if not google_id:
             return
+        source_calendar_id = str(item.get("source_calendar_id") or "")
+        source_calendar_name = str(item.get("source_calendar_name") or "")
 
-        mapped = next((r for r in self.calendar_records.values() if r.google_event_id == google_id), None)
+        mapped = next(
+            (
+                r
+                for r in self.calendar_records.values()
+                if r.google_event_id == google_id
+                and (
+                    not source_calendar_id
+                    or str((r.metadata or {}).get("source_calendar_id") or "") in {"", source_calendar_id}
+                )
+            ),
+            None,
+        )
         if mapped:
             self._log(f"GoogleCalendar reconcile mapping reuse for google_event_id={google_id}.")
             mapped.title = str(item.get("title") or mapped.title)
@@ -728,6 +861,11 @@ class GoogleCalendarRuntime:
             mapped.origin = "google_sync"
             mapped.sync_status = "synced"
             mapped.last_synced_at = _now_iso()
+            mapped.metadata = dict(mapped.metadata or {})
+            if source_calendar_id:
+                mapped.metadata["source_calendar_id"] = source_calendar_id
+            if source_calendar_name:
+                mapped.metadata["source_calendar_name"] = source_calendar_name
             mapped.fingerprint = _fingerprint(asdict(mapped), ["title", "description", "start_at", "end_at", "recurrence", "status"])
             self._emit("calendar.item.updated", asdict(mapped))
             return
@@ -747,6 +885,11 @@ class GoogleCalendarRuntime:
         rec.origin = "google_sync"
         rec.sync_status = "synced"
         rec.last_synced_at = _now_iso()
+        rec.metadata = dict(rec.metadata or {})
+        if source_calendar_id:
+            rec.metadata["source_calendar_id"] = source_calendar_id
+        if source_calendar_name:
+            rec.metadata["source_calendar_name"] = source_calendar_name
         self.calendar_records[rec.id] = rec
         self._emit("calendar.item.created", asdict(rec))
 
@@ -825,14 +968,7 @@ class GoogleCalendarRuntime:
             # Inbound incremental; fall back to full if token invalid.
             cal_token = str(self.sync_state.get("calendar_sync_token") or "")
             task_token = str(self.sync_state.get("tasks_sync_token") or "")
-            try:
-                cal_items, next_cal_token = self._fetch_google_changes("calendar", cal_token)
-            except ValueError as ex:
-                if "sync_token_invalid" not in str(ex):
-                    raise
-                self.sync_state["calendar_sync_token"] = ""
-                self._log("GoogleCalendar cleared invalid sync token and retrying full sync bootstrap.")
-                cal_items, next_cal_token = self._fetch_google_changes("calendar", "")
+            cal_items, next_cal_token = self._fetch_google_changes("calendar", cal_token)
             try:
                 task_items, next_task_token = self._fetch_google_changes("tasks", task_token)
             except ValueError as ex:
@@ -1627,6 +1763,8 @@ class GoogleCalendarWorkspaceModule:
             f"Token present: {auth.get('token_present')}\n"
             f"Credentials present: {auth.get('credentials_present')}\n"
             f"Calendar sync mode: {state.get('last_calendar_sync_mode')}\n"
+            f"Calendars scanned: {state.get('last_calendar_scanned_count', 0)}\n"
+            f"Calendars included: {', '.join(state.get('last_calendar_included_ids', [])) or 'none'}\n"
             f"Calendar fetched (remote pre-filter): {state.get('last_calendar_fetched_count', 0)}\n"
             f"Calendar visible (local post-filter): {state.get('last_calendar_visible_count', 0)}\n"
             f"Last sync: {state.get('last_sync_at') or 'never'}\n"
