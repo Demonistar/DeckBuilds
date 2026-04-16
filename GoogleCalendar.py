@@ -65,6 +65,7 @@ MODULE_MANIFEST = {
 UTC = timezone.utc
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/tasks",
 ]
 
@@ -182,6 +183,9 @@ class GoogleCalendarRuntime:
             "last_error": "",
             "mode": "local_only",
             "auth_status": "unknown",
+            "last_calendar_fetched_count": 0,
+            "last_calendar_visible_count": 0,
+            "last_calendar_sync_mode": "none",
         }
         self._storage_path = self._resolve_storage_path()
         self._google_storage_dir = self._resolve_google_storage_dir()
@@ -521,16 +525,190 @@ class GoogleCalendarRuntime:
     # --- Conceptual Google sync adapter layer ---------------------------------
     # This module intentionally relies on shared google_auth ownership by host.
 
+    def _load_google_credentials(self) -> Any:
+        if not self._token_path or not self._token_path.exists():
+            raise RuntimeError("Google token missing. Authenticate first.")
+        try:
+            from google.auth.transport.requests import Request
+            from google.oauth2.credentials import Credentials
+        except Exception as ex:
+            raise RuntimeError(f"Google auth dependencies unavailable: {ex}") from ex
+
+        creds = Credentials.from_authorized_user_file(str(self._token_path), GOOGLE_SCOPES)
+        if creds and creds.expired and creds.refresh_token:
+            self._log("GoogleCalendar refreshing expired Google token.")
+            creds.refresh(Request())
+            self._token_path.write_text(creds.to_json(), encoding="utf-8")
+            self._set_shared_auth_state(
+                token_valid=True,
+                token_present=True,
+                credentials_present=bool(self._credentials_path and self._credentials_path.exists()),
+                credentials_path=str(self._credentials_path) if self._credentials_path else "",
+            )
+        if not creds or not creds.valid:
+            self._set_shared_auth_state(
+                token_valid=False,
+                token_present=bool(self._token_path and self._token_path.exists()),
+                credentials_present=bool(self._credentials_path and self._credentials_path.exists()),
+                credentials_path=str(self._credentials_path) if self._credentials_path else "",
+            )
+            raise RuntimeError("Google token is invalid. Re-authenticate.")
+        return creds
+
+    def _calendar_service(self) -> Any:
+        try:
+            from googleapiclient.discovery import build
+        except Exception as ex:
+            raise RuntimeError(f"google-api-python-client unavailable: {ex}") from ex
+        return build("calendar", "v3", credentials=self._load_google_credentials(), cache_discovery=False)
+
+    @staticmethod
+    def _event_start_end_to_iso(payload: dict[str, Any]) -> tuple[str, str]:
+        start_obj = payload.get("start") or {}
+        end_obj = payload.get("end") or {}
+        start_raw = str(start_obj.get("dateTime") or start_obj.get("date") or _now_iso())
+        end_raw = str(end_obj.get("dateTime") or end_obj.get("date") or start_raw)
+        if len(start_raw) == 10:
+            start_raw = f"{start_raw}T00:00:00+00:00"
+        if len(end_raw) == 10:
+            end_raw = f"{end_raw}T00:00:00+00:00"
+        return start_raw.replace("Z", "+00:00"), end_raw.replace("Z", "+00:00")
+
+    @staticmethod
+    def _local_calendar_visibility_filter(item: dict[str, Any]) -> bool:
+        start_at = _iso_to_dt(str(item.get("start_at") or ""))
+        if not start_at:
+            return True
+        now = datetime.now(UTC)
+        window_start = now - timedelta(days=365)
+        window_end = now + timedelta(days=365)
+        return window_start <= start_at <= window_end
+
     def _fetch_google_changes(self, kind: str, sync_token: str) -> tuple[list[dict[str, Any]], str]:
-        """
-        Placeholder fetch hook for host-managed Google clients.
-        Returns (items, next_sync_token). Raises ValueError("sync_token_invalid") for token reset.
-        """
-        return [], sync_token
+        if kind != "calendar":
+            return [], sync_token
+
+        try:
+            from googleapiclient.errors import HttpError
+        except Exception as ex:
+            raise RuntimeError(f"google-api-python-client unavailable: {ex}") from ex
+
+        service = self._calendar_service()
+        events_api = service.events()
+        page_token = ""
+        events_out: list[dict[str, Any]] = []
+        next_sync_token = sync_token
+        using_incremental = bool(sync_token)
+        if using_incremental:
+            self._log(f"GoogleCalendar incremental sync start (syncToken only): token_present={bool(sync_token)}.")
+        else:
+            self._log("GoogleCalendar full sync bootstrap start (no timeMin/timeMax, no server-side date filters).")
+
+        while True:
+            params: dict[str, Any] = {
+                "calendarId": "primary",
+                "showDeleted": True,
+                "maxResults": 2500,
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            if using_incremental:
+                params["syncToken"] = sync_token
+            self._log(
+                "GoogleCalendar fetch page params="
+                + json.dumps({"has_sync_token": bool(params.get("syncToken")), "has_timeMin": False, "has_timeMax": False})
+            )
+            try:
+                response = events_api.list(**params).execute()
+            except HttpError as ex:
+                status = int(getattr(getattr(ex, "resp", None), "status", 0) or 0)
+                if status == 410:
+                    self._log("GoogleCalendar sync token expired (HTTP 410); forcing full bootstrap resync.")
+                    raise ValueError("sync_token_invalid") from ex
+                raise
+            for raw_item in response.get("items", []):
+                start_at, end_at = self._event_start_end_to_iso(raw_item)
+                events_out.append(
+                    {
+                        "id": str(raw_item.get("id") or ""),
+                        "title": str(raw_item.get("summary") or "Untitled Event"),
+                        "description": str(raw_item.get("description") or ""),
+                        "start_at": start_at,
+                        "end_at": end_at,
+                        "recurrence": str(",".join(raw_item.get("recurrence") or [])) if raw_item.get("recurrence") else "none",
+                        "status": str(raw_item.get("status") or "confirmed"),
+                    }
+                )
+            page_token = str(response.get("nextPageToken") or "")
+            if not page_token:
+                next_sync_token = str(response.get("nextSyncToken") or next_sync_token or "")
+                break
+
+        fetched_count = len(events_out)
+        visible_items = [x for x in events_out if self._local_calendar_visibility_filter(x)]
+        self.sync_state["last_calendar_fetched_count"] = fetched_count
+        self.sync_state["last_calendar_visible_count"] = len(visible_items)
+        self.sync_state["last_calendar_sync_mode"] = "incremental" if using_incremental else "full"
+        self._log(
+            f"GoogleCalendar sync fetched={fetched_count} before local filter; visible={len(visible_items)} after local filter."
+        )
+        if next_sync_token:
+            self._log("GoogleCalendar nextSyncToken stored successfully.")
+        else:
+            self._log("GoogleCalendar warning: no nextSyncToken returned by Google.")
+        return visible_items, next_sync_token
 
     def _push_google_item(self, kind: str, operation: str, record: dict[str, Any]) -> dict[str, Any]:
-        """Placeholder push hook for host-managed Google clients."""
-        return {"ok": False, "reason": "not_connected", "external_id": ""}
+        if kind != "calendar":
+            return {"ok": True, "reason": "tasks_not_implemented", "external_id": str(record.get("google_task_id") or "")}
+        service = self._calendar_service()
+        events_api = service.events()
+
+        google_id = str(record.get("google_event_id") or "")
+        start_at = str(record.get("start_at") or _now_iso())
+        end_at = str(record.get("end_at") or start_at)
+        body = {
+            "summary": str(record.get("title") or "Untitled Event"),
+            "description": str(record.get("description") or ""),
+            "start": {"dateTime": start_at},
+            "end": {"dateTime": end_at},
+            "status": "cancelled" if str(record.get("status") or "") in {"cancelled", "deleted"} else "confirmed",
+        }
+        recurrence = str(record.get("recurrence") or "").strip().lower()
+        if recurrence and recurrence not in {"none", "null"}:
+            rrule_map = {
+                "daily": "RRULE:FREQ=DAILY",
+                "weekly": "RRULE:FREQ=WEEKLY",
+                "monthly": "RRULE:FREQ=MONTHLY",
+                "yearly": "RRULE:FREQ=YEARLY",
+            }
+            if recurrence in rrule_map:
+                body["recurrence"] = [rrule_map[recurrence]]
+
+        try:
+            if operation == "delete":
+                if google_id:
+                    events_api.delete(calendarId="primary", eventId=google_id).execute()
+                self._log(f"GoogleCalendar push success: delete event google_id={google_id or 'none'}")
+                return {"ok": True, "reason": "deleted", "external_id": google_id}
+
+            if operation == "update" and google_id:
+                updated = events_api.update(calendarId="primary", eventId=google_id, body=body).execute()
+                self._log(f"GoogleCalendar push success: update event google_id={google_id}")
+                return {"ok": True, "reason": "updated", "external_id": str(updated.get('id') or google_id)}
+
+            if google_id:
+                self._log(f"GoogleCalendar mapping reuse: existing google_event_id={google_id}; forcing update over create.")
+                updated = events_api.update(calendarId="primary", eventId=google_id, body=body).execute()
+                return {"ok": True, "reason": "updated", "external_id": str(updated.get('id') or google_id)}
+
+            created = events_api.insert(calendarId="primary", body=body).execute()
+            created_id = str(created.get("id") or "")
+            self._log(f"GoogleCalendar push success: create event google_id={created_id}")
+            return {"ok": True, "reason": "created", "external_id": created_id}
+        except Exception as ex:
+            self._log(f"GoogleCalendar push failed ({operation}): {ex}")
+            return {"ok": False, "reason": str(ex), "external_id": google_id}
 
     def _reconcile_google_calendar_item(self, item: dict[str, Any]) -> None:
         google_id = str(item.get("id") or "")
@@ -539,6 +717,7 @@ class GoogleCalendarRuntime:
 
         mapped = next((r for r in self.calendar_records.values() if r.google_event_id == google_id), None)
         if mapped:
+            self._log(f"GoogleCalendar reconcile mapping reuse for google_event_id={google_id}.")
             mapped.title = str(item.get("title") or mapped.title)
             mapped.description = str(item.get("description") or mapped.description)
             mapped.start_at = str(item.get("start_at") or mapped.start_at)
@@ -554,6 +733,7 @@ class GoogleCalendarRuntime:
             return
 
         # New inbound from Google: create local record with mapping.
+        self._log(f"GoogleCalendar reconcile inbound create for google_event_id={google_id} (no local mapping found).")
         rec = self._make_calendar_record(
             title=str(item.get("title") or "Untitled Event"),
             description=str(item.get("description") or ""),
@@ -650,6 +830,8 @@ class GoogleCalendarRuntime:
             except ValueError as ex:
                 if "sync_token_invalid" not in str(ex):
                     raise
+                self.sync_state["calendar_sync_token"] = ""
+                self._log("GoogleCalendar cleared invalid sync token and retrying full sync bootstrap.")
                 cal_items, next_cal_token = self._fetch_google_changes("calendar", "")
             try:
                 task_items, next_task_token = self._fetch_google_changes("tasks", task_token)
@@ -1444,6 +1626,9 @@ class GoogleCalendarWorkspaceModule:
             f"Auth status: {state.get('auth_status')}\n"
             f"Token present: {auth.get('token_present')}\n"
             f"Credentials present: {auth.get('credentials_present')}\n"
+            f"Calendar sync mode: {state.get('last_calendar_sync_mode')}\n"
+            f"Calendar fetched (remote pre-filter): {state.get('last_calendar_fetched_count', 0)}\n"
+            f"Calendar visible (local post-filter): {state.get('last_calendar_visible_count', 0)}\n"
             f"Last sync: {state.get('last_sync_at') or 'never'}\n"
             f"Last error: {state.get('last_error') or 'none'}"
         )
