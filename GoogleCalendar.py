@@ -1240,6 +1240,7 @@ class GoogleCalendarWorkspaceModule:
         editor_tabs = QTabWidget(panel)
         editor_tabs.addTab(self._build_panel_event_editor(editor_tabs), "Event Controls")
         editor_tabs.addTab(self._build_panel_task_editor(editor_tabs), "Task Controls")
+        editor_tabs.addTab(self._build_panel_event_list(editor_tabs), "List")
         root.addWidget(editor_tabs, stretch=1)
 
         action_row = QHBoxLayout()
@@ -1267,22 +1268,6 @@ class GoogleCalendarWorkspaceModule:
     def _build_panel_event_editor(self, parent: QWidget) -> QWidget:
         box = QWidget(parent)
         layout = QVBoxLayout(box)
-
-        self.calendar_records_table = QTableWidget(box)
-        self.calendar_records_table.setColumnCount(5)
-        self.calendar_records_table.setHorizontalHeaderLabels(["Name / Title", "Date", "Time", "Subject / Description", "Source calendar"])
-        self.calendar_records_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.calendar_records_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.calendar_records_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.calendar_records_table.setAlternatingRowColors(True)
-        self.calendar_records_table.verticalHeader().setVisible(False)
-        self.calendar_records_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.calendar_records_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.calendar_records_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.calendar_records_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
-        self.calendar_records_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        self.calendar_records_table.itemSelectionChanged.connect(self._on_calendar_panel_selection)
-        layout.addWidget(self.calendar_records_table)
 
         form_box = QGroupBox("Selected Event", box)
         form = QFormLayout(form_box)
@@ -1320,6 +1305,48 @@ class GoogleCalendarWorkspaceModule:
         self.cal_update_btn.clicked.connect(self._update_calendar)
         self.cal_delete_btn.clicked.connect(self._cancel_calendar)
         self.cal_refresh_btn.clicked.connect(self.refresh_calendar_workspace)
+        return box
+
+    def _build_panel_event_list(self, parent: QWidget) -> QWidget:
+        box = QWidget(parent)
+        layout = QVBoxLayout(box)
+
+        refresh_row = QHBoxLayout()
+        self.event_list_refresh_btn = QPushButton("Refresh List", box)
+        refresh_row.addStretch(1)
+        refresh_row.addWidget(self.event_list_refresh_btn)
+        layout.addLayout(refresh_row)
+
+        self.calendar_records_table = QTableWidget(box)
+        self.calendar_records_table.setColumnCount(7)
+        self.calendar_records_table.setHorizontalHeaderLabels(
+            [
+                "Title / Name",
+                "Start",
+                "End",
+                "Source calendar",
+                "Sync status",
+                "Google event ID",
+                "Status",
+            ]
+        )
+        self.calendar_records_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.calendar_records_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.calendar_records_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.calendar_records_table.setAlternatingRowColors(True)
+        self.calendar_records_table.verticalHeader().setVisible(False)
+        self.calendar_records_table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.calendar_records_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.calendar_records_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.calendar_records_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.calendar_records_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.calendar_records_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.calendar_records_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.calendar_records_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        self.calendar_records_table.itemSelectionChanged.connect(self._on_calendar_panel_selection)
+        layout.addWidget(self.calendar_records_table, stretch=1)
+
+        self.event_list_refresh_btn.clicked.connect(self.refresh_calendar_workspace)
         return box
 
     def _build_panel_task_editor(self, parent: QWidget) -> QWidget:
@@ -1903,6 +1930,13 @@ class GoogleCalendarWorkspaceModule:
         return local_dt.strftime("%Y-%m-%d"), local_dt.strftime("%H:%M")
 
     @staticmethod
+    def _table_dt_cell(iso_value: str) -> str:
+        dt = _iso_to_dt(iso_value)
+        if not dt:
+            return ""
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M")
+
+    @staticmethod
     def _short_cell_text(text: str, limit: int = 90) -> str:
         cleaned = " ".join(str(text or "").split())
         if len(cleaned) <= limit:
@@ -2059,14 +2093,18 @@ class GoogleCalendarWorkspaceModule:
         table.blockSignals(True)
         table.setRowCount(len(rows))
         for idx, rec in enumerate(rows):
-            date_text, time_text = self._split_dt_cell(rec.start_at)
             source_name = str((rec.metadata or {}).get("source_calendar_name") or (rec.source or "local"))
+            status_value = rec.status or "unknown"
+            sync_status = rec.sync_status or "unknown"
+            mapping_value = rec.google_event_id or "local-only"
             values = [
                 rec.title or "Untitled Event",
-                date_text,
-                time_text,
-                self._short_cell_text(rec.description),
+                self._table_dt_cell(rec.start_at),
+                self._table_dt_cell(rec.end_at),
                 source_name,
+                sync_status,
+                mapping_value,
+                status_value,
             ]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
