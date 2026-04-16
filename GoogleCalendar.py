@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QFileDialog,
     QCalendarWidget,
     QComboBox,
@@ -22,7 +23,10 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QHeaderView,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -1264,6 +1268,22 @@ class GoogleCalendarWorkspaceModule:
         box = QWidget(parent)
         layout = QVBoxLayout(box)
 
+        self.calendar_records_table = QTableWidget(box)
+        self.calendar_records_table.setColumnCount(5)
+        self.calendar_records_table.setHorizontalHeaderLabels(["Name / Title", "Date", "Time", "Subject / Description", "Source calendar"])
+        self.calendar_records_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.calendar_records_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.calendar_records_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.calendar_records_table.setAlternatingRowColors(True)
+        self.calendar_records_table.verticalHeader().setVisible(False)
+        self.calendar_records_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.calendar_records_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.calendar_records_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.calendar_records_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.calendar_records_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.calendar_records_table.itemSelectionChanged.connect(self._on_calendar_panel_selection)
+        layout.addWidget(self.calendar_records_table)
+
         form_box = QGroupBox("Selected Event", box)
         form = QFormLayout(form_box)
         self.cal_title = QLineEdit(form_box)
@@ -1305,6 +1325,22 @@ class GoogleCalendarWorkspaceModule:
     def _build_panel_task_editor(self, parent: QWidget) -> QWidget:
         box = QWidget(parent)
         layout = QVBoxLayout(box)
+
+        self.task_records_table = QTableWidget(box)
+        self.task_records_table.setColumnCount(5)
+        self.task_records_table.setHorizontalHeaderLabels(["Name / Title", "Date", "Time", "Subject / Notes", "Status"])
+        self.task_records_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.task_records_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.task_records_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.task_records_table.setAlternatingRowColors(True)
+        self.task_records_table.verticalHeader().setVisible(False)
+        self.task_records_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.task_records_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.task_records_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.task_records_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.task_records_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.task_records_table.itemSelectionChanged.connect(self._on_task_panel_selection)
+        layout.addWidget(self.task_records_table)
 
         form_box = QGroupBox("Selected Task", box)
         form = QFormLayout(form_box)
@@ -1526,6 +1562,7 @@ class GoogleCalendarWorkspaceModule:
         self.selected_calendar_id = rec.id
         self._populate_calendar_editor(rec)
         self._update_calendar_details(rec)
+        self._select_calendar_table_row(rec.id)
 
     def _on_task_workspace_selection(self) -> None:
         self.focused_workspace = "tasks"
@@ -1536,6 +1573,39 @@ class GoogleCalendarWorkspaceModule:
         self.selected_task_id = rec.id
         self._populate_task_editor(rec)
         self._update_task_details(rec)
+        self._select_task_table_row(rec.id)
+
+    def _on_calendar_panel_selection(self) -> None:
+        if not hasattr(self, "calendar_records_table"):
+            return
+        selected = self.calendar_records_table.selectedItems()
+        if not selected:
+            return
+        rec_id = str(selected[0].data(Qt.UserRole) or "")
+        rec = self.runtime.calendar_records.get(rec_id)
+        if not rec:
+            return
+        self.focused_workspace = "calendar"
+        self.selected_calendar_id = rec.id
+        self._populate_calendar_editor(rec)
+        self._update_calendar_details(rec)
+        self._update_send_ai_enabled()
+
+    def _on_task_panel_selection(self) -> None:
+        if not hasattr(self, "task_records_table"):
+            return
+        selected = self.task_records_table.selectedItems()
+        if not selected:
+            return
+        rec_id = str(selected[0].data(Qt.UserRole) or "")
+        rec = self.runtime.task_records.get(rec_id)
+        if not rec:
+            return
+        self.focused_workspace = "tasks"
+        self.selected_task_id = rec.id
+        self._populate_task_editor(rec)
+        self._update_task_details(rec)
+        self._update_send_ai_enabled()
 
     def _populate_calendar_editor(self, rec: CalendarRecord) -> None:
         if not hasattr(self, "cal_title"):
@@ -1594,6 +1664,10 @@ class GoogleCalendarWorkspaceModule:
     def _update_calendar(self) -> None:
         rec_id = self.selected_calendar_id or self._selected_id(getattr(self, "calendar_day_list", None))
         if not rec_id:
+            rec_id = self._selected_id(getattr(self, "calendar_agenda_list", None))
+        if not rec_id:
+            rec_id = self._selected_table_id(getattr(self, "calendar_records_table", None))
+        if not rec_id:
             return
         try:
             self.runtime.update_calendar_immediate(
@@ -1615,6 +1689,10 @@ class GoogleCalendarWorkspaceModule:
 
     def _cancel_calendar(self) -> None:
         rec_id = self.selected_calendar_id or self._selected_id(getattr(self, "calendar_day_list", None))
+        if not rec_id:
+            rec_id = self._selected_id(getattr(self, "calendar_agenda_list", None))
+        if not rec_id:
+            rec_id = self._selected_table_id(getattr(self, "calendar_records_table", None))
         if not rec_id:
             return
         try:
@@ -1646,6 +1724,8 @@ class GoogleCalendarWorkspaceModule:
     def _update_task(self) -> None:
         rec_id = self.selected_task_id or self._selected_id(getattr(self, "task_list", None))
         if not rec_id:
+            rec_id = self._selected_table_id(getattr(self, "task_records_table", None))
+        if not rec_id:
             return
         self.runtime.update_task(
             rec_id=rec_id,
@@ -1660,6 +1740,8 @@ class GoogleCalendarWorkspaceModule:
 
     def _complete_task(self) -> None:
         rec_id = self.selected_task_id or self._selected_id(getattr(self, "task_list", None))
+        if not rec_id:
+            rec_id = self._selected_table_id(getattr(self, "task_records_table", None))
         if not rec_id:
             return
         rec = self.runtime.task_records.get(rec_id)
@@ -1678,6 +1760,8 @@ class GoogleCalendarWorkspaceModule:
 
     def _delete_task(self) -> None:
         rec_id = self.selected_task_id or self._selected_id(getattr(self, "task_list", None))
+        if not rec_id:
+            rec_id = self._selected_table_id(getattr(self, "task_records_table", None))
         if not rec_id:
             return
         self.runtime.delete_task(rec_id)
@@ -1802,6 +1886,53 @@ class GoogleCalendarWorkspaceModule:
         selected = bool(self._build_selected_payload())
         self.send_ai_btn.setEnabled(selected)
 
+    def _selected_table_id(self, table: Optional[QTableWidget]) -> str:
+        if table is None:
+            return ""
+        selected = table.selectedItems()
+        if not selected:
+            return ""
+        return str(selected[0].data(Qt.UserRole) or "")
+
+    @staticmethod
+    def _split_dt_cell(iso_value: str) -> tuple[str, str]:
+        dt = _iso_to_dt(iso_value)
+        if not dt:
+            return "", ""
+        local_dt = dt.astimezone()
+        return local_dt.strftime("%Y-%m-%d"), local_dt.strftime("%H:%M")
+
+    @staticmethod
+    def _short_cell_text(text: str, limit: int = 90) -> str:
+        cleaned = " ".join(str(text or "").split())
+        if len(cleaned) <= limit:
+            return cleaned
+        return f"{cleaned[: max(0, limit - 1)]}…"
+
+    def _select_calendar_table_row(self, rec_id: str) -> None:
+        if not hasattr(self, "calendar_records_table"):
+            return
+        table = self.calendar_records_table
+        for row in range(table.rowCount()):
+            item = table.item(row, 0)
+            if item and str(item.data(Qt.UserRole) or "") == rec_id:
+                table.blockSignals(True)
+                table.selectRow(row)
+                table.blockSignals(False)
+                return
+
+    def _select_task_table_row(self, rec_id: str) -> None:
+        if not hasattr(self, "task_records_table"):
+            return
+        table = self.task_records_table
+        for row in range(table.rowCount()):
+            item = table.item(row, 0)
+            if item and str(item.data(Qt.UserRole) or "") == rec_id:
+                table.blockSignals(True)
+                table.selectRow(row)
+                table.blockSignals(False)
+                return
+
     # ---- Rendering helpers -------------------------------------------------
     def _calendar_row(self, rec: CalendarRecord) -> str:
         mode = "Google-origin" if rec.source == "google" else ("Synced" if rec.google_event_id else "Local")
@@ -1839,55 +1970,61 @@ class GoogleCalendarWorkspaceModule:
         )
 
     def refresh_calendar_workspace(self) -> None:
-        if not hasattr(self, "calendar_picker"):
-            return
-
-        selected_date = self.calendar_picker.selectedDate().toPython()
         rows = sorted(
             [r for r in self.runtime.calendar_records.values() if r.status not in {"cancelled", "deleted"}],
             key=lambda r: (r.start_at, r.title),
         )
+        selected_date = datetime.now().date()
+        if hasattr(self, "calendar_picker") and self.calendar_picker is not None:
+            selected_date = self.calendar_picker.selectedDate().toPython()
 
-        self.calendar_day_list.clear()
+        if hasattr(self, "calendar_day_list") and self.calendar_day_list is not None:
+            self.calendar_day_list.clear()
         day_count = 0
         for rec in rows:
             start_dt = _iso_to_dt(rec.start_at)
             if start_dt and start_dt.date() == selected_date:
                 day_count += 1
-                item = QListWidgetItem(self._calendar_row(rec))
-                item.setData(Qt.UserRole, rec.id)
-                self.calendar_day_list.addItem(item)
+                if hasattr(self, "calendar_day_list") and self.calendar_day_list is not None:
+                    item = QListWidgetItem(self._calendar_row(rec))
+                    item.setData(Qt.UserRole, rec.id)
+                    self.calendar_day_list.addItem(item)
 
-        self.calendar_agenda_list.clear()
+        if hasattr(self, "calendar_agenda_list") and self.calendar_agenda_list is not None:
+            self.calendar_agenda_list.clear()
         for rec in rows:
             start_dt = _iso_to_dt(rec.start_at)
             if start_dt and start_dt.date() >= selected_date:
-                item = QListWidgetItem(self._calendar_row(rec))
-                item.setData(Qt.UserRole, rec.id)
-                self.calendar_agenda_list.addItem(item)
+                if hasattr(self, "calendar_agenda_list") and self.calendar_agenda_list is not None:
+                    item = QListWidgetItem(self._calendar_row(rec))
+                    item.setData(Qt.UserRole, rec.id)
+                    self.calendar_agenda_list.addItem(item)
 
-        self.calendar_day_summary.setText(
-            f"Date: {selected_date.isoformat()} | View: {self.active_view} | "
-            f"Events today: {day_count} | Total active events: {len(rows)}"
-        )
-        self.calendar_workspace_status.setText(
-            f"{self.workspace_claim_status}\n"
-            f"Calendar fetch: loaded={len(rows)} records, selected_date={selected_date.isoformat()}."
-        )
-        self.day_events_label.setText(f"Selected Day Events ({day_count})")
+        if hasattr(self, "calendar_day_summary") and self.calendar_day_summary is not None:
+            self.calendar_day_summary.setText(
+                f"Date: {selected_date.isoformat()} | View: {self.active_view} | "
+                f"Events today: {day_count} | Total active events: {len(rows)}"
+            )
+        if hasattr(self, "calendar_workspace_status") and self.calendar_workspace_status is not None:
+            self.calendar_workspace_status.setText(
+                f"{self.workspace_claim_status}\n"
+                f"Calendar fetch: loaded={len(rows)} records, selected_date={selected_date.isoformat()}."
+            )
+        if hasattr(self, "day_events_label") and self.day_events_label is not None:
+            self.day_events_label.setText(f"Selected Day Events ({day_count})")
 
         rec = self.runtime.calendar_records.get(self.selected_calendar_id)
         self._update_calendar_details(rec)
+        self._refresh_calendar_records_table(rows)
         self._update_send_ai_enabled()
 
     def refresh_tasks_workspace(self) -> None:
-        if not hasattr(self, "task_list"):
-            return
         rows = sorted(
             [r for r in self.runtime.task_records.values() if r.status != "deleted"],
             key=lambda r: (r.due_at, r.title),
         )
-        self.task_list.clear()
+        if hasattr(self, "task_list") and self.task_list is not None:
+            self.task_list.clear()
         open_count = 0
         synced_count = 0
         for rec in rows:
@@ -1895,21 +2032,74 @@ class GoogleCalendarWorkspaceModule:
                 open_count += 1
             if rec.sync_status == "synced":
                 synced_count += 1
-            item = QListWidgetItem(self._task_row(rec))
-            item.setData(Qt.UserRole, rec.id)
-            self.task_list.addItem(item)
+            if hasattr(self, "task_list") and self.task_list is not None:
+                item = QListWidgetItem(self._task_row(rec))
+                item.setData(Qt.UserRole, rec.id)
+                self.task_list.addItem(item)
 
-        self.task_workspace_status.setText(
-            f"Tasks: {len(rows)} total | {open_count} open | {synced_count} synced | "
-            f"Mode: {self.runtime.sync_state.get('mode')}"
-        )
-        self.tasks_workspace_debug.setText(
-            f"{self.workspace_claim_status}\n"
-            f"Tasks fetch: loaded={len(rows)} records; completed={len([r for r in rows if r.status == 'completed'])}."
-        )
+        if hasattr(self, "task_workspace_status") and self.task_workspace_status is not None:
+            self.task_workspace_status.setText(
+                f"Tasks: {len(rows)} total | {open_count} open | {synced_count} synced | "
+                f"Mode: {self.runtime.sync_state.get('mode')}"
+            )
+        if hasattr(self, "tasks_workspace_debug") and self.tasks_workspace_debug is not None:
+            self.tasks_workspace_debug.setText(
+                f"{self.workspace_claim_status}\n"
+                f"Tasks fetch: loaded={len(rows)} records; completed={len([r for r in rows if r.status == 'completed'])}."
+            )
         rec = self.runtime.task_records.get(self.selected_task_id)
         self._update_task_details(rec)
+        self._refresh_task_records_table(rows)
         self._update_send_ai_enabled()
+
+    def _refresh_calendar_records_table(self, rows: list[CalendarRecord]) -> None:
+        if not hasattr(self, "calendar_records_table"):
+            return
+        table = self.calendar_records_table
+        table.blockSignals(True)
+        table.setRowCount(len(rows))
+        for idx, rec in enumerate(rows):
+            date_text, time_text = self._split_dt_cell(rec.start_at)
+            source_name = str((rec.metadata or {}).get("source_calendar_name") or (rec.source or "local"))
+            values = [
+                rec.title or "Untitled Event",
+                date_text,
+                time_text,
+                self._short_cell_text(rec.description),
+                source_name,
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if col == 0:
+                    item.setData(Qt.UserRole, rec.id)
+                table.setItem(idx, col, item)
+        table.blockSignals(False)
+        if self.selected_calendar_id:
+            self._select_calendar_table_row(self.selected_calendar_id)
+
+    def _refresh_task_records_table(self, rows: list[TaskRecord]) -> None:
+        if not hasattr(self, "task_records_table"):
+            return
+        table = self.task_records_table
+        table.blockSignals(True)
+        table.setRowCount(len(rows))
+        for idx, rec in enumerate(rows):
+            date_text, time_text = self._split_dt_cell(rec.due_at)
+            values = [
+                rec.title or "Untitled Task",
+                date_text,
+                time_text,
+                self._short_cell_text(rec.notes),
+                rec.status,
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if col == 0:
+                    item.setData(Qt.UserRole, rec.id)
+                table.setItem(idx, col, item)
+        table.blockSignals(False)
+        if self.selected_task_id:
+            self._select_task_table_row(self.selected_task_id)
 
     def refresh_sync(self) -> None:
         if not hasattr(self, "sync_label"):
