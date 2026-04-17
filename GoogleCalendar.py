@@ -7,27 +7,36 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import QDate, QDateTime, QTimer, Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QFileDialog,
     QCalendarWidget,
+    QCheckBox,
     QComboBox,
+    QDateEdit,
     QDateTimeEdit,
+    QFileDialog,
     QFormLayout,
+    QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPushButton,
-    QHeaderView,
+    QScrollArea,
+    QSizePolicy,
+    QSplitter,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -715,6 +724,10 @@ class GoogleCalendarRuntime:
                     {
                         "id": calendar_id,
                         "summary": summary,
+                        "backgroundColor": str(raw.get("backgroundColor") or "#4285F4"),
+                        "foregroundColor": str(raw.get("foregroundColor") or "#FFFFFF"),
+                        "selected": bool(include),
+                        "accessRole": str(raw.get("accessRole") or ""),
                     }
                 )
             page_token = str(response.get("nextPageToken") or "")
@@ -733,6 +746,8 @@ class GoogleCalendarRuntime:
         events_api: Any,
         calendar_id: str,
         calendar_name: str,
+        calendar_background: str,
+        calendar_foreground: str,
         sync_token: str,
     ) -> tuple[list[dict[str, Any]], str, str, int]:
         page_token = ""
@@ -782,12 +797,20 @@ class GoogleCalendarRuntime:
                         "id": str(raw_item.get("id") or ""),
                         "source_calendar_id": calendar_id,
                         "source_calendar_name": calendar_name,
+                        "calendar_background_color": calendar_background,
+                        "calendar_foreground_color": calendar_foreground,
                         "title": str(raw_item.get("summary") or "Untitled Event"),
                         "description": str(raw_item.get("description") or ""),
                         "start_at": start_at,
                         "end_at": end_at,
                         "recurrence": str(",".join(raw_item.get("recurrence") or [])) if raw_item.get("recurrence") else "none",
                         "status": str(raw_item.get("status") or "confirmed"),
+                        "colorId": str(raw_item.get("colorId") or ""),
+                        "location": str(raw_item.get("location") or ""),
+                        "attendees": list(raw_item.get("attendees") or []),
+                        "htmlLink": str(raw_item.get("htmlLink") or ""),
+                        "organizer": raw_item.get("organizer") or {},
+                        "reminders": raw_item.get("reminders") or {},
                     }
                 )
             page_token = str(response.get("nextPageToken") or "")
@@ -831,12 +854,16 @@ class GoogleCalendarRuntime:
         for cal in calendars:
             cal_id = cal["id"]
             cal_name = cal["summary"]
+            cal_bg = str(cal.get("backgroundColor") or "#4285F4")
+            cal_fg = str(cal.get("foregroundColor") or "#FFFFFF")
             cal_token = str(token_map.get(cal_id) or "")
             try:
                 cal_items, cal_next_token, mode, fetched_count = self._fetch_calendar_changes_for_calendar(
                     events_api=events_api,
                     calendar_id=cal_id,
                     calendar_name=cal_name,
+                    calendar_background=cal_bg,
+                    calendar_foreground=cal_fg,
                     sync_token=cal_token,
                 )
             except ValueError as ex:
@@ -848,6 +875,8 @@ class GoogleCalendarRuntime:
                     events_api=events_api,
                     calendar_id=cal_id,
                     calendar_name=cal_name,
+                    calendar_background=cal_bg,
+                    calendar_foreground=cal_fg,
                     sync_token="",
                 )
             token_map[cal_id] = cal_next_token
@@ -940,6 +969,8 @@ class GoogleCalendarRuntime:
             return
         source_calendar_id = str(item.get("source_calendar_id") or "")
         source_calendar_name = str(item.get("source_calendar_name") or "")
+        calendar_bg = str(item.get("calendar_background_color") or "")
+        calendar_fg = str(item.get("calendar_foreground_color") or "")
         is_cancelled = _is_cancelled_or_deleted(item)
 
         mapped = next(
@@ -992,6 +1023,19 @@ class GoogleCalendarRuntime:
                 mapped.metadata["source_calendar_id"] = source_calendar_id
             if source_calendar_name:
                 mapped.metadata["source_calendar_name"] = source_calendar_name
+            if calendar_bg:
+                mapped.metadata["calendar_background_color"] = calendar_bg
+            if calendar_fg:
+                mapped.metadata["calendar_foreground_color"] = calendar_fg
+            mapped.metadata["event_color_id"] = str(item.get("colorId") or "")
+            mapped.metadata["location"] = str(item.get("location") or mapped.metadata.get("location") or "")
+            mapped.metadata["attendees"] = list(item.get("attendees") or mapped.metadata.get("attendees") or [])
+            mapped.metadata["htmlLink"] = str(item.get("htmlLink") or mapped.metadata.get("htmlLink") or "")
+            reminders = item.get("reminders") or {}
+            overrides = reminders.get("overrides") if isinstance(reminders, dict) else None
+            if overrides and isinstance(overrides, list):
+                mapped.metadata["reminder_minutes"] = int((overrides[0] or {}).get("minutes") or 10)
+                mapped.metadata["reminder_method"] = str((overrides[0] or {}).get("method") or "popup")
             mapped.fingerprint = _fingerprint(asdict(mapped), ["title", "description", "start_at", "end_at", "recurrence", "status"])
             self._emit("calendar.item.updated", asdict(mapped))
             self._save_state()
@@ -1025,6 +1069,19 @@ class GoogleCalendarRuntime:
             rec.metadata["source_calendar_id"] = source_calendar_id
         if source_calendar_name:
             rec.metadata["source_calendar_name"] = source_calendar_name
+        if calendar_bg:
+            rec.metadata["calendar_background_color"] = calendar_bg
+        if calendar_fg:
+            rec.metadata["calendar_foreground_color"] = calendar_fg
+        rec.metadata["event_color_id"] = str(item.get("colorId") or "")
+        rec.metadata["location"] = str(item.get("location") or "")
+        rec.metadata["attendees"] = list(item.get("attendees") or [])
+        rec.metadata["htmlLink"] = str(item.get("htmlLink") or "")
+        reminders = item.get("reminders") or {}
+        overrides = reminders.get("overrides") if isinstance(reminders, dict) else None
+        if overrides and isinstance(overrides, list):
+            rec.metadata["reminder_minutes"] = int((overrides[0] or {}).get("minutes") or 10)
+            rec.metadata["reminder_method"] = str((overrides[0] or {}).get("method") or "popup")
         self.calendar_records[rec.id] = rec
         self._emit("calendar.item.created", asdict(rec))
         self._save_state()
@@ -1166,62 +1223,75 @@ class GoogleCalendarWorkspaceModule:
         self._handoff_workspace_context = deck_api.get("handoff_workspace_context") if callable(deck_api.get("handoff_workspace_context")) else None
         self._module_key = "google_calendar"
 
-        self.active_view = "Month"
+        self.active_view = "Week"
         self.focused_workspace = "calendar"
         self.selected_calendar_id = ""
         self.selected_task_id = ""
+        self.current_date = datetime.now().date()
+        self.visible_calendar_ids: set[str] = set()
+        self.sidebar_mode = ""
 
         self.panel_widget: Optional[QWidget] = None
         self.calendar_workspace_widget: Optional[QWidget] = None
-        self.tasks_workspace_widget: Optional[QWidget] = None
+        self.drive_workspace_widget: Optional[QWidget] = None
+        self.gmail_workspace_widget: Optional[QWidget] = None
         self.ribbon_widget: Optional[QWidget] = None
+        self.editor_tabs: Optional[QTabWidget] = None
+        self.event_detail_overlay: Optional[QFrame] = None
         self.workspace_claim_status = "Workspace claim pending."
         self.last_action_status = "Ready."
+        self._daily_task_reminder_date = ""
+        self._daily_task_reminder_minute_fired = False
+        self.reminder_timer = QTimer()
+        self.reminder_timer.setInterval(30000)
+        self.reminder_timer.timeout.connect(self._process_reminders)
+        self.reminder_timer.start()
+
+    def _fit_text_widget(self, widget: QWidget, text: str) -> None:
+        if not text:
+            return
+        fm = widget.fontMetrics()
+        if widget.width() <= 24:
+            return
+        px = widget.width() - 16
+        current = widget.font().pointSizeF() or 10.0
+        while current > 7.0 and fm.horizontalAdvance(text) > px:
+            current -= 0.5
+            f = widget.font()
+            f.setPointSizeF(current)
+            widget.setFont(f)
+            fm = widget.fontMetrics()
+
+    def _apply_font_scaling(self) -> None:
+        if not self.panel_widget:
+            return
+        for w in self.panel_widget.findChildren((QLabel, QPushButton, QCheckBox, QToolButton, QComboBox)):
+            text = ""
+            if hasattr(w, "text"):
+                text = str(w.text())
+            elif isinstance(w, QComboBox):
+                text = str(w.currentText())
+            self._fit_text_widget(w, text)
+        if hasattr(self, "calendar_grid"):
+            for c in range(self.calendar_grid.columnCount()):
+                item = self.calendar_grid.horizontalHeaderItem(c)
+                if item:
+                    self._fit_text_widget(self.calendar_grid.horizontalHeader(), item.text())
 
     # ---- Builders ---------------------------------------------------------
     def build_module_panel(self) -> QWidget:
         if self.panel_widget is not None:
             return self.panel_widget
-
         panel = QWidget()
         root = QVBoxLayout(panel)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
-
-        nav_box = QGroupBox("Calendar Controls", panel)
-        nav_layout = QVBoxLayout(nav_box)
-
-        view_row = QHBoxLayout()
-        view_row.addWidget(QLabel("View", nav_box))
-        self.view_selector = QComboBox(nav_box)
-        self.view_selector.addItems(["Day", "Week", "Business Week", "Month", "Year"])
-        self.view_selector.setCurrentText("Month")
-        view_row.addWidget(self.view_selector)
-        nav_layout.addLayout(view_row)
-
-        move_row = QHBoxLayout()
-        self.today_btn = QPushButton("Today", nav_box)
-        self.prev_btn = QPushButton("Prev", nav_box)
-        self.next_btn = QPushButton("Next", nav_box)
-        self.jump_date = QDateTimeEdit(nav_box)
-        self.jump_date.setCalendarPopup(True)
-        self.jump_date.setDateTime(datetime.now())
-        self.jump_btn = QPushButton("Jump", nav_box)
-        move_row.addWidget(self.today_btn)
-        move_row.addWidget(self.prev_btn)
-        move_row.addWidget(self.next_btn)
-        move_row.addWidget(self.jump_date)
-        move_row.addWidget(self.jump_btn)
-        nav_layout.addLayout(move_row)
-
-        root.addWidget(nav_box)
 
         sync_box = QGroupBox("Sync / Auth", panel)
         sync_layout = QVBoxLayout(sync_box)
         self.sync_label = QLabel(sync_box)
         self.sync_label.setWordWrap(True)
         sync_layout.addWidget(self.sync_label)
-
         sync_btn_row = QHBoxLayout()
         self.auth_google_btn = QPushButton("Authenticate Google", sync_box)
         self.sync_now_btn = QPushButton("Run Sync Now", sync_box)
@@ -1237,290 +1307,300 @@ class GoogleCalendarWorkspaceModule:
         self.action_status_label.setText(self.last_action_status)
         root.addWidget(self.action_status_label)
 
-        editor_tabs = QTabWidget(panel)
-        editor_tabs.addTab(self._build_panel_event_editor(editor_tabs), "Event Controls")
-        editor_tabs.addTab(self._build_panel_task_editor(editor_tabs), "Task Controls")
-        editor_tabs.addTab(self._build_panel_event_list(editor_tabs), "List")
-        root.addWidget(editor_tabs, stretch=1)
+        self.editor_tabs = QTabWidget(panel)
+        self.editor_tabs.addTab(self._build_panel_event_editor(self.editor_tabs), "Event Controls")
+        self.editor_tabs.addTab(self._build_panel_task_editor(self.editor_tabs), "Task Controls")
+        self.editor_tabs.addTab(self._build_panel_event_list(self.editor_tabs), "List")
+        self.editor_tabs.currentChanged.connect(self._on_editor_tab_changed)
+        root.addWidget(self.editor_tabs, stretch=1)
 
-        action_row = QHBoxLayout()
-        self.send_ai_btn = QPushButton("Send Selected to AI", panel)
-        self.reminders_btn = QPushButton("Scan Reminders", panel)
-        action_row.addWidget(self.send_ai_btn)
-        action_row.addWidget(self.reminders_btn)
-        root.addLayout(action_row)
-
-        self.view_selector.currentTextChanged.connect(self._set_view)
-        self.today_btn.clicked.connect(self._go_today)
-        self.prev_btn.clicked.connect(lambda: self._shift_date(-1))
-        self.next_btn.clicked.connect(lambda: self._shift_date(1))
-        self.jump_btn.clicked.connect(self._jump_to_picker)
+        self.panel_widget = panel
         self.auth_google_btn.clicked.connect(self._authenticate_google)
         self.sync_now_btn.clicked.connect(self._run_sync)
         self.sync_refresh_btn.clicked.connect(self.refresh_sync)
-        self.send_ai_btn.clicked.connect(self._send_selected_to_ai)
-        self.reminders_btn.clicked.connect(self._scan_reminders)
-
-        self.panel_widget = panel
         self.refresh_all()
+        self._apply_font_scaling()
         return panel
 
     def _build_panel_event_editor(self, parent: QWidget) -> QWidget:
         box = QWidget(parent)
         layout = QVBoxLayout(box)
+        calendar_group = QGroupBox("Calendars", box)
+        calendar_layout = QVBoxLayout(calendar_group)
+        self.calendar_list_scroll = QScrollArea(calendar_group)
+        self.calendar_list_scroll.setWidgetResizable(True)
+        self.calendar_list_container = QWidget()
+        self.calendar_list_layout = QVBoxLayout(self.calendar_list_container)
+        self.calendar_list_scroll.setWidget(self.calendar_list_container)
+        calendar_layout.addWidget(self.calendar_list_scroll)
+        layout.addWidget(calendar_group)
 
-        form_box = QGroupBox("Selected Event", box)
+        form_box = QGroupBox("Event Form", box)
         form = QFormLayout(form_box)
         self.cal_title = QLineEdit(form_box)
-        self.cal_desc = QTextEdit(form_box)
+        self.cal_date = QDateEdit(form_box)
+        self.cal_date.setCalendarPopup(True)
+        self.cal_date.setDate(datetime.now().date())
         self.cal_start = QDateTimeEdit(form_box)
         self.cal_start.setCalendarPopup(True)
         self.cal_start.setDateTime(datetime.now())
-        self.cal_start.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.cal_end = QDateTimeEdit(form_box)
         self.cal_end.setCalendarPopup(True)
         self.cal_end.setDateTime(datetime.now() + timedelta(hours=1))
-        self.cal_end.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.cal_all_day = QCheckBox("All Day", form_box)
+        self.cal_desc = QTextEdit(form_box)
+        self.cal_location = QLineEdit(form_box)
+        self.cal_selector = QComboBox(form_box)
+        self.cal_reminder_minutes = QLineEdit(form_box)
+        self.cal_reminder_minutes.setPlaceholderText("10")
+        self.cal_reminder_method = QComboBox(form_box)
+        self.cal_reminder_method.addItems(["popup", "email"])
         self.cal_recur = QComboBox(form_box)
         self.cal_recur.addItems(["None", "Daily", "Weekly", "Monthly", "Yearly"])
         form.addRow("Title", self.cal_title)
+        form.addRow("Date", self.cal_date)
+        form.addRow("Start time", self.cal_start)
+        form.addRow("End time", self.cal_end)
+        form.addRow("", self.cal_all_day)
         form.addRow("Description", self.cal_desc)
-        form.addRow("Start", self.cal_start)
-        form.addRow("End", self.cal_end)
+        form.addRow("Location", self.cal_location)
+        form.addRow("Calendar", self.cal_selector)
+        form.addRow("Reminder (min)", self.cal_reminder_minutes)
+        form.addRow("Reminder method", self.cal_reminder_method)
         form.addRow("Recurrence", self.cal_recur)
         layout.addWidget(form_box)
 
         btns = QHBoxLayout()
         self.cal_add_btn = QPushButton("New Event", box)
-        self.cal_update_btn = QPushButton("Update Selected", box)
-        self.cal_delete_btn = QPushButton("Delete Selected", box)
-        self.cal_refresh_btn = QPushButton("Refresh Calendar", box)
+        self.cal_update_btn = QPushButton("Save", box)
+        self.cal_delete_btn = QPushButton("Delete", box)
+        self.cal_cancel_btn = QPushButton("Cancel", box)
+        self.cal_send_ai_btn = QPushButton("Send to AI", box)
         btns.addWidget(self.cal_add_btn)
         btns.addWidget(self.cal_update_btn)
         btns.addWidget(self.cal_delete_btn)
-        btns.addWidget(self.cal_refresh_btn)
+        btns.addWidget(self.cal_cancel_btn)
+        btns.addWidget(self.cal_send_ai_btn)
         layout.addLayout(btns)
 
-        self.cal_add_btn.clicked.connect(self._add_calendar)
+        self.cal_add_btn.clicked.connect(self._blank_event_form)
         self.cal_update_btn.clicked.connect(self._update_calendar)
         self.cal_delete_btn.clicked.connect(self._cancel_calendar)
-        self.cal_refresh_btn.clicked.connect(self.refresh_calendar_workspace)
-        return box
-
-    def _build_panel_event_list(self, parent: QWidget) -> QWidget:
-        box = QWidget(parent)
-        layout = QVBoxLayout(box)
-
-        refresh_row = QHBoxLayout()
-        self.event_list_refresh_btn = QPushButton("Refresh List", box)
-        refresh_row.addStretch(1)
-        refresh_row.addWidget(self.event_list_refresh_btn)
-        layout.addLayout(refresh_row)
-
-        self.calendar_records_table = QTableWidget(box)
-        self.calendar_records_table.setColumnCount(7)
-        self.calendar_records_table.setHorizontalHeaderLabels(
-            [
-                "Title / Name",
-                "Start",
-                "End",
-                "Source calendar",
-                "Sync status",
-                "Google event ID",
-                "Status",
-            ]
-        )
-        self.calendar_records_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.calendar_records_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.calendar_records_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.calendar_records_table.setAlternatingRowColors(True)
-        self.calendar_records_table.verticalHeader().setVisible(False)
-        self.calendar_records_table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
-        self.calendar_records_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.calendar_records_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.calendar_records_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.calendar_records_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.calendar_records_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        self.calendar_records_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
-        self.calendar_records_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        self.calendar_records_table.itemSelectionChanged.connect(self._on_calendar_panel_selection)
-        layout.addWidget(self.calendar_records_table, stretch=1)
-
-        self.event_list_refresh_btn.clicked.connect(self.refresh_calendar_workspace)
+        self.cal_cancel_btn.clicked.connect(self._blank_event_form)
+        self.cal_send_ai_btn.clicked.connect(self._send_event_form_to_ai)
         return box
 
     def _build_panel_task_editor(self, parent: QWidget) -> QWidget:
         box = QWidget(parent)
         layout = QVBoxLayout(box)
+        sidebar = QGroupBox("Task Lists", box)
+        side_layout = QVBoxLayout(sidebar)
+        self.task_sidebar = QListWidget(sidebar)
+        self.task_sidebar.itemSelectionChanged.connect(self._on_task_panel_selection)
+        side_layout.addWidget(self.task_sidebar)
+        layout.addWidget(sidebar)
 
-        self.task_records_table = QTableWidget(box)
-        self.task_records_table.setColumnCount(5)
-        self.task_records_table.setHorizontalHeaderLabels(["Name / Title", "Date", "Time", "Subject / Notes", "Status"])
-        self.task_records_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.task_records_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.task_records_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.task_records_table.setAlternatingRowColors(True)
-        self.task_records_table.verticalHeader().setVisible(False)
-        self.task_records_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.task_records_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.task_records_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.task_records_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
-        self.task_records_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        self.task_records_table.itemSelectionChanged.connect(self._on_task_panel_selection)
-        layout.addWidget(self.task_records_table)
-
-        form_box = QGroupBox("Selected Task", box)
+        form_box = QGroupBox("Task Form", box)
         form = QFormLayout(form_box)
         self.task_title = QLineEdit(form_box)
         self.task_notes = QTextEdit(form_box)
-        self.task_due = QDateTimeEdit(form_box)
+        self.task_due = QDateEdit(form_box)
         self.task_due.setCalendarPopup(True)
-        self.task_due.setDateTime(datetime.now() + timedelta(hours=2))
-        self.task_due.setDisplayFormat("yyyy-MM-dd HH:mm")
-        self.task_recur = QComboBox(form_box)
-        self.task_recur.addItems(["None", "Daily", "Weekly", "Monthly", "Yearly"])
-        self.task_status = QComboBox(form_box)
-        self.task_status.addItems(["open", "completed"])
-        form.addRow("Title", self.task_title)
+        self.task_due.setDate(datetime.now().date())
+        self.task_list_selector = QComboBox(form_box)
+        form.addRow("Task name", self.task_title)
         form.addRow("Notes", self.task_notes)
-        form.addRow("Due", self.task_due)
-        form.addRow("Recurrence", self.task_recur)
-        form.addRow("Status", self.task_status)
+        form.addRow("Due date", self.task_due)
+        form.addRow("List", self.task_list_selector)
         layout.addWidget(form_box)
 
         btns = QHBoxLayout()
-        self.task_add_btn = QPushButton("New Task", box)
-        self.task_update_btn = QPushButton("Update Selected", box)
-        self.task_complete_btn = QPushButton("Mark Complete", box)
-        self.task_delete_btn = QPushButton("Delete Selected", box)
-        self.task_refresh_btn = QPushButton("Refresh Tasks", box)
+        self.task_add_btn = QPushButton("Save", box)
+        self.task_delete_btn = QPushButton("Delete", box)
+        self.task_cancel_btn = QPushButton("Cancel", box)
+        self.task_send_ai_btn = QPushButton("Send to AI", box)
         btns.addWidget(self.task_add_btn)
-        btns.addWidget(self.task_update_btn)
-        btns.addWidget(self.task_complete_btn)
         btns.addWidget(self.task_delete_btn)
-        btns.addWidget(self.task_refresh_btn)
+        btns.addWidget(self.task_cancel_btn)
+        btns.addWidget(self.task_send_ai_btn)
         layout.addLayout(btns)
-
-        self.task_add_btn.clicked.connect(self._add_task)
-        self.task_update_btn.clicked.connect(self._update_task)
-        self.task_complete_btn.clicked.connect(self._complete_task)
+        self.task_add_btn.clicked.connect(self._update_task)
         self.task_delete_btn.clicked.connect(self._delete_task)
-        self.task_refresh_btn.clicked.connect(self.refresh_tasks_workspace)
+        self.task_cancel_btn.clicked.connect(self._blank_task_form)
+        self.task_send_ai_btn.clicked.connect(self._send_task_form_to_ai)
         return box
+
+    def _build_panel_event_list(self, parent: QWidget) -> QWidget:
+        box = QWidget(parent)
+        layout = QVBoxLayout(box)
+        top = QHBoxLayout()
+        self.upcoming_window = QComboBox(box)
+        self.upcoming_window.addItems(["1 Month", "3 Months", "1 Year"])
+        self.upcoming_window.setCurrentText("1 Month")
+        self.event_list_refresh_btn = QPushButton("Refresh List", box)
+        self.event_list_send_ai_btn = QPushButton("Send to AI", box)
+        top.addWidget(QLabel("Window", box))
+        top.addWidget(self.upcoming_window)
+        top.addStretch(1)
+        top.addWidget(self.event_list_refresh_btn)
+        top.addWidget(self.event_list_send_ai_btn)
+        layout.addLayout(top)
+        self.calendar_records_table = QTableWidget(box)
+        self.calendar_records_table.setColumnCount(5)
+        self.calendar_records_table.setHorizontalHeaderLabels(["Title", "Start", "End", "Source calendar", "Status"])
+        self.calendar_records_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.calendar_records_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.calendar_records_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.calendar_records_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.calendar_records_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.calendar_records_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.calendar_records_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.calendar_records_table.itemSelectionChanged.connect(self._on_calendar_panel_selection)
+        layout.addWidget(self.calendar_records_table)
+        self.event_list_refresh_btn.clicked.connect(self._refresh_upcoming_list)
+        self.event_list_send_ai_btn.clicked.connect(self._send_upcoming_to_ai)
+        return box
+
+    def _placeholder_workspace(self, title: str) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        label = QLabel(title, page)
+        label.setAlignment(Qt.AlignCenter)
+        layout.addStretch(1)
+        layout.addWidget(label)
+        layout.addStretch(1)
+        return page
 
     def build_calendar_workspace(self) -> QWidget:
         if self.calendar_workspace_widget is not None:
             return self.calendar_workspace_widget
-
         page = QWidget()
-        layout = QVBoxLayout(page)
+        root = QVBoxLayout(page)
+        top = QHBoxLayout()
+        self.today_btn = QPushButton("Today", page)
+        self.prev_btn = QPushButton("◀", page)
+        self.next_btn = QPushButton("▶", page)
+        self.month_label = QLabel("", page)
+        self.view_selector = QComboBox(page)
+        self.view_selector.addItems(["Day", "Week", "Month", "Year", "Schedule", "4 Days"])
+        self.view_selector.setCurrentText("Week")
+        top.addWidget(self.today_btn)
+        top.addWidget(self.prev_btn)
+        top.addWidget(self.next_btn)
+        top.addWidget(self.month_label)
+        top.addStretch(1)
+        top.addWidget(self.view_selector)
+        root.addLayout(top)
 
-        self.calendar_day_summary = QLabel(page)
-        self.calendar_day_summary.setWordWrap(True)
-        layout.addWidget(self.calendar_day_summary)
-        self.calendar_workspace_status = QLabel(page)
-        self.calendar_workspace_status.setWordWrap(True)
-        layout.addWidget(self.calendar_workspace_status)
+        self.workspace_splitter = QSplitter(Qt.Horizontal, page)
+        left = QWidget(page)
+        left_layout = QVBoxLayout(left)
+        self.calendar_grid = QTableWidget(left)
+        self.calendar_grid.setRowCount(24)
+        self.calendar_grid.setColumnCount(8)
+        self.calendar_grid.setHorizontalHeaderLabels(["Time", "", "", "", "", "", "", ""])
+        self.calendar_grid.verticalHeader().setVisible(False)
+        self.calendar_grid.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.calendar_grid.cellClicked.connect(self._on_calendar_grid_clicked)
+        left_layout.addWidget(self.calendar_grid)
+        self.workspace_splitter.addWidget(left)
 
-        self.calendar_picker = QCalendarWidget(page)
-        self.calendar_picker.selectionChanged.connect(self._on_calendar_date_changed)
-        layout.addWidget(self.calendar_picker)
+        right = QWidget(page)
+        right_layout = QHBoxLayout(right)
+        self.sidebar_icons = QVBoxLayout()
+        self.sidebar_tasks_btn = QToolButton(right)
+        self.sidebar_tasks_btn.setText("✓")
+        self.sidebar_contacts_btn = QToolButton(right)
+        self.sidebar_contacts_btn.setText("@")
+        self.sidebar_maps_btn = QToolButton(right)
+        self.sidebar_maps_btn.setText("⌖")
+        self.sidebar_extra_btn = QToolButton(right)
+        self.sidebar_extra_btn.setText("⋯")
+        for b in [self.sidebar_tasks_btn, self.sidebar_contacts_btn, self.sidebar_maps_btn, self.sidebar_extra_btn]:
+            b.setCheckable(True)
+            self.sidebar_icons.addWidget(b)
+        self.sidebar_icons.addStretch(1)
+        right_layout.addLayout(self.sidebar_icons)
+        self.sidebar_panel = QFrame(right)
+        self.sidebar_panel.setFrameShape(QFrame.StyledPanel)
+        self.sidebar_panel_layout = QVBoxLayout(self.sidebar_panel)
+        self.sidebar_panel_label = QLabel("Coming Soon", self.sidebar_panel)
+        self.sidebar_panel_layout.addWidget(self.sidebar_panel_label)
+        right_layout.addWidget(self.sidebar_panel)
+        self.workspace_splitter.addWidget(right)
+        self.workspace_splitter.setSizes([80, 20])
+        root.addWidget(self.workspace_splitter)
 
-        self.day_events_label = QLabel("Selected Day Events", page)
-        layout.addWidget(self.day_events_label)
+        self.event_detail_overlay = QFrame(page)
+        self.event_detail_overlay.setVisible(False)
+        overlay_layout = QVBoxLayout(self.event_detail_overlay)
+        self.event_detail_text = QLabel(self.event_detail_overlay)
+        self.event_detail_text.setWordWrap(True)
+        overlay_actions = QHBoxLayout()
+        self.event_edit_btn = QPushButton("Edit", self.event_detail_overlay)
+        self.event_delete_btn = QPushButton("Delete", self.event_detail_overlay)
+        self.event_email_btn = QPushButton("Email", self.event_detail_overlay)
+        self.event_menu_btn = QPushButton("Menu", self.event_detail_overlay)
+        self.event_close_btn = QPushButton("Close", self.event_detail_overlay)
+        for w in [self.event_edit_btn, self.event_delete_btn, self.event_email_btn, self.event_menu_btn, self.event_close_btn]:
+            overlay_actions.addWidget(w)
+        overlay_layout.addWidget(self.event_detail_text)
+        overlay_layout.addLayout(overlay_actions)
+        root.addWidget(self.event_detail_overlay)
 
-        self.calendar_day_list = QListWidget(page)
-        self.calendar_day_list.itemSelectionChanged.connect(self._on_calendar_workspace_selection)
-        layout.addWidget(self.calendar_day_list)
-
-        self.calendar_details = QLabel(page)
-        self.calendar_details.setWordWrap(True)
-        self.calendar_details.setMinimumHeight(70)
-        layout.addWidget(self.calendar_details)
-
-        self.agenda_label = QLabel("Upcoming Agenda", page)
-        layout.addWidget(self.agenda_label)
-        self.calendar_agenda_list = QListWidget(page)
-        self.calendar_agenda_list.itemSelectionChanged.connect(self._on_calendar_workspace_selection)
-        layout.addWidget(self.calendar_agenda_list)
+        self.today_btn.clicked.connect(self._go_today)
+        self.prev_btn.clicked.connect(lambda: self._shift_date(-1))
+        self.next_btn.clicked.connect(lambda: self._shift_date(1))
+        self.view_selector.currentTextChanged.connect(self._set_view)
+        self.sidebar_tasks_btn.clicked.connect(lambda: self._toggle_sidebar("tasks"))
+        self.sidebar_contacts_btn.clicked.connect(lambda: self._toggle_sidebar("contacts"))
+        self.sidebar_maps_btn.clicked.connect(lambda: self._toggle_sidebar("maps"))
+        self.sidebar_extra_btn.clicked.connect(lambda: self._toggle_sidebar("extra"))
+        self.event_close_btn.clicked.connect(lambda: self.event_detail_overlay.setVisible(False))
+        self.event_edit_btn.clicked.connect(self._switch_to_event_controls)
+        self.event_delete_btn.clicked.connect(self._cancel_calendar)
 
         self.calendar_workspace_widget = page
         self.refresh_calendar_workspace()
         return page
 
-    def build_tasks_workspace(self) -> QWidget:
-        if self.tasks_workspace_widget is not None:
-            return self.tasks_workspace_widget
+    def build_drive_workspace(self) -> QWidget:
+        if self.drive_workspace_widget is None:
+            self.drive_workspace_widget = self._placeholder_workspace("Coming Soon")
+        return self.drive_workspace_widget
 
-        page = QWidget()
-        layout = QVBoxLayout(page)
-
-        self.task_workspace_status = QLabel(page)
-        self.task_workspace_status.setWordWrap(True)
-        layout.addWidget(self.task_workspace_status)
-        self.tasks_workspace_debug = QLabel(page)
-        self.tasks_workspace_debug.setWordWrap(True)
-        layout.addWidget(self.tasks_workspace_debug)
-
-        self.task_list = QListWidget(page)
-        self.task_list.itemSelectionChanged.connect(self._on_task_workspace_selection)
-        layout.addWidget(self.task_list)
-
-        self.task_details = QLabel(page)
-        self.task_details.setWordWrap(True)
-        self.task_details.setMinimumHeight(80)
-        layout.addWidget(self.task_details)
-
-        task_actions = QHBoxLayout()
-        self.task_workspace_complete_btn = QPushButton("Mark Complete", page)
-        self.task_workspace_refresh_btn = QPushButton("Refresh", page)
-        task_actions.addWidget(self.task_workspace_complete_btn)
-        task_actions.addWidget(self.task_workspace_refresh_btn)
-        layout.addLayout(task_actions)
-
-        self.task_workspace_complete_btn.clicked.connect(self._complete_task)
-        self.task_workspace_refresh_btn.clicked.connect(self.refresh_tasks_workspace)
-
-        self.tasks_workspace_widget = page
-        self.refresh_tasks_workspace()
-        return page
+    def build_gmail_workspace(self) -> QWidget:
+        if self.gmail_workspace_widget is None:
+            self.gmail_workspace_widget = self._placeholder_workspace("Coming Soon")
+        return self.gmail_workspace_widget
 
     def build_ribbon(self) -> QWidget:
         ribbon = QWidget()
         row = QHBoxLayout(ribbon)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
-
         today = QPushButton("Today", ribbon)
         prev = QPushButton("Prev", ribbon)
         nxt = QPushButton("Next", ribbon)
         view = QComboBox(ribbon)
-        view.addItems(["Day", "Week", "Month", "Year"])
-        view.setCurrentText(self.active_view if self.active_view in {"Day", "Week", "Month", "Year"} else "Month")
-        new_event = QPushButton("New Event", ribbon)
-        new_task = QPushButton("New Task", ribbon)
+        view.addItems(["Day", "Week", "Month", "Year", "Schedule", "4 Days"])
+        view.setCurrentText(self.active_view)
         sync = QPushButton("Run Sync Now", ribbon)
-        send_ai = QPushButton("Send Selected to AI", ribbon)
-
-        for w in [today, prev, nxt, view, new_event, new_task, sync, send_ai]:
+        for w in [today, prev, nxt, view, sync]:
             row.addWidget(w)
         row.addStretch(1)
-
         today.clicked.connect(self._go_today)
         prev.clicked.connect(lambda: self._shift_date(-1))
         nxt.clicked.connect(lambda: self._shift_date(1))
         view.currentTextChanged.connect(self._set_view)
-        new_event.clicked.connect(self._add_calendar)
-        new_task.clicked.connect(self._add_task)
         sync.clicked.connect(self._run_sync)
-        send_ai.clicked.connect(self._send_selected_to_ai)
-
         self.ribbon_widget = ribbon
         return ribbon
 
+    # ---- Builders ---------------------------------------------------------
     # ---- Workspace lifecycle hooks ----------------------------------------
     def on_workspace_activate(self, _claim: dict[str, Any]) -> None:
-        self.workspace_claim_status = "Workspace claim active: Calendar (slot 1), Tasks (slot 2)."
+        self.workspace_claim_status = "Workspace claim active: Google, Drive, Gmail. Numbering is host-controlled."
         self._set_action_status(self.workspace_claim_status, log=True)
         self.refresh_all()
 
@@ -1534,73 +1614,61 @@ class GoogleCalendarWorkspaceModule:
         self._set_action_status(self.workspace_claim_status, log=True)
 
     # ---- UI event handlers -------------------------------------------------
-    def _selected_id(self, widget: Optional[QListWidget]) -> str:
-        if widget is None:
-            return ""
-        item = widget.currentItem()
-        if item is None:
-            return ""
-        return str(item.data(Qt.UserRole) or "")
-
     def _go_today(self) -> None:
-        if hasattr(self, "calendar_picker") and self.calendar_picker is not None:
-            self.calendar_picker.setSelectedDate(_to_qdate(datetime.now()))
-        self.refresh_calendar_workspace()
-
-    def _jump_to_picker(self) -> None:
-        target = self.jump_date.dateTime().toPython().date()
-        if hasattr(self, "calendar_picker") and self.calendar_picker is not None:
-            self.calendar_picker.setSelectedDate(QDate(target.year, target.month, target.day))
+        self.current_date = datetime.now().date()
         self.refresh_calendar_workspace()
 
     def _shift_date(self, delta: int) -> None:
-        if not hasattr(self, "calendar_picker") or self.calendar_picker is None:
-            return
-        selected = self.calendar_picker.selectedDate().toPython()
+        selected = self.current_date
         if self.active_view == "Year":
             shifted = selected.replace(year=max(1, selected.year + delta))
-        elif self.active_view in {"Week", "Business Week"}:
+        elif self.active_view in {"Week", "4 Days"}:
             shifted = selected + timedelta(days=7 * delta)
         else:
             shifted = selected + timedelta(days=delta)
-        self.calendar_picker.setSelectedDate(QDate(shifted.year, shifted.month, shifted.day))
+        self.current_date = shifted
         self.refresh_calendar_workspace()
 
     def _set_view(self, view_name: str) -> None:
-        self.active_view = str(view_name or "Month")
+        self.active_view = str(view_name or "Week")
         if hasattr(self, "view_selector") and self.view_selector.currentText() != self.active_view:
             self.view_selector.blockSignals(True)
             self.view_selector.setCurrentText(self.active_view)
             self.view_selector.blockSignals(False)
         self.refresh_calendar_workspace()
 
-    def _on_calendar_date_changed(self) -> None:
-        self.focused_workspace = "calendar"
+    def _on_editor_tab_changed(self, index: int) -> None:
+        if index == 1:
+            self.focused_workspace = "tasks"
+        elif index == 0:
+            self.focused_workspace = "calendar"
         self.refresh_calendar_workspace()
 
-    def _on_calendar_workspace_selection(self) -> None:
-        self.focused_workspace = "calendar"
-        rec_id = self._selected_id(getattr(self, "calendar_day_list", None))
-        if not rec_id:
-            rec_id = self._selected_id(getattr(self, "calendar_agenda_list", None))
-        rec = self.runtime.calendar_records.get(rec_id)
-        if not rec:
-            return
-        self.selected_calendar_id = rec.id
-        self._populate_calendar_editor(rec)
-        self._update_calendar_details(rec)
-        self._select_calendar_table_row(rec.id)
-
-    def _on_task_workspace_selection(self) -> None:
-        self.focused_workspace = "tasks"
-        rec_id = self._selected_id(getattr(self, "task_list", None))
-        rec = self.runtime.task_records.get(rec_id)
-        if not rec:
-            return
-        self.selected_task_id = rec.id
-        self._populate_task_editor(rec)
-        self._update_task_details(rec)
-        self._select_task_table_row(rec.id)
+    def _toggle_sidebar(self, mode: str) -> None:
+        if self.sidebar_mode == mode:
+            self.sidebar_mode = ""
+        else:
+            self.sidebar_mode = mode
+        for btn, btn_mode in [
+            (self.sidebar_tasks_btn, "tasks"),
+            (self.sidebar_contacts_btn, "contacts"),
+            (self.sidebar_maps_btn, "maps"),
+            (self.sidebar_extra_btn, "extra"),
+        ]:
+            btn.blockSignals(True)
+            btn.setChecked(self.sidebar_mode == btn_mode)
+            btn.blockSignals(False)
+        if not self.sidebar_mode:
+            self.workspace_splitter.setSizes([100, 1])
+            self.sidebar_panel_label.setText("Coming Soon")
+        else:
+            self.workspace_splitter.setSizes([80, 20])
+            if self.sidebar_mode == "tasks":
+                open_tasks = [t for t in self.runtime.task_records.values() if t.status != "completed"]
+                preview = "\n".join([f"• {t.title}" for t in open_tasks[:12]]) or "No open tasks"
+                self.sidebar_panel_label.setText(preview)
+            else:
+                self.sidebar_panel_label.setText("Coming Soon")
 
     def _on_calendar_panel_selection(self) -> None:
         if not hasattr(self, "calendar_records_table"):
@@ -1615,16 +1683,18 @@ class GoogleCalendarWorkspaceModule:
         self.focused_workspace = "calendar"
         self.selected_calendar_id = rec.id
         self._populate_calendar_editor(rec)
-        self._update_calendar_details(rec)
+        self.current_date = (_iso_to_dt(rec.start_at) or datetime.now()).date()
+        self._open_event_detail(rec)
         self._update_send_ai_enabled()
+        self.refresh_calendar_workspace()
 
     def _on_task_panel_selection(self) -> None:
-        if not hasattr(self, "task_records_table"):
+        if not hasattr(self, "task_sidebar"):
             return
-        selected = self.task_records_table.selectedItems()
-        if not selected:
+        item = self.task_sidebar.currentItem()
+        if item is None:
             return
-        rec_id = str(selected[0].data(Qt.UserRole) or "")
+        rec_id = str(item.data(Qt.UserRole) or "")
         rec = self.runtime.task_records.get(rec_id)
         if not rec:
             return
@@ -1654,9 +1724,10 @@ class GoogleCalendarWorkspaceModule:
         self.task_notes.setPlainText(rec.notes)
         due = _iso_to_dt(rec.due_at)
         if due:
-            self.task_due.setDateTime(due.replace(tzinfo=None))
-        self.task_recur.setCurrentText(self._recurrence_label(rec.recurrence))
-        self.task_status.setCurrentText(rec.status if rec.status in {"open", "completed"} else "open")
+            self.task_due.setDate(due.date())
+        if hasattr(self, "task_list_selector"):
+            source = str((rec.metadata or {}).get("task_list_name") or "Default")
+            self.task_list_selector.setCurrentText(source)
 
     @staticmethod
     def _ui_datetime_to_utc_iso(value: datetime) -> str:
@@ -1666,45 +1737,43 @@ class GoogleCalendarWorkspaceModule:
             dt = dt.replace(tzinfo=local_tz or UTC)
         return dt.astimezone(UTC).isoformat()
 
-    def _add_calendar(self) -> None:
-        if not hasattr(self, "cal_title") or not self.cal_title.text().strip():
-            QMessageBox.warning(self.panel_widget or QWidget(), "Missing title", "Please provide an event title.")
-            return
-        try:
-            rec = self.runtime.create_calendar_immediate(
-                title=self.cal_title.text().strip(),
-                description=self.cal_desc.toPlainText().strip(),
-                start_at=self._ui_datetime_to_utc_iso(self.cal_start.dateTime().toPython()),
-                end_at=self._ui_datetime_to_utc_iso(self.cal_end.dateTime().toPython()),
-                recurrence=self._recurrence_value(self.cal_recur.currentText()),
-            )
-        except Exception as ex:
-            self._log(f"GoogleCalendar New Event failed: {ex}")
-            QMessageBox.critical(self.panel_widget or QWidget(), "Create Event Failed", str(ex))
-            self._set_action_status(f"Create event failed: {ex}", log=True)
-            self.refresh_all()
-            return
-        self.selected_calendar_id = rec.id
-        self._set_action_status(f"Created event '{rec.title}'.", log=True)
-        self.refresh_all()
+    def _blank_event_form(self) -> None:
+        self.selected_calendar_id = ""
+        self.cal_title.setText("")
+        self.cal_desc.setPlainText("")
+        self.cal_location.setText("")
+        self.cal_date.setDate(self.current_date)
+        self.cal_start.setDateTime(datetime.now().replace(minute=0, second=0, microsecond=0))
+        self.cal_end.setDateTime(datetime.now().replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+        self.cal_reminder_minutes.setText("10")
 
     def _update_calendar(self) -> None:
-        rec_id = self.selected_calendar_id or self._selected_id(getattr(self, "calendar_day_list", None))
-        if not rec_id:
-            rec_id = self._selected_id(getattr(self, "calendar_agenda_list", None))
-        if not rec_id:
-            rec_id = self._selected_table_id(getattr(self, "calendar_records_table", None))
-        if not rec_id:
-            return
+        rec_id = self.selected_calendar_id
         try:
-            self.runtime.update_calendar_immediate(
-                rec_id=rec_id,
-                title=self.cal_title.text().strip() or "Untitled Event",
-                description=self.cal_desc.toPlainText().strip(),
-                start_at=self._ui_datetime_to_utc_iso(self.cal_start.dateTime().toPython()),
-                end_at=self._ui_datetime_to_utc_iso(self.cal_end.dateTime().toPython()),
-                recurrence=self._recurrence_value(self.cal_recur.currentText()),
-            )
+            if rec_id:
+                self.runtime.update_calendar_immediate(
+                    rec_id=rec_id,
+                    title=self.cal_title.text().strip() or "Untitled Event",
+                    description=self.cal_desc.toPlainText().strip(),
+                    start_at=self._ui_datetime_to_utc_iso(self.cal_start.dateTime().toPython()),
+                    end_at=self._ui_datetime_to_utc_iso(self.cal_end.dateTime().toPython()),
+                    recurrence=self._recurrence_value(self.cal_recur.currentText()),
+                )
+            else:
+                rec = self.runtime.create_calendar_immediate(
+                    title=self.cal_title.text().strip() or "Untitled Event",
+                    description=self.cal_desc.toPlainText().strip(),
+                    start_at=self._ui_datetime_to_utc_iso(self.cal_start.dateTime().toPython()),
+                    end_at=self._ui_datetime_to_utc_iso(self.cal_end.dateTime().toPython()),
+                    recurrence=self._recurrence_value(self.cal_recur.currentText()),
+                )
+                self.selected_calendar_id = rec.id
+            if self.selected_calendar_id in self.runtime.calendar_records:
+                rec = self.runtime.calendar_records[self.selected_calendar_id]
+                rec.metadata = dict(rec.metadata or {})
+                rec.metadata["location"] = self.cal_location.text().strip()
+                rec.metadata["reminder_minutes"] = int(self.cal_reminder_minutes.text().strip() or "10")
+                rec.metadata["reminder_method"] = self.cal_reminder_method.currentText()
         except Exception as ex:
             self._log(f"GoogleCalendar Update Selected failed: {ex}")
             QMessageBox.critical(self.panel_widget or QWidget(), "Update Event Failed", str(ex))
@@ -1715,11 +1784,7 @@ class GoogleCalendarWorkspaceModule:
         self.refresh_all()
 
     def _cancel_calendar(self) -> None:
-        rec_id = self.selected_calendar_id or self._selected_id(getattr(self, "calendar_day_list", None))
-        if not rec_id:
-            rec_id = self._selected_id(getattr(self, "calendar_agenda_list", None))
-        if not rec_id:
-            rec_id = self._selected_table_id(getattr(self, "calendar_records_table", None))
+        rec_id = self.selected_calendar_id
         if not rec_id:
             return
         try:
@@ -1734,41 +1799,38 @@ class GoogleCalendarWorkspaceModule:
         self._set_action_status("Deleted selected event.", log=True)
         self.refresh_all()
 
-    def _add_task(self) -> None:
-        if not hasattr(self, "task_title") or not self.task_title.text().strip():
-            QMessageBox.warning(self.panel_widget or QWidget(), "Missing title", "Please provide a task title.")
-            return
-        rec = self.runtime.create_task(
-            title=self.task_title.text().strip(),
-            notes=self.task_notes.toPlainText().strip(),
-            due_at=self.task_due.dateTime().toPython().replace(tzinfo=UTC).isoformat(),
-            recurrence=self._recurrence_value(self.task_recur.currentText()),
-        )
-        self.selected_task_id = rec.id
-        self._set_action_status(f"Created task '{rec.title}'.", log=True)
-        self.refresh_all()
+    def _blank_task_form(self) -> None:
+        self.selected_task_id = ""
+        self.task_title.setText("")
+        self.task_notes.setPlainText("")
+        self.task_due.setDate(datetime.now().date())
 
     def _update_task(self) -> None:
-        rec_id = self.selected_task_id or self._selected_id(getattr(self, "task_list", None))
-        if not rec_id:
-            rec_id = self._selected_table_id(getattr(self, "task_records_table", None))
-        if not rec_id:
-            return
-        self.runtime.update_task(
-            rec_id=rec_id,
-            title=self.task_title.text().strip() or "Untitled Task",
-            notes=self.task_notes.toPlainText().strip(),
-            due_at=self.task_due.dateTime().toPython().replace(tzinfo=UTC).isoformat(),
-            recurrence=self._recurrence_value(self.task_recur.currentText()),
-            status=self.task_status.currentText(),
-        )
+        rec_id = self.selected_task_id
+        due = datetime.combine(self.task_due.date().toPython(), datetime.min.time()).replace(tzinfo=UTC).isoformat()
+        if rec_id:
+            self.runtime.update_task(
+                rec_id=rec_id,
+                title=self.task_title.text().strip() or "Untitled Task",
+                notes=self.task_notes.toPlainText().strip(),
+                due_at=due,
+                recurrence="none",
+                status="open",
+            )
+        else:
+            rec = self.runtime.create_task(
+                title=self.task_title.text().strip() or "Untitled Task",
+                notes=self.task_notes.toPlainText().strip(),
+                due_at=due,
+                recurrence="none",
+            )
+            rec.metadata["task_list_name"] = self.task_list_selector.currentText()
+            self.selected_task_id = rec.id
         self._set_action_status("Updated selected task.", log=True)
         self.refresh_all()
 
     def _complete_task(self) -> None:
-        rec_id = self.selected_task_id or self._selected_id(getattr(self, "task_list", None))
-        if not rec_id:
-            rec_id = self._selected_table_id(getattr(self, "task_records_table", None))
+        rec_id = self.selected_task_id
         if not rec_id:
             return
         rec = self.runtime.task_records.get(rec_id)
@@ -1786,9 +1848,7 @@ class GoogleCalendarWorkspaceModule:
         self.refresh_all()
 
     def _delete_task(self) -> None:
-        rec_id = self.selected_task_id or self._selected_id(getattr(self, "task_list", None))
-        if not rec_id:
-            rec_id = self._selected_table_id(getattr(self, "task_records_table", None))
+        rec_id = self.selected_task_id
         if not rec_id:
             return
         self.runtime.delete_task(rec_id)
@@ -1819,20 +1879,9 @@ class GoogleCalendarWorkspaceModule:
             self._set_action_status(f"Google authentication failed: {message}", log=True)
         self.refresh_sync()
 
-    def _scan_reminders(self) -> None:
-        reminders = self.runtime.due_reminders()
-        QMessageBox.information(self.panel_widget or QWidget(), "Reminder Scan", f"Detected {len(reminders)} upcoming reminder(s).")
-        self._set_action_status(f"Reminder scan complete: {len(reminders)} upcoming.", log=True)
-        self.refresh_sync()
-
     def _send_selected_to_ai(self) -> None:
         payload = self._build_selected_payload()
-        self._update_send_ai_enabled()
-        if payload is None:
-            self._set_action_status("Send to AI blocked: select an event or task first.", log=True)
-            return
-        ok = self._send_payload_to_ai(payload)
-        if ok:
+        if payload and self._send_payload_to_ai(payload):
             self._set_action_status("Send to AI succeeded via host handoff.", log=True)
             return
         self._set_action_status("Send to AI failed: no host handoff path available.", log=True)
@@ -1841,33 +1890,27 @@ class GoogleCalendarWorkspaceModule:
         rec = self.runtime.calendar_records.get(self.selected_calendar_id)
         if rec:
             return {
-                "type": "event",
+                "type": "Calendar Event",
                 "title": rec.title,
+                "date": rec.start_at.split("T")[0] if rec.start_at else "",
                 "description": rec.description,
                 "start": rec.start_at,
                 "end": rec.end_at,
-                "location": str(rec.metadata.get("location") or ""),
-                "recurrence": rec.recurrence,
-                "attendees": list(rec.metadata.get("attendees") or []),
-                "status": rec.status,
-                "source": rec.source,
-                "sync_state": rec.sync_status,
-                "google_ids": {"event_id": rec.google_event_id},
-                "record_id": rec.id,
+                "calendar": str((rec.metadata or {}).get("source_calendar_name") or rec.source),
+                "location": str((rec.metadata or {}).get("location") or ""),
+                "reminder": {
+                    "minutes_before": (rec.metadata or {}).get("reminder_minutes"),
+                    "method": (rec.metadata or {}).get("reminder_method"),
+                },
             }
         task = self.runtime.task_records.get(self.selected_task_id)
         if task:
             return {
-                "type": "task",
-                "title": task.title,
+                "type": "Task",
+                "task_name": task.title,
                 "notes": task.notes,
-                "due": task.due_at,
-                "recurrence": task.recurrence,
-                "status": task.status,
-                "source": task.source,
-                "sync_state": task.sync_status,
-                "google_ids": {"task_id": task.google_task_id},
-                "record_id": task.id,
+                "due_date": task.due_at.split("T")[0] if task.due_at else "",
+                "list": str((task.metadata or {}).get("task_list_name") or "Default"),
             }
         return None
 
@@ -1908,10 +1951,7 @@ class GoogleCalendarWorkspaceModule:
         return str(recurrence_label or "None").strip().lower() or "none"
 
     def _update_send_ai_enabled(self) -> None:
-        if not hasattr(self, "send_ai_btn"):
-            return
-        selected = bool(self._build_selected_payload())
-        self.send_ai_btn.setEnabled(selected)
+        return
 
     def _selected_table_id(self, table: Optional[QTableWidget]) -> str:
         if table is None:
@@ -2004,130 +2044,57 @@ class GoogleCalendarWorkspaceModule:
         )
 
     def refresh_calendar_workspace(self) -> None:
-        rows = sorted(
-            [r for r in self.runtime.calendar_records.values() if r.status not in {"cancelled", "deleted"}],
-            key=lambda r: (r.start_at, r.title),
-        )
-        selected_date = datetime.now().date()
-        if hasattr(self, "calendar_picker") and self.calendar_picker is not None:
-            selected_date = self.calendar_picker.selectedDate().toPython()
-
-        if hasattr(self, "calendar_day_list") and self.calendar_day_list is not None:
-            self.calendar_day_list.clear()
-        day_count = 0
-        for rec in rows:
-            start_dt = _iso_to_dt(rec.start_at)
-            if start_dt and start_dt.date() == selected_date:
-                day_count += 1
-                if hasattr(self, "calendar_day_list") and self.calendar_day_list is not None:
-                    item = QListWidgetItem(self._calendar_row(rec))
-                    item.setData(Qt.UserRole, rec.id)
-                    self.calendar_day_list.addItem(item)
-
-        if hasattr(self, "calendar_agenda_list") and self.calendar_agenda_list is not None:
-            self.calendar_agenda_list.clear()
-        for rec in rows:
-            start_dt = _iso_to_dt(rec.start_at)
-            if start_dt and start_dt.date() >= selected_date:
-                if hasattr(self, "calendar_agenda_list") and self.calendar_agenda_list is not None:
-                    item = QListWidgetItem(self._calendar_row(rec))
-                    item.setData(Qt.UserRole, rec.id)
-                    self.calendar_agenda_list.addItem(item)
-
-        if hasattr(self, "calendar_day_summary") and self.calendar_day_summary is not None:
-            self.calendar_day_summary.setText(
-                f"Date: {selected_date.isoformat()} | View: {self.active_view} | "
-                f"Events today: {day_count} | Total active events: {len(rows)}"
-            )
-        if hasattr(self, "calendar_workspace_status") and self.calendar_workspace_status is not None:
-            self.calendar_workspace_status.setText(
-                f"{self.workspace_claim_status}\n"
-                f"Calendar fetch: loaded={len(rows)} records, selected_date={selected_date.isoformat()}."
-            )
-        if hasattr(self, "day_events_label") and self.day_events_label is not None:
-            self.day_events_label.setText(f"Selected Day Events ({day_count})")
-
-        rec = self.runtime.calendar_records.get(self.selected_calendar_id)
-        self._update_calendar_details(rec)
-        self._refresh_calendar_records_table(rows)
-        self._update_send_ai_enabled()
+        rows = sorted([r for r in self.runtime.calendar_records.values() if r.status not in {"cancelled", "deleted"}], key=lambda r: (r.start_at, r.title))
+        if hasattr(self, "month_label"):
+            self.month_label.setText(self.current_date.strftime("%B %Y"))
+        self._render_calendar_grid(rows)
+        self._refresh_upcoming_list()
+        self._refresh_calendar_checkboxes()
+        self._apply_font_scaling()
 
     def refresh_tasks_workspace(self) -> None:
-        rows = sorted(
-            [r for r in self.runtime.task_records.values() if r.status != "deleted"],
-            key=lambda r: (r.due_at, r.title),
-        )
-        if hasattr(self, "task_list") and self.task_list is not None:
-            self.task_list.clear()
-        open_count = 0
-        synced_count = 0
+        if not hasattr(self, "task_sidebar"):
+            return
+        rows = sorted([r for r in self.runtime.task_records.values() if r.status != "deleted"], key=lambda r: (r.due_at, r.title))
+        self.task_sidebar.clear()
+        list_names: set[str] = set()
         for rec in rows:
-            if rec.status != "completed":
-                open_count += 1
-            if rec.sync_status == "synced":
-                synced_count += 1
-            if hasattr(self, "task_list") and self.task_list is not None:
-                item = QListWidgetItem(self._task_row(rec))
-                item.setData(Qt.UserRole, rec.id)
-                self.task_list.addItem(item)
+            item = QListWidgetItem(f"{'☑' if rec.status == 'completed' else '◯'} {rec.title}")
+            item.setData(Qt.UserRole, rec.id)
+            self.task_sidebar.addItem(item)
+            list_names.add(str((rec.metadata or {}).get("task_list_name") or "Default"))
+        self.task_list_selector.clear()
+        self.task_list_selector.addItems(sorted(list_names or {"Default"}))
+        self._apply_font_scaling()
 
-        if hasattr(self, "task_workspace_status") and self.task_workspace_status is not None:
-            self.task_workspace_status.setText(
-                f"Tasks: {len(rows)} total | {open_count} open | {synced_count} synced | "
-                f"Mode: {self.runtime.sync_state.get('mode')}"
-            )
-        if hasattr(self, "tasks_workspace_debug") and self.tasks_workspace_debug is not None:
-            self.tasks_workspace_debug.setText(
-                f"{self.workspace_claim_status}\n"
-                f"Tasks fetch: loaded={len(rows)} records; completed={len([r for r in rows if r.status == 'completed'])}."
-            )
-        rec = self.runtime.task_records.get(self.selected_task_id)
-        self._update_task_details(rec)
-        self._refresh_task_records_table(rows)
-        self._update_send_ai_enabled()
-
-    def _refresh_calendar_records_table(self, rows: list[CalendarRecord]) -> None:
+    def _refresh_upcoming_list(self) -> None:
         if not hasattr(self, "calendar_records_table"):
             return
+        window = self.upcoming_window.currentText()
+        days = 30 if window == "1 Month" else (90 if window == "3 Months" else 365)
+        now = datetime.now(UTC)
+        end = now + timedelta(days=days)
+        rows = []
+        seen: set[tuple[str, str]] = set()
+        for rec in self.runtime.calendar_records.values():
+            start = _iso_to_dt(rec.start_at)
+            if not start or start < now or start > end or rec.status in {"cancelled", "deleted"}:
+                continue
+            key = (rec.google_event_id or rec.id, start.isoformat())
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(rec)
+        rows.sort(key=lambda r: (r.start_at, r.title))
         table = self.calendar_records_table
         table.blockSignals(True)
         table.setRowCount(len(rows))
         for idx, rec in enumerate(rows):
-            source_name = str((rec.metadata or {}).get("source_calendar_name") or (rec.source or "local"))
-            status_value = rec.status or "unknown"
-            sync_status = rec.sync_status or "unknown"
-            mapping_value = rec.google_event_id or "local-only"
             values = [
                 rec.title or "Untitled Event",
                 self._table_dt_cell(rec.start_at),
                 self._table_dt_cell(rec.end_at),
-                source_name,
-                sync_status,
-                mapping_value,
-                status_value,
-            ]
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(str(value))
-                if col == 0:
-                    item.setData(Qt.UserRole, rec.id)
-                table.setItem(idx, col, item)
-        table.blockSignals(False)
-        if self.selected_calendar_id:
-            self._select_calendar_table_row(self.selected_calendar_id)
-
-    def _refresh_task_records_table(self, rows: list[TaskRecord]) -> None:
-        if not hasattr(self, "task_records_table"):
-            return
-        table = self.task_records_table
-        table.blockSignals(True)
-        table.setRowCount(len(rows))
-        for idx, rec in enumerate(rows):
-            date_text, time_text = self._split_dt_cell(rec.due_at)
-            values = [
-                rec.title or "Untitled Task",
-                date_text,
-                time_text,
-                self._short_cell_text(rec.notes),
+                str((rec.metadata or {}).get("source_calendar_name") or "local"),
                 rec.status,
             ]
             for col, value in enumerate(values):
@@ -2136,8 +2103,6 @@ class GoogleCalendarWorkspaceModule:
                     item.setData(Qt.UserRole, rec.id)
                 table.setItem(idx, col, item)
         table.blockSignals(False)
-        if self.selected_task_id:
-            self._select_task_table_row(self.selected_task_id)
 
     def refresh_sync(self) -> None:
         if not hasattr(self, "sync_label"):
@@ -2165,10 +2130,264 @@ class GoogleCalendarWorkspaceModule:
             log=True,
         )
 
+    def _refresh_calendar_checkboxes(self) -> None:
+        if not hasattr(self, "calendar_list_layout"):
+            return
+        while self.calendar_list_layout.count():
+            item = self.calendar_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        calendars: dict[str, dict[str, str]] = {}
+        for rec in self.runtime.calendar_records.values():
+            cid = str((rec.metadata or {}).get("source_calendar_id") or "primary")
+            calendars[cid] = {
+                "name": str((rec.metadata or {}).get("source_calendar_name") or cid),
+                "background": str((rec.metadata or {}).get("calendar_background_color") or "#4285F4"),
+            }
+        self.cal_selector.blockSignals(True)
+        self.cal_selector.clear()
+        for cid, info in sorted(calendars.items(), key=lambda x: x[1]["name"].lower()):
+            cb = QCheckBox(info["name"])
+            if not self.visible_calendar_ids:
+                self.visible_calendar_ids.add(cid)
+            cb.setChecked(cid in self.visible_calendar_ids)
+            cb.setStyleSheet(f"QCheckBox::indicator:unchecked{{background:{info['background']};}}QCheckBox::indicator:checked{{background:{info['background']};}}")
+            cb.toggled.connect(lambda checked, cal_id=cid: self._toggle_calendar_visibility(cal_id, checked))
+            self.calendar_list_layout.addWidget(cb)
+            self.cal_selector.addItem(info["name"], userData=cid)
+        self.cal_selector.blockSignals(False)
+        self.calendar_list_layout.addStretch(1)
+
+    def _toggle_calendar_visibility(self, calendar_id: str, checked: bool) -> None:
+        if checked:
+            self.visible_calendar_ids.add(calendar_id)
+        else:
+            self.visible_calendar_ids.discard(calendar_id)
+        self.refresh_calendar_workspace()
+
+    def _render_calendar_grid(self, rows: list[CalendarRecord]) -> None:
+        if not hasattr(self, "calendar_grid"):
+            return
+        grid = self.calendar_grid
+        if self.focused_workspace == "tasks":
+            task_lists: dict[str, list[TaskRecord]] = {}
+            for task in self.runtime.task_records.values():
+                if task.status == "deleted":
+                    continue
+                list_name = str((task.metadata or {}).get("task_list_name") or "Default")
+                task_lists.setdefault(list_name, []).append(task)
+            headers = ["List"] + list(task_lists.keys())
+            grid.setColumnCount(max(2, len(headers)))
+            grid.setRowCount(20)
+            grid.setHorizontalHeaderLabels(headers + [""] * (grid.columnCount() - len(headers)))
+            for r in range(grid.rowCount()):
+                for c in range(grid.columnCount()):
+                    grid.setItem(r, c, QTableWidgetItem(""))
+            for col, (list_name, tasks) in enumerate(task_lists.items(), start=1):
+                grid.setItem(0, col, QTableWidgetItem(f"{list_name}"))
+                grid.setItem(1, col, QTableWidgetItem("+ Add a task"))
+                for row_idx, task in enumerate(tasks[:17], start=2):
+                    grid.setItem(row_idx, col, QTableWidgetItem(f"{'☑' if task.status == 'completed' else '◯'} {task.title}"))
+            return
+        days = [self.current_date - timedelta(days=self.current_date.weekday()) + timedelta(days=i) for i in range(7)]
+        grid.setColumnCount(8)
+        grid.setHorizontalHeaderLabels(["Time"] + [d.strftime("%a %m/%d") for d in days])
+        for hour in range(24):
+            grid.setVerticalHeaderItem(hour, QTableWidgetItem(""))
+            time_item = QTableWidgetItem(f"{hour:02d}:00")
+            grid.setItem(hour, 0, time_item)
+            for col in range(1, 8):
+                empty = QTableWidgetItem("")
+                if days[col - 1] == datetime.now().date():
+                    empty.setBackground(Qt.lightGray)
+                grid.setItem(hour, col, empty)
+        for rec in rows:
+            start_dt = _iso_to_dt(rec.start_at)
+            if not start_dt:
+                continue
+            cal_id = str((rec.metadata or {}).get("source_calendar_id") or "primary")
+            if self.visible_calendar_ids and cal_id not in self.visible_calendar_ids:
+                continue
+            local_start = start_dt.astimezone()
+            if local_start.date() not in days:
+                continue
+            col = days.index(local_start.date()) + 1
+            row = max(0, min(23, local_start.hour))
+            item = QTableWidgetItem(rec.title)
+            color = str((rec.metadata or {}).get("event_background_color") or (rec.metadata or {}).get("calendar_background_color") or "#4285F4")
+            item.setBackground(QColor(color))
+            item.setData(Qt.UserRole, rec.id)
+            grid.setItem(row, col, item)
+        self._draw_current_time_line(days)
+
+    def _draw_current_time_line(self, days: list[Any]) -> None:
+        now = datetime.now().astimezone()
+        if now.date() not in days:
+            return
+        col = days.index(now.date()) + 1
+        row = now.hour
+        item = self.calendar_grid.item(row, col)
+        if item:
+            item.setText(f"━━ {item.text()}")
+
+    def _on_calendar_grid_clicked(self, row: int, col: int) -> None:
+        if col == 0:
+            return
+        item = self.calendar_grid.item(row, col)
+        rec_id = str(item.data(Qt.UserRole) or "") if item else ""
+        rec = self.runtime.calendar_records.get(rec_id)
+        if rec:
+            self.selected_calendar_id = rec.id
+            self._populate_calendar_editor(rec)
+            self._open_event_detail(rec)
+            return
+        day = self.current_date - timedelta(days=self.current_date.weekday()) + timedelta(days=col - 1)
+        dt = datetime(day.year, day.month, day.day, row, 0)
+        self._switch_to_event_controls()
+        self._blank_event_form()
+        self.cal_date.setDate(day)
+        self.cal_start.setDateTime(dt)
+        self.cal_end.setDateTime(dt + timedelta(hours=1))
+
+    def _switch_to_event_controls(self) -> None:
+        if self.editor_tabs:
+            self.editor_tabs.setCurrentIndex(0)
+
+    def _open_event_detail(self, rec: CalendarRecord) -> None:
+        if not self.event_detail_overlay:
+            return
+        source_name = str((rec.metadata or {}).get("source_calendar_name") or "Calendar")
+        reminder = str((rec.metadata or {}).get("reminder_minutes") or "default")
+        self.event_detail_text.setText(
+            f"● {rec.title}\n{self._table_dt_cell(rec.start_at)} - {self._table_dt_cell(rec.end_at)}\n"
+            f"Invite: {(rec.metadata or {}).get('htmlLink', 'N/A')}\nReminder: {reminder}\nOwner: {source_name}"
+        )
+        self.event_detail_overlay.setVisible(True)
+
+    def _send_event_form_to_ai(self) -> None:
+        payload = {
+            "type": "Calendar Event",
+            "title": self.cal_title.text().strip(),
+            "date": self.cal_date.date().toString("yyyy-MM-dd"),
+            "start": self.cal_start.dateTime().toString(Qt.ISODate),
+            "end": self.cal_end.dateTime().toString(Qt.ISODate),
+            "description": self.cal_desc.toPlainText().strip(),
+            "calendar": self.cal_selector.currentText(),
+            "reminder": {"minutes_before": self.cal_reminder_minutes.text().strip(), "method": self.cal_reminder_method.currentText()},
+        }
+        if not self._send_payload_to_ai(payload):
+            self._set_action_status("Send to AI failed: no host handoff path available.", log=True)
+
+    def _send_task_form_to_ai(self) -> None:
+        payload = {
+            "type": "Task",
+            "task_name": self.task_title.text().strip(),
+            "list": self.task_list_selector.currentText(),
+            "due_date": self.task_due.date().toString("yyyy-MM-dd"),
+            "notes": self.task_notes.toPlainText().strip(),
+        }
+        if not self._send_payload_to_ai(payload):
+            self._set_action_status("Send to AI failed: no host handoff path available.", log=True)
+
+    def _send_upcoming_to_ai(self) -> None:
+        lines = []
+        for row in range(self.calendar_records_table.rowCount()):
+            t = self.calendar_records_table.item(row, 0).text()
+            s = self.calendar_records_table.item(row, 1).text()
+            c = self.calendar_records_table.item(row, 3).text()
+            lines.append(f"{t} — {s} — {c}")
+        payload = {
+            "type": "Upcoming Events List",
+            "window": self.upcoming_window.currentText(),
+            "lines": [f"Upcoming events for the next {self.upcoming_window.currentText()}: {line}" for line in lines],
+        }
+        self._send_payload_to_ai(payload)
+
+    def _process_reminders(self) -> None:
+        now = datetime.now(UTC)
+        for rec in self.runtime.calendar_records.values():
+            if rec.status in {"cancelled", "deleted"}:
+                continue
+            start_dt = _iso_to_dt(rec.start_at)
+            if not start_dt:
+                continue
+            minutes = int((rec.metadata or {}).get("reminder_minutes") or 10)
+            trigger = start_dt - timedelta(minutes=minutes)
+            if trigger <= now <= trigger + timedelta(seconds=35):
+                payload = {
+                    "type": "Calendar Reminder",
+                    "event_title": rec.title,
+                    "event_date": start_dt.date().isoformat(),
+                    "start_time": start_dt.strftime("%H:%M"),
+                    "end_time": (_iso_to_dt(rec.end_at) or start_dt).strftime("%H:%M"),
+                    "description": rec.description,
+                    "calendar_name": str((rec.metadata or {}).get("source_calendar_name") or ""),
+                    "reminder_trigger_window": f"{minutes} minutes",
+                    "location": str((rec.metadata or {}).get("location") or ""),
+                    "attendees": list((rec.metadata or {}).get("attendees") or []),
+                }
+                self._send_payload_to_ai(payload)
+        self._process_task_reminder_batches(now)
+
+    def _process_task_reminder_batches(self, now: datetime) -> None:
+        today = now.date()
+        if self._daily_task_reminder_date != today.isoformat():
+            self._daily_task_reminder_date = today.isoformat()
+            self._daily_task_reminder_minute_fired = False
+        if now.hour == 0:
+            self._daily_task_reminder_minute_fired = False
+        if now.hour == 0 and now.minute < 2 and not self._daily_task_reminder_minute_fired:
+            self._daily_task_reminder_minute_fired = True
+        if now.minute < 1 and not self._daily_task_reminder_minute_fired:
+            return
+        batches = {"Due Tomorrow": [], "Due Today": [], "Past Due": [], "Critically Overdue": []}
+        for rec in self.runtime.task_records.values():
+            if rec.status == "completed":
+                continue
+            due_dt = _iso_to_dt(rec.due_at)
+            if not due_dt:
+                continue
+            days = (today - due_dt.date()).days
+            line = f"{rec.title} — {rec.notes or ''}"
+            if days == -1:
+                batches["Due Tomorrow"].append(line)
+            elif days == 0:
+                batches["Due Today"].append(line)
+            elif 1 <= days <= 30:
+                batches["Past Due"].append(line)
+            elif days > 30:
+                batches["Critically Overdue"].append(line)
+        for batch_name in ["Due Tomorrow", "Due Today", "Past Due", "Critically Overdue"]:
+            lines = batches[batch_name]
+            if not lines:
+                continue
+            payload = {
+                "type": "Task Reminder Batch",
+                "batch_name": batch_name,
+                "current_date": today.isoformat(),
+                "visible_task_lines": lines,
+                "instruction": "no per-item commentary while listing; comment only after the full batch list",
+            }
+            self._send_payload_to_ai(payload)
+
     def refresh_all(self) -> None:
+        self._process_reminders()
         self.refresh_calendar_workspace()
         self.refresh_tasks_workspace()
         self.refresh_sync()
+
+    def get_workspace_spec(self) -> dict[str, Any]:
+        return {
+            "tabs": [
+                {"id": "google_workspace", "label": "Google", "build": self.build_calendar_workspace},
+                {"id": "drive_workspace", "label": "Drive", "build": self.build_drive_workspace},
+                {"id": "gmail_workspace", "label": "Gmail", "build": self.build_gmail_workspace},
+            ],
+            "build_ribbon": self.build_ribbon,
+            "on_activate": self.on_workspace_activate,
+            "on_deactivate": self.on_workspace_deactivate,
+            "on_release": self.on_workspace_release,
+        }
 
 
 def register(deck_api: dict) -> dict:
@@ -2234,21 +2453,10 @@ def register(deck_api: dict) -> dict:
                 "get_content": ui.build_module_panel,
             }
         ],
-        "workspace": {
-            "tabs": [
-                {"id": "google_calendar_workspace_calendar", "label": "Calendar", "build": ui.build_calendar_workspace},
-                {"id": "google_calendar_workspace_tasks", "label": "Tasks", "build": ui.build_tasks_workspace},
-            ],
-            "build_ribbon": ui.build_ribbon,
-            "on_activate": ui.on_workspace_activate,
-            "on_deactivate": ui.on_workspace_deactivate,
-            "on_release": ui.on_workspace_release,
-        },
+        "workspace": ui.get_workspace_spec(),
         "supports_workspaces": True,
-        "workspace_tabs": [
-            {"id": "google_calendar_workspace_calendar", "label": "Calendar", "build": ui.build_calendar_workspace},
-            {"id": "google_calendar_workspace_tasks", "label": "Tasks", "build": ui.build_tasks_workspace},
-        ],
+        "workspace_tabs": ui.get_workspace_spec()["tabs"],
+        "get_workspace_spec": ui.get_workspace_spec,
         "build_ribbon": ui.build_ribbon,
         "on_workspace_activate": ui.on_workspace_activate,
         "on_workspace_deactivate": ui.on_workspace_deactivate,
