@@ -4392,3 +4392,510 @@ class GmailRibbon(QWidget):
     def showEvent(self, event: Any) -> None:  # type: ignore[override]
         super().showEvent(event)
         self._apply_font_scaling()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Section 10: GmailWorkspaceModule · get_workspace_spec() · register()
+# ══════════════════════════════════════════════════════════════════════════════
+
+class GmailWorkspaceModule:
+    """
+    Top-level coordinator: owns all three mode-views, the panel, and the
+    ribbon; wires them together and handles lifecycle hooks from the host.
+    """
+
+    _MODE_LIST    = 0
+    _MODE_COMPOSE = 1
+    _MODE_READ    = 2
+
+    def __init__(self, runtime: GmailRuntime, deck_api: dict[str, Any]) -> None:
+        self._runtime   = runtime
+        self._deck_api  = deck_api
+        self._log: Callable[[str], None] = (
+            deck_api.get("log") if callable(deck_api.get("log"))
+            else (lambda _m: None)
+        )
+        self._claim_workspaces = (
+            deck_api.get("claim_workspaces")
+            if callable(deck_api.get("claim_workspaces")) else None
+        )
+        self._request_ai = (
+            deck_api.get("request_ai_interpretation")
+            if callable(deck_api.get("request_ai_interpretation")) else None
+        )
+        self._send_to_session = (
+            deck_api.get("send_to_session")
+            if callable(deck_api.get("send_to_session")) else None
+        )
+        self._module_send_to_session = (
+            deck_api.get("module_send_to_session")
+            if callable(deck_api.get("module_send_to_session")) else None
+        )
+        self._handoff_workspace_context = (
+            deck_api.get("handoff_workspace_context")
+            if callable(deck_api.get("handoff_workspace_context")) else None
+        )
+
+        self._sig_manager = SignatureManager(runtime._gmail_dir, runtime._log)
+
+        # Lazy-built widgets (None until first call to build_*)
+        self._panel_widget:     Optional[GmailModulePanel] = None
+        self._workspace_widget: Optional[QWidget]          = None
+        self._ribbon_widget:    Optional[GmailRibbon]      = None
+
+        # Child views (created inside build_gmail_workspace)
+        self._thread_list:  Optional[ThreadListView]  = None
+        self._compose_view: Optional[ComposeView]     = None
+        self._read_view:    Optional[ThreadReadView]  = None
+        self._mode_stack:   Optional[QStackedWidget]  = None
+
+        self._sync_worker:  Optional[GmailSyncWorker] = None
+        self._snooze_timer: Optional[QTimer]           = None
+
+        self.workspace_claim_status = "Workspace claim pending."
+
+    # ── Panel ─────────────────────────────────────────────────────────────────
+
+    def build_module_panel(self) -> QWidget:
+        if self._panel_widget is not None:
+            return self._panel_widget
+
+        panel = GmailModulePanel(self._runtime)
+        panel.compose_requested.connect(self._on_compose_requested)
+        panel.folder_selected.connect(self._on_folder_selected)
+        panel.fetch_now_requested.connect(self._on_fetch_now)
+        panel.auth_requested.connect(self._on_auth_requested)
+        panel.settings_requested.connect(
+            lambda: panel.open_settings_dialog(self._sig_manager, panel)
+        )
+        self._panel_widget = panel
+        return panel
+
+    # ── Workspace ─────────────────────────────────────────────────────────────
+
+    def build_gmail_workspace(self) -> QWidget:
+        if self._workspace_widget is not None:
+            return self._workspace_widget
+
+        root = QWidget()
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        # QStackedWidget for the three modes
+        stack = QStackedWidget(root)
+        self._mode_stack = stack
+
+        self._thread_list = ThreadListView(self._runtime)
+        self._compose_view = ComposeView(self._runtime, self._sig_manager)
+        self._read_view    = ThreadReadView(
+            self._runtime,
+            self._runtime.rule_engine,
+            self._runtime.classifier,
+        )
+
+        stack.addWidget(self._thread_list)   # index 0
+        stack.addWidget(self._compose_view)  # index 1
+        stack.addWidget(self._read_view)     # index 2
+
+        root_layout.addWidget(stack)
+        self._workspace_widget = root
+
+        # Wire thread list signals
+        self._thread_list.thread_opened.connect(self._on_thread_opened)
+        self._thread_list.compose_requested.connect(self._on_compose_requested)
+
+        # Wire compose signals
+        self._compose_view.send_complete.connect(self._on_compose_done)
+        self._compose_view.discard_complete.connect(self._on_compose_done)
+
+        # Wire read view signals
+        self._read_view.back_requested.connect(self._on_back_to_list)
+        self._read_view.reply_requested.connect(
+            lambda msg: self._open_compose_reply(msg, False)
+        )
+        self._read_view.reply_all_requested.connect(
+            lambda msg: self._open_compose_reply(msg, True)
+        )
+        self._read_view.forward_requested.connect(self._open_compose_forward)
+
+        # Inject AI send into read view
+        self._read_view.set_ai_sender(self._send_payload_to_ai)
+
+        # Show thread list by default
+        stack.setCurrentIndex(self._MODE_LIST)
+
+        return root
+
+    # ── Ribbon ────────────────────────────────────────────────────────────────
+
+    def build_ribbon(self) -> QWidget:
+        if self._ribbon_widget is not None:
+            return self._ribbon_widget
+
+        ribbon = GmailRibbon(self._runtime, self._sig_manager)
+
+        ribbon.settings_requested.connect(
+            lambda: (
+                self._panel_widget.open_settings_dialog(
+                    self._sig_manager, self._ribbon_widget
+                ) if self._panel_widget else None
+            )
+        )
+        ribbon.fetch_now_requested.connect(self._on_fetch_now)
+
+        # Forward ribbon formatting signals to the active compose view
+        ribbon.bold_toggled.connect(
+            lambda c: self._compose_view._on_bold() if self._compose_view else None
+        )
+        ribbon.italic_toggled.connect(
+            lambda c: self._compose_view._on_italic() if self._compose_view else None
+        )
+        ribbon.underline_toggled.connect(
+            lambda c: self._compose_view._on_underline() if self._compose_view else None
+        )
+        ribbon.font_family_changed.connect(
+            lambda f: self._compose_view._on_font_family(f) if self._compose_view else None
+        )
+        ribbon.font_size_changed.connect(
+            lambda s: self._compose_view._on_font_size(str(int(s))) if self._compose_view else None
+        )
+        ribbon.text_color_requested.connect(
+            lambda: self._compose_view._on_text_color() if self._compose_view else None
+        )
+        ribbon.sig_selected.connect(self._on_ribbon_sig_selected)
+
+        self._ribbon_widget = ribbon
+        return ribbon
+
+    # ── Mode switching ────────────────────────────────────────────────────────
+
+    def _show_mode(self, mode: int) -> None:
+        if not self._mode_stack:
+            return
+        self._mode_stack.setCurrentIndex(mode)
+
+        if self._ribbon_widget:
+            if mode == self._MODE_COMPOSE:
+                if self._compose_view:
+                    self._compose_view.notify_ribbon_active(self._ribbon_widget)
+            else:
+                if self._compose_view:
+                    self._compose_view.notify_ribbon_inactive(self._ribbon_widget)
+
+        if self._ribbon_widget:
+            if mode == self._MODE_LIST:
+                label = self._thread_list._current_label[1] if self._thread_list else "Inbox"
+                self._ribbon_widget.set_context_label(f"Gmail  ·  {label}")
+            elif mode == self._MODE_COMPOSE:
+                self._ribbon_widget.set_context_label("Gmail  ·  Compose")
+            elif mode == self._MODE_READ:
+                self._ribbon_widget.set_context_label("Gmail  ·  Reading")
+
+    # ── Event handlers wired from child views ─────────────────────────────────
+
+    def _on_folder_selected(self, label_id: str, display_name: str) -> None:
+        if self._thread_list:
+            self._thread_list.load_for_label(label_id, display_name)
+        self._show_mode(self._MODE_LIST)
+        if self._ribbon_widget:
+            self._ribbon_widget.set_context_label(f"Gmail  ·  {display_name}")
+
+    def _on_compose_requested(self) -> None:
+        if self._compose_view:
+            self._compose_view.open_new()
+        self._show_mode(self._MODE_COMPOSE)
+
+    def _on_thread_opened(self, thread_id: str) -> None:
+        if self._read_view:
+            self._read_view.load_thread(thread_id)
+        self._show_mode(self._MODE_READ)
+
+    def _on_back_to_list(self) -> None:
+        self._show_mode(self._MODE_LIST)
+        if self._thread_list:
+            self._thread_list._load_threads()
+
+    def _on_compose_done(self) -> None:
+        self._show_mode(self._MODE_LIST)
+        if self._thread_list:
+            self._thread_list._load_threads()
+
+    def _open_compose_reply(self, msg: MessageDetail, reply_all: bool) -> None:
+        if self._compose_view:
+            self._compose_view.open_reply(msg, reply_all=reply_all)
+        self._show_mode(self._MODE_COMPOSE)
+
+    def _open_compose_forward(self, msg: MessageDetail) -> None:
+        if self._compose_view:
+            self._compose_view.open_forward(msg)
+        self._show_mode(self._MODE_COMPOSE)
+
+    def _on_ribbon_sig_selected(self, sig_id: str) -> None:
+        if not self._compose_view:
+            return
+        sigs = self._sig_manager.load_all()
+        sig  = next((s for s in sigs if s.sig_id == sig_id), None)
+        if sig:
+            html    = self._compose_view._body_edit.toHtml()
+            div_idx = html.rfind("-- <br>")
+            if div_idx != -1:
+                new_html = html[:div_idx] + f"-- <br>{sig.content}"
+            else:
+                new_html = html + f"<br>-- <br>{sig.content}"
+            self._compose_view._body_edit.setHtml(new_html)
+
+    # ── Auth ──────────────────────────────────────────────────────────────────
+
+    def _on_auth_requested(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self._panel_widget,
+            "Select Google credentials.json",
+            "",
+            "JSON files (*.json)",
+        )
+        if not path:
+            return
+        ok, msg = self._runtime.authenticate_google(path)
+        if ok:
+            QMessageBox.information(self._panel_widget, "Auth", msg)
+            if self._panel_widget:
+                self._panel_widget.refresh_sync_status()
+            self._on_fetch_now()
+        else:
+            QMessageBox.critical(self._panel_widget, "Auth failed", msg)
+
+    # ── Sync ──────────────────────────────────────────────────────────────────
+
+    def _on_fetch_now(self) -> None:
+        if self._sync_worker and self._sync_worker.isRunning():
+            self._sync_worker.trigger_now()
+        else:
+            self._start_sync_worker()
+
+    def _start_sync_worker(self) -> None:
+        if self._sync_worker and self._sync_worker.isRunning():
+            return
+        self._sync_worker = GmailSyncWorker(self._runtime, self._deck_api)
+        self._sync_worker.sync_complete.connect(self._on_sync_complete)
+        self._sync_worker.sync_error.connect(self._on_sync_error)
+        self._sync_worker.start()
+
+    def _stop_sync_worker(self) -> None:
+        if self._sync_worker:
+            self._sync_worker.stop()
+            self._sync_worker.wait(3000)
+            self._sync_worker = None
+
+    def _on_sync_complete(self, new_ids: list, history_id: str) -> None:
+        if self._panel_widget:
+            self._panel_widget.refresh_sync_status()
+        if new_ids:
+            count = len(new_ids)
+            self._send_payload_to_ai({
+                "type":        "new_emails_notification",
+                "count":       count,
+                "message":     f"You have {count} new email(s).",
+                "message_ids": new_ids,
+            })
+            if (
+                self._thread_list
+                and self._mode_stack
+                and self._mode_stack.currentIndex() == self._MODE_LIST
+            ):
+                self._thread_list._load_threads()
+
+    def _on_sync_error(self, error: str) -> None:
+        self._log(f"GoogleGmail sync error: {error}")
+        if self._panel_widget:
+            self._panel_widget.refresh_sync_status()
+
+    # ── Snooze resurface timer ────────────────────────────────────────────────
+
+    def _start_snooze_timer(self) -> None:
+        if self._snooze_timer:
+            return
+        self._snooze_timer = QTimer()
+        self._snooze_timer.setInterval(60_000)  # check every minute
+        self._snooze_timer.timeout.connect(self._check_snoozed)
+        self._snooze_timer.start()
+
+    def _check_snoozed(self) -> None:
+        due = self._runtime.get_due_snoozed()
+        for tid in due:
+            self._runtime.unsnooze_thread(tid)
+            try:
+                client = self._runtime._make_client()
+                client.modify_thread(tid, add_label_ids=["INBOX"])
+            except Exception:
+                pass
+        if due and self._thread_list and self._mode_stack:
+            if self._mode_stack.currentIndex() == self._MODE_LIST:
+                self._thread_list._load_threads()
+
+    # ── AI send helper ────────────────────────────────────────────────────────
+
+    def _send_payload_to_ai(self, payload: dict[str, Any]) -> bool:
+        """Try all available deck_api AI handoff paths. Returns True if sent."""
+        if callable(self._handoff_workspace_context):
+            try:
+                self._handoff_workspace_context("google_gmail", payload)
+                return True
+            except Exception:
+                pass
+        if callable(self._module_send_to_session):
+            try:
+                self._module_send_to_session("google_gmail", payload)
+                return True
+            except Exception:
+                pass
+        if callable(self._send_to_session):
+            try:
+                self._send_to_session(payload)
+                return True
+            except Exception:
+                pass
+        if callable(self._request_ai):
+            try:
+                self._request_ai("google_gmail", payload)
+                return True
+            except Exception:
+                pass
+        return False
+
+    # ── Workspace lifecycle ───────────────────────────────────────────────────
+
+    def on_workspace_activate(self, _claim: dict[str, Any]) -> None:
+        self.workspace_claim_status = (
+            "Workspace active: Gmail. Numbering is host-controlled."
+        )
+        self._log("GoogleGmail workspace activated.")
+        self._start_sync_worker()
+        self._start_snooze_timer()
+        if self._panel_widget:
+            self._panel_widget.refresh_sync_status()
+        # Load initial thread list
+        if self._thread_list:
+            self._thread_list.load_for_label("INBOX", "Inbox")
+
+    def on_workspace_deactivate(self, _claim: dict[str, Any]) -> None:
+        self._log("GoogleGmail workspace deactivated.")
+
+    def on_workspace_release(self, _claim: dict[str, Any]) -> None:
+        self._log("GoogleGmail workspace released.")
+        self._stop_sync_worker()
+        if self._snooze_timer:
+            self._snooze_timer.stop()
+            self._snooze_timer = None
+        self.workspace_claim_status = "Workspace claim released."
+
+    # ── Workspace spec ────────────────────────────────────────────────────────
+
+    def get_workspace_spec(self) -> dict[str, Any]:
+        return {
+            "tabs": [
+                {
+                    "id":    "gmail_workspace",
+                    "label": "Gmail",
+                    "build": self.build_gmail_workspace,
+                }
+            ],
+            "build_ribbon":   self.build_ribbon,
+            "on_activate":    self.on_workspace_activate,
+            "on_deactivate":  self.on_workspace_deactivate,
+            "on_release":     self.on_workspace_release,
+        }
+
+    def refresh_all(self) -> None:
+        if self._panel_widget:
+            self._panel_widget.refresh_sync_status()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# register()  —  module entry point
+# ══════════════════════════════════════════════════════════════════════════════
+
+def register(deck_api: dict) -> dict:
+    """
+    Called by the host when the module is loaded.
+    Returns the module registration dict consumed by deck_builder.
+    """
+    deck_api_version = str(deck_api.get("deck_api_version") or "")
+    if deck_api_version != "1.0":
+        raise RuntimeError(
+            f"GoogleGmail: unsupported deck API version: {deck_api_version!r}"
+        )
+
+    runtime = GmailRuntime(deck_api)
+    ui      = GmailWorkspaceModule(runtime, deck_api)
+
+    # ── on_startup hook ───────────────────────────────────────────────────────
+
+    def _on_startup() -> None:
+        runtime.evaluate_auth_status()
+        runtime._save_state()
+        if callable(ui._claim_workspaces):
+            try:
+                ui._claim_workspaces("google_gmail")
+                ui.workspace_claim_status = "Workspace claim requested on startup."
+                ui._log("GoogleGmail workspace claim requested.")
+            except Exception as exc:
+                ui.workspace_claim_status = f"Workspace claim failed: {exc}"
+                ui._log(f"GoogleGmail workspace claim failed: {exc}")
+
+    # ── on_message hook ───────────────────────────────────────────────────────
+
+    def _on_message(message: Any) -> None:
+        if not isinstance(message, dict):
+            return
+        event_type = str(message.get("event_type") or "").strip().lower()
+        payload    = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+
+        # Listen for AI responses that may contain rule suggestions
+        if event_type in {"ai.response", "session.message"} and payload:
+            ai_text = str(payload.get("text") or payload.get("content") or "")
+            if ai_text:
+                suggestion = runtime.rule_engine.parse_rule_suggestion(ai_text)
+                if suggestion:
+                    # Offer rule to user via dialog from the read view or panel
+                    parent_widget = (
+                        ui._read_view or ui._panel_widget
+                    )
+                    accepted = runtime.rule_engine.offer_suggestion_dialog(
+                        suggestion, parent_widget
+                    )
+                    if accepted:
+                        runtime.rule_engine.add_rule(suggestion)
+                        runtime._emit("gmail.rule.applied", suggestion.to_dict())
+
+        ui.refresh_all()
+
+    # ── Return registration dict ──────────────────────────────────────────────
+
+    workspace_spec = ui.get_workspace_spec()
+
+    return {
+        "deck_api_version": "1.0",
+        "module_key":       "google_gmail",
+        "display_name":     "Google Gmail",
+        "home_category":    "Google",
+        "tabs": [
+            {
+                "tab_id":      "google_gmail_main",
+                "tab_name":    "Google Gmail",
+                "get_content": ui.build_module_panel,
+            }
+        ],
+        "workspace":             workspace_spec,
+        "supports_workspaces":   True,
+        "workspace_tabs":        workspace_spec["tabs"],
+        "get_workspace_spec":    ui.get_workspace_spec,
+        "build_ribbon":          ui.build_ribbon,
+        "on_workspace_activate":   ui.on_workspace_activate,
+        "on_workspace_deactivate": ui.on_workspace_deactivate,
+        "on_workspace_release":    ui.on_workspace_release,
+        "hooks": {
+            "on_startup": _on_startup,
+            "on_message": _on_message,
+        },
+    }
