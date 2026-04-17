@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import math
 import traceback
-from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -93,51 +92,92 @@ TASK_PROMPT_CRITICALLY_OVERDUE = (
 )
 
 
-@dataclass
 class CalendarRecord:
-    id: str
-    summary: str
-    access_role: str
-    background_color: str
-    foreground_color: str
-    selected: bool = True
-    hidden: bool = False
-    section: str = "My calendars"
+    def __init__(
+        self,
+        id: str,
+        summary: str,
+        access_role: str,
+        background_color: str,
+        foreground_color: str,
+        selected: bool = True,
+        hidden: bool = False,
+        section: str = "My calendars",
+    ) -> None:
+        self.id = id
+        self.summary = summary
+        self.access_role = access_role
+        self.background_color = background_color
+        self.foreground_color = foreground_color
+        self.selected = selected
+        self.hidden = hidden
+        self.section = section
 
 
-@dataclass
 class EventRecord:
-    google_event_id: str
-    calendar_id: str
-    calendar_name: str
-    summary: str
-    description: str
-    location: str
-    start_dt: datetime
-    end_dt: datetime
-    all_day: bool
-    status: str
-    source: str = "google"
-    color_id: Optional[str] = None
-    background_color: str = "#4285F4"
-    foreground_color: str = "#FFFFFF"
-    reminder_overrides: list[dict[str, Any]] = field(default_factory=list)
-    attendees: list[dict[str, Any]] = field(default_factory=list)
-    html_link: str = ""
-    conference_data: dict[str, Any] = field(default_factory=dict)
+    def __init__(
+        self,
+        google_event_id: str,
+        calendar_id: str,
+        calendar_name: str,
+        summary: str,
+        description: str,
+        location: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        all_day: bool,
+        status: str,
+        source: str = "google",
+        color_id: Optional[str] = None,
+        background_color: str = "#4285F4",
+        foreground_color: str = "#FFFFFF",
+        reminder_overrides: Optional[list[dict[str, Any]]] = None,
+        attendees: Optional[list[dict[str, Any]]] = None,
+        html_link: str = "",
+        conference_data: Optional[dict[str, Any]] = None,
+    ) -> None:
+        self.google_event_id = google_event_id
+        self.calendar_id = calendar_id
+        self.calendar_name = calendar_name
+        self.summary = summary
+        self.description = description
+        self.location = location
+        self.start_dt = start_dt
+        self.end_dt = end_dt
+        self.all_day = all_day
+        self.status = status
+        self.source = source
+        self.color_id = color_id
+        self.background_color = background_color
+        self.foreground_color = foreground_color
+        self.reminder_overrides = list(reminder_overrides or [])
+        self.attendees = list(attendees or [])
+        self.html_link = html_link
+        self.conference_data = dict(conference_data or {})
 
 
-@dataclass
 class TaskRecord:
-    google_task_id: str
-    task_list_id: str
-    task_list_name: str
-    title: str
-    notes: str
-    due_date: Optional[date]
-    status: str
-    deleted: bool = False
-    hidden: bool = False
+    def __init__(
+        self,
+        google_task_id: str,
+        task_list_id: str,
+        task_list_name: str,
+        title: str,
+        notes: str,
+        due_date: Optional[date],
+        status: str,
+        deleted: bool = False,
+        hidden: bool = False,
+    ) -> None:
+        self.google_task_id = google_task_id
+        self.task_list_id = task_list_id
+        self.task_list_name = task_list_name
+        self.title = title
+        self.notes = notes
+        self.due_date = due_date
+        self.status = status
+        self.deleted = deleted
+        self.hidden = hidden
 
 
 def _as_local(dt: datetime) -> datetime:
