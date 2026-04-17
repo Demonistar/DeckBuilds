@@ -710,3 +710,427 @@ class GmailClient:
         except Exception:
             pass
         return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Section 2: EmailClassifier · AI Rule Engine · Local Rules Storage
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Data classes for rules and rule conditions / actions
+# ─────────────────────────────────────────────────────────────────────────────
+
+class RuleCondition:
+    """One condition inside a Rule: field OP value."""
+    __slots__ = ("field", "operator", "value")
+
+    VALID_FIELDS    = {"sender", "subject", "body", "label"}
+    VALID_OPERATORS = {"contains", "equals", "starts_with", "regex"}
+
+    def __init__(self, field: str, operator: str, value: str) -> None:
+        self.field    = field
+        self.operator = operator
+        self.value    = value
+
+    def to_dict(self) -> dict[str, str]:
+        return {"field": self.field, "operator": self.operator, "value": self.value}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RuleCondition":
+        return cls(
+            field    = str(d.get("field")    or "subject"),
+            operator = str(d.get("operator") or "contains"),
+            value    = str(d.get("value")    or ""),
+        )
+
+
+class RuleAction:
+    """One action to perform when a rule matches."""
+    __slots__ = ("action", "label_name")
+
+    VALID_ACTIONS = {
+        "add_label", "remove_label", "flag", "archive",
+        "mark_spam", "notify_ai",
+    }
+
+    def __init__(self, action: str, label_name: str = "") -> None:
+        self.action     = action
+        self.label_name = label_name
+
+    def to_dict(self) -> dict[str, str]:
+        return {"action": self.action, "label_name": self.label_name}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RuleAction":
+        return cls(
+            action     = str(d.get("action")     or "flag"),
+            label_name = str(d.get("label_name") or ""),
+        )
+
+
+class RuleRecord:
+    """A single automation rule with conditions and actions."""
+
+    def __init__(
+        self,
+        rule_id:    str,
+        name:       str,
+        conditions: list[dict],
+        actions:    list[dict],
+        created_by: str,
+        created_at: str,
+        active:     bool,
+    ) -> None:
+        self.rule_id    = rule_id
+        self.name       = name
+        self.conditions = conditions   # list of RuleCondition.to_dict()
+        self.actions    = actions      # list of RuleAction.to_dict()
+        self.created_by = created_by   # "user" | "ai"
+        self.created_at = created_at
+        self.active     = active
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "rule_id":    self.rule_id,
+            "name":       self.name,
+            "conditions": self.conditions,
+            "actions":    self.actions,
+            "created_by": self.created_by,
+            "created_at": self.created_at,
+            "active":     self.active,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RuleRecord":
+        return cls(
+            rule_id    = str(d.get("rule_id")    or str(uuid.uuid4())),
+            name       = str(d.get("name")       or "Unnamed Rule"),
+            conditions = list(d.get("conditions") or []),
+            actions    = list(d.get("actions")    or []),
+            created_by = str(d.get("created_by") or "user"),
+            created_at = str(d.get("created_at") or _now_iso()),
+            active     = bool(d.get("active", True)),
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EmailClassifier  —  lightweight pattern-based pre-classifier
+# ─────────────────────────────────────────────────────────────────────────────
+
+class EmailClassifier:
+    """
+    Classifies emails into coarse categories using keyword / regex patterns
+    before the full AI pipeline is invoked.  Results are advisory; the AI
+    layer can override or supplement them.
+    """
+
+    # Spam / phishing signal words (case-insensitive)
+    _SPAM_SIGNALS = re.compile(
+        r"\b("
+        r"congratulations.{0,30}(won|winner|prize|lottery)|"
+        r"click here to (claim|verify|confirm|unlock)|"
+        r"verify your (account|identity|payment)|"
+        r"your account (has been|will be) (suspended|locked|closed)|"
+        r"update your (payment|billing|credit card)|"
+        r"unusual (sign.?in|login|activity) detected|"
+        r"we noticed (a|an) (unusual|suspicious)|"
+        r"urgent.{0,20}action required|"
+        r"100% free|act now|limited time offer|"
+        r"dear (valued |lucky )?customer|"
+        r"nigerian (prince|banker|official)|"
+        r"wire transfer|western union|moneygram"
+        r")\b",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    _PHISHING_SIGNALS = re.compile(
+        r"(password|ssn|social security|bank account|credit card|cvv).{0,60}"
+        r"(enter|provide|confirm|verify|update)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    # Job-related patterns
+    _JOB_REJECTION = re.compile(
+        r"\b("
+        r"we (regret|are sorry|unfortunately)|"
+        r"not moving forward|"
+        r"decided (not to|to not)|"
+        r"selected (other|another) candidate|"
+        r"position has been filled|"
+        r"we won't be proceeding|"
+        r"your application was (not|unsuccessful)|"
+        r"thank you for (applying|your interest|your time).*consider"
+        r")\b",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    _JOB_INTERVIEW = re.compile(
+        r"\b("
+        r"interview|phone (screen|call)|"
+        r"would like to (schedule|set up|arrange)|"
+        r"invite you (to|for) an? (interview|meeting|call)|"
+        r"next (step|round|stage)|"
+        r"speak with you|"
+        r"available (for|to) (a |an )?(chat|call|interview)"
+        r")\b",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    _JOB_ACK = re.compile(
+        r"\b("
+        r"received your application|"
+        r"application (has been|was) (received|submitted)|"
+        r"we will (review|be in touch)|"
+        r"thank you for applying"
+        r")\b",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def classify_spam(self, subject: str, body: str) -> dict[str, Any]:
+        """
+        Return {"is_spam": bool, "is_phishing": bool, "signals": [str]}.
+        """
+        combined = f"{subject} {body}"
+        signals: list[str] = []
+        is_spam = bool(self._SPAM_SIGNALS.search(combined))
+        is_phishing = bool(self._PHISHING_SIGNALS.search(combined))
+        if is_spam:
+            signals.append("spam_keyword")
+        if is_phishing:
+            signals.append("phishing_credential_request")
+        return {"is_spam": is_spam, "is_phishing": is_phishing, "signals": signals}
+
+    def classify_job_status(self, subject: str, body: str) -> dict[str, Any]:
+        """
+        Return {"status": "rejection"|"interview"|"acknowledgement"|"unknown"}.
+        """
+        combined = f"{subject} {body}"
+        if self._JOB_REJECTION.search(combined):
+            return {"status": "rejection"}
+        if self._JOB_INTERVIEW.search(combined):
+            return {"status": "interview"}
+        if self._JOB_ACK.search(combined):
+            return {"status": "acknowledgement"}
+        return {"status": "unknown"}
+
+    def build_spam_ai_prompt(
+        self, sender: str, subject: str, body: str
+    ) -> str:
+        return (
+            f"Evaluate this email for spam or phishing indicators.\n"
+            f"Sender: {sender}\n"
+            f"Subject: {subject}\n"
+            f"Body (truncated to 500 chars): {body[:500]}\n\n"
+            "Respond with your assessment. If you identify phishing patterns, "
+            "suggest a rule to block similar emails using this JSON block "
+            "(include it verbatim in your response):\n"
+            '{"rule_suggestion": {"name": "...", '
+            '"conditions": [{"field": "sender", "operator": "contains", "value": "..."}], '
+            '"actions": [{"action": "mark_spam", "label_name": ""}]}}'
+        )
+
+    def build_job_ai_prompt(
+        self, sender: str, subject: str, body: str
+    ) -> str:
+        return (
+            f"This email may be a response to a job application.\n"
+            f"Sender: {sender}\n"
+            f"Subject: {subject}\n"
+            f"Body (truncated to 500 chars): {body[:500]}\n\n"
+            "Evaluate whether it is a rejection, interview request, or "
+            "acknowledgement. Suggest a label rule if appropriate using this "
+            "JSON block (include it verbatim in your response):\n"
+            '{"rule_suggestion": {"name": "...", '
+            '"conditions": [{"field": "subject", "operator": "contains", "value": "..."}], '
+            '"actions": [{"action": "add_label", "label_name": "Jobs"}]}}'
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AIRuleEngine  —  parse suggestions, apply rules against messages
+# ─────────────────────────────────────────────────────────────────────────────
+
+class AIRuleEngine:
+    """
+    Owns local rules.json storage and rule evaluation logic.
+    Lives inside GmailRuntime (owns the path).
+    """
+
+    def __init__(self, rules_path: Optional[Path], log: Callable[[str], None]) -> None:
+        self._path = rules_path
+        self._log  = log
+
+    # ── Storage ───────────────────────────────────────────────────────────────
+
+    def load_rules(self) -> list[RuleRecord]:
+        if not self._path or not self._path.exists():
+            return []
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            return [RuleRecord.from_dict(d) for d in (raw if isinstance(raw, list) else [])]
+        except Exception as exc:
+            self._log(f"GoogleGmail rules load failed: {exc}")
+            return []
+
+    def save_rules(self, rules: list[RuleRecord]) -> None:
+        if not self._path:
+            return
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._path.write_text(
+                json.dumps([r.to_dict() for r in rules], indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            self._log(f"GoogleGmail rules save failed: {exc}")
+
+    def add_rule(self, rule: RuleRecord) -> None:
+        rules = self.load_rules()
+        # Replace if same rule_id exists
+        rules = [r for r in rules if r.rule_id != rule.rule_id]
+        rules.append(rule)
+        self.save_rules(rules)
+        self._log(f"GoogleGmail rule added: {rule.name!r} (id={rule.rule_id})")
+
+    def delete_rule(self, rule_id: str) -> None:
+        rules = [r for r in self.load_rules() if r.rule_id != rule_id]
+        self.save_rules(rules)
+        self._log(f"GoogleGmail rule deleted: id={rule_id}")
+
+    def toggle_rule(self, rule_id: str, active: bool) -> None:
+        rules = self.load_rules()
+        for r in rules:
+            if r.rule_id == rule_id:
+                r.active = active
+        self.save_rules(rules)
+
+    # ── Evaluation ────────────────────────────────────────────────────────────
+
+    def evaluate(
+        self,
+        sender_name:  str,
+        sender_email: str,
+        subject:      str,
+        body_plain:   str,
+        label_ids:    list[str],
+    ) -> list[RuleAction]:
+        """
+        Evaluate all active rules against the given message fields.
+        Returns a flat list of RuleAction objects from all matched rules.
+        All matching rules apply; first-match-wins is NOT used.
+        """
+        targets = {
+            "sender":  f"{sender_name} {sender_email}".lower(),
+            "subject": subject.lower(),
+            "body":    body_plain.lower(),
+            "label":   " ".join(label_ids).lower(),
+        }
+        matched: list[RuleAction] = []
+        for rule in self.load_rules():
+            if not rule.active:
+                continue
+            if self._all_conditions_match(rule.conditions, targets):
+                for ad in rule.actions:
+                    matched.append(RuleAction.from_dict(ad))
+        return matched
+
+    @staticmethod
+    def _all_conditions_match(
+        conditions: list[dict], targets: dict[str, str]
+    ) -> bool:
+        for cond in conditions:
+            field    = str(cond.get("field")    or "subject")
+            operator = str(cond.get("operator") or "contains")
+            value    = str(cond.get("value")    or "").lower()
+            target   = targets.get(field, "")
+            if operator == "contains":
+                ok = value in target
+            elif operator == "equals":
+                ok = value == target
+            elif operator == "starts_with":
+                ok = target.startswith(value)
+            elif operator == "regex":
+                try:
+                    ok = bool(re.search(value, target))
+                except Exception:
+                    ok = False
+            else:
+                ok = False
+            if not ok:
+                return False
+        return True
+
+    # ── AI response parser ────────────────────────────────────────────────────
+
+    def parse_rule_suggestion(self, ai_response: str) -> Optional[RuleRecord]:
+        """
+        Scan an AI response for a JSON ``rule_suggestion`` block and, if found,
+        return a RuleRecord ready to be offered to the user for acceptance.
+        Returns None if no parseable suggestion is found.
+        """
+        # Try to find the outer JSON object containing "rule_suggestion"
+        try:
+            # Greedy scan: find the first '{' that leads to valid JSON
+            for m in re.finditer(r"\{", ai_response):
+                start = m.start()
+                # Find balanced closing brace
+                depth = 0
+                for i, ch in enumerate(ai_response[start:], start=start):
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            candidate = ai_response[start : i + 1]
+                            try:
+                                data = json.loads(candidate)
+                                suggestion = data.get("rule_suggestion")
+                                if isinstance(suggestion, dict):
+                                    return RuleRecord(
+                                        rule_id    = str(uuid.uuid4()),
+                                        name       = str(suggestion.get("name") or "AI Rule"),
+                                        conditions = list(suggestion.get("conditions") or []),
+                                        actions    = list(suggestion.get("actions")    or []),
+                                        created_by = "ai",
+                                        created_at = _now_iso(),
+                                        active     = True,
+                                    )
+                            except json.JSONDecodeError:
+                                pass
+                            break
+        except Exception:
+            pass
+        return None
+
+    def offer_suggestion_dialog(
+        self, suggestion: RuleRecord, parent_widget: Optional[QWidget] = None
+    ) -> bool:
+        """
+        Show a QMessageBox asking the user whether to accept the AI-suggested
+        rule.  Returns True if accepted.
+        """
+        conditions_text = "\n".join(
+            f"  {c.get('field','?')} {c.get('operator','?')} \"{c.get('value','?')}\""
+            for c in suggestion.conditions
+        ) or "  (none)"
+        actions_text = "\n".join(
+            f"  {a.get('action','?')}"
+            + (f" → {a.get('label_name')}" if a.get("label_name") else "")
+            for a in suggestion.actions
+        ) or "  (none)"
+
+        msg = QMessageBox(parent_widget)
+        msg.setWindowTitle("AI Rule Suggestion")
+        msg.setText(f"The AI suggested a new rule: <b>{suggestion.name}</b>")
+        msg.setInformativeText(
+            f"<b>Conditions:</b><br><pre>{conditions_text}</pre>"
+            f"<b>Actions:</b><br><pre>{actions_text}</pre>"
+            "<br>Apply this rule?"
+        )
+        msg.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        msg.setDefaultButton(QMessageBox.StandardButton.No)
+        return msg.exec() == QMessageBox.StandardButton.Yes
