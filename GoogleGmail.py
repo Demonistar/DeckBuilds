@@ -2043,3 +2043,392 @@ class SignatureManager:
 
         _reload_list()
         dlg.exec()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Section 5: Module Panel Widget
+# (folder / label tree · compose button · sync status · auth controls)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class GmailModulePanel(QWidget):
+    """
+    Always-visible control surface shown in the Gmail module tab.
+
+    Signals
+    -------
+    compose_requested()
+        User clicked the Compose button.
+    folder_selected(label_id: str, display_name: str)
+        User selected a folder / label in the tree.
+    fetch_now_requested()
+        User clicked Fetch Now.
+    auth_requested()
+        User clicked Authenticate Google.
+    settings_requested()
+        User clicked Settings.
+    """
+
+    compose_requested  = Signal()
+    folder_selected    = Signal(str, str)
+    fetch_now_requested= Signal()
+    auth_requested     = Signal()
+    settings_requested = Signal()
+
+    # ── Section-header item flag ──────────────────────────────────────────────
+    _SECTION_ROLE = Qt.ItemDataRole.UserRole + 10
+
+    def __init__(
+        self,
+        runtime: GmailRuntime,
+        parent:  Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._runtime = runtime
+
+        # Current label selection (label_id, display_name)
+        self._active_label: tuple[str, str] = ("INBOX", "Inbox")
+
+        self._build_ui()
+        self.refresh_sync_status()
+
+    # ── Build ─────────────────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+
+        # ── Compose button ────────────────────────────────────────────────────
+        self._compose_btn = QPushButton("✏  Compose", self)
+        self._compose_btn.setMinimumHeight(36)
+        self._compose_btn.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        font = self._compose_btn.font()
+        font.setBold(True)
+        self._compose_btn.setFont(font)
+        root.addWidget(self._compose_btn)
+
+        # ── Folder / label tree ───────────────────────────────────────────────
+        self._folder_list = QListWidget(self)
+        self._folder_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self._folder_list.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        root.addWidget(self._folder_list, stretch=1)
+
+        # ── Auth / Settings row ───────────────────────────────────────────────
+        auth_row = QHBoxLayout()
+        self._auth_btn     = QPushButton("Authenticate", self)
+        self._settings_btn = QPushButton("⚙", self)
+        self._settings_btn.setFixedWidth(32)
+        auth_row.addWidget(self._auth_btn, stretch=1)
+        auth_row.addWidget(self._settings_btn)
+        root.addLayout(auth_row)
+
+        # ── Sync status ───────────────────────────────────────────────────────
+        sync_box = QGroupBox("Sync", self)
+        sync_layout = QVBoxLayout(sync_box)
+        sync_layout.setContentsMargins(6, 6, 6, 6)
+        sync_layout.setSpacing(4)
+
+        self._sync_status_lbl  = QLabel("Not synced yet.", sync_box)
+        self._sync_status_lbl.setWordWrap(True)
+        self._sync_mode_lbl    = QLabel("Mode: —", sync_box)
+        self._last_synced_lbl  = QLabel("Last synced: —", sync_box)
+        self._fetch_now_btn    = QPushButton("Fetch Now", sync_box)
+
+        for lbl in (self._sync_status_lbl, self._sync_mode_lbl, self._last_synced_lbl):
+            lbl.setWordWrap(True)
+            sync_layout.addWidget(lbl)
+        sync_layout.addWidget(self._fetch_now_btn)
+        root.addWidget(sync_box)
+
+        # ── Connections ───────────────────────────────────────────────────────
+        self._compose_btn.clicked.connect(self.compose_requested)
+        self._fetch_now_btn.clicked.connect(self.fetch_now_requested)
+        self._auth_btn.clicked.connect(self.auth_requested)
+        self._settings_btn.clicked.connect(self.settings_requested)
+        self._folder_list.itemClicked.connect(self._on_item_clicked)
+
+        # Populate static folder tree
+        self._populate_folder_tree([])
+
+    # ── Folder tree population ────────────────────────────────────────────────
+
+    def _add_section_header(self, title: str) -> None:
+        item = QListWidgetItem(title)
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        item.setData(self._SECTION_ROLE, True)
+        font = item.font()
+        font.setBold(True)
+        font.setPointSizeF(max(7.0, font.pointSizeF() - 1))
+        item.setFont(font)
+        item.setForeground(QColor("#888888"))
+        self._folder_list.addItem(item)
+
+    def _add_folder_item(
+        self,
+        label_id:     str,
+        display_name: str,
+        unread_count: int = 0,
+        color:        str = "",
+    ) -> None:
+        text = display_name
+        if unread_count > 0:
+            text = f"{display_name}  ({unread_count})"
+        item = QListWidgetItem(text)
+        item.setData(Qt.ItemDataRole.UserRole, label_id)
+        item.setData(self._SECTION_ROLE, False)
+        if color:
+            item.setForeground(QColor(color))
+        # Bold if this is the active selection
+        if label_id == self._active_label[0]:
+            font = item.font()
+            font.setBold(True)
+            item.setFont(font)
+        self._folder_list.addItem(item)
+
+    def _populate_folder_tree(
+        self,
+        user_labels: list[dict[str, Any]],
+        unread_counts: dict[str, int] | None = None,
+    ) -> None:
+        """
+        Rebuild the folder list.
+        user_labels — list of raw Gmail label dicts (from labels.list).
+        unread_counts — {label_id: unread_count}.
+        """
+        counts = unread_counts or {}
+        self._folder_list.clear()
+
+        # ── System folders ────────────────────────────────────────────────────
+        self._add_section_header("FOLDERS")
+        for lid, dname in SYSTEM_LABEL_DEFS:
+            self._add_folder_item(lid, dname, counts.get(lid, 0))
+
+        # ── User labels ───────────────────────────────────────────────────────
+        user_only = [
+            lbl for lbl in user_labels
+            if str(lbl.get("type") or "") == "user"
+        ]
+        if user_only:
+            self._add_section_header("LABELS")
+            for lbl in sorted(user_only, key=lambda x: str(x.get("name") or "")):
+                lid   = str(lbl.get("id")   or "")
+                dname = str(lbl.get("name") or lid)
+                color_info = lbl.get("color") or {}
+                color = str(color_info.get("textColor") or "") if isinstance(color_info, dict) else ""
+                self._add_folder_item(lid, dname, counts.get(lid, 0), color)
+
+        # Re-apply bold to active label after rebuild
+        self._highlight_active()
+
+    def _highlight_active(self) -> None:
+        active_id = self._active_label[0]
+        for i in range(self._folder_list.count()):
+            item = self._folder_list.item(i)
+            if not item:
+                continue
+            lid = str(item.data(Qt.ItemDataRole.UserRole) or "")
+            font = item.font()
+            font.setBold(lid == active_id)
+            item.setFont(font)
+            if lid == active_id:
+                self._folder_list.setCurrentItem(item)
+
+    # ── Font scaling ──────────────────────────────────────────────────────────
+
+    def _fit_label(self, widget: QWidget, text: str) -> None:
+        """Shrink widget font until text fits horizontally within the widget."""
+        if not text or widget.width() < 20:
+            return
+        fm = widget.fontMetrics()
+        available = max(10, widget.width() - 12)
+        pt = widget.font().pointSizeF() or 9.0
+        while pt > 6.5 and fm.horizontalAdvance(text) > available:
+            pt -= 0.5
+            f = widget.font()
+            f.setPointSizeF(pt)
+            widget.setFont(f)
+            fm = widget.fontMetrics()
+
+    def _apply_font_scaling(self) -> None:
+        for w in self.findChildren((QLabel, QPushButton, QToolButton)):
+            if hasattr(w, "text"):
+                self._fit_label(w, str(w.text()))
+
+    def resizeEvent(self, event: Any) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._apply_font_scaling()
+
+    def showEvent(self, event: Any) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._apply_font_scaling()
+
+    # ── Event handlers ────────────────────────────────────────────────────────
+
+    def _on_item_clicked(self, item: QListWidgetItem) -> None:
+        is_header = bool(item.data(self._SECTION_ROLE))
+        if is_header:
+            return
+        label_id = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        if not label_id:
+            return
+        # Derive display name from item text (strip unread count suffix)
+        display_name = item.text().split("  (")[0].strip()
+        self._active_label = (label_id, display_name)
+        self._highlight_active()
+        self.folder_selected.emit(label_id, display_name)
+
+    # ── Public refresh API ────────────────────────────────────────────────────
+
+    def refresh_sync_status(self) -> None:
+        """Update sync-status labels from runtime state."""
+        state = self._runtime.sync_state
+        auth  = state.get("auth_status", "unknown")
+        mode  = state.get("mode", "local_only")
+        err   = str(state.get("last_error") or "")
+        last  = str(state.get("last_sync_at") or "")
+        hid   = str(state.get("history_id")  or "")
+
+        if err:
+            status_text = f"⚠ {err[:80]}"
+        elif mode == "google_connected":
+            status_text = "● Connected"
+        elif auth in {"token_ready", "authenticated"}:
+            status_text = "● Token ready"
+        elif auth == "credentials_only":
+            status_text = "○ Credentials present — run auth"
+        else:
+            status_text = "○ Not authenticated"
+
+        self._sync_status_lbl.setText(status_text)
+        self._sync_mode_lbl.setText(
+            f"Mode: {self._runtime.sync_config.fetch_mode}"
+        )
+        if last:
+            try:
+                dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                last_str = dt.strftime("%H:%M:%S")
+            except Exception:
+                last_str = last[:19]
+        else:
+            last_str = "—"
+        self._last_synced_lbl.setText(f"Last synced: {last_str}")
+        self._apply_font_scaling()
+
+    def update_user_labels(
+        self,
+        user_labels:   list[dict[str, Any]],
+        unread_counts: dict[str, int] | None = None,
+    ) -> None:
+        """Refresh the folder tree with fresh label data from the API."""
+        self._populate_folder_tree(user_labels, unread_counts)
+
+    def set_active_label(self, label_id: str, display_name: str) -> None:
+        self._active_label = (label_id, display_name)
+        self._highlight_active()
+
+    # ── Settings dialog ───────────────────────────────────────────────────────
+
+    def open_settings_dialog(
+        self,
+        sig_manager: SignatureManager,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        """
+        Modal dialog with two tabs: Sync Settings and Signature Manager.
+        Changes take effect immediately on Save.
+        """
+        dlg = QDialog(parent or self)
+        dlg.setWindowTitle("Gmail Settings")
+        dlg.setMinimumSize(520, 420)
+        dlg_root = QVBoxLayout(dlg)
+
+        from PySide6.QtWidgets import QTabWidget, QSpinBox
+        tabs = QTabWidget(dlg)
+
+        # ── Tab 1: Sync Settings ──────────────────────────────────────────────
+        sync_tab = QWidget()
+        sync_form = QVBoxLayout(sync_tab)
+        cfg = self._runtime.sync_config
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Fetch mode:", sync_tab))
+        mode_combo = QComboBox(sync_tab)
+        mode_combo.addItems(["new_only", "full"])
+        mode_combo.setCurrentText(cfg.fetch_mode)
+        mode_row.addWidget(mode_combo)
+        sync_form.addLayout(mode_row)
+
+        interval_row = QHBoxLayout()
+        interval_row.addWidget(QLabel("Interval:", sync_tab))
+        interval_spin = QSpinBox(sync_tab)
+        interval_spin.setRange(1, 9999)
+        interval_spin.setValue(cfg.interval_value)
+        interval_unit = QComboBox(sync_tab)
+        interval_unit.addItems(["seconds", "minutes", "hours"])
+        interval_unit.setCurrentText(cfg.interval_unit)
+        interval_row.addWidget(interval_spin)
+        interval_row.addWidget(interval_unit)
+        sync_form.addLayout(interval_row)
+
+        batt_chk = QCheckBox("Slow sync on battery (use battery interval)", sync_tab)
+        batt_chk.setChecked(cfg.battery_detection)
+        sync_form.addWidget(batt_chk)
+
+        batt_row = QHBoxLayout()
+        batt_row.addWidget(QLabel("Battery interval:", sync_tab))
+        batt_spin = QSpinBox(sync_tab)
+        batt_spin.setRange(1, 9999)
+        batt_spin.setValue(cfg.battery_interval_value)
+        batt_unit = QComboBox(sync_tab)
+        batt_unit.addItems(["seconds", "minutes", "hours"])
+        batt_unit.setCurrentText(cfg.battery_interval_unit)
+        batt_row.addWidget(batt_spin)
+        batt_row.addWidget(batt_unit)
+        sync_form.addLayout(batt_row)
+
+        override_chk = QCheckBox("Always use my interval (ignore battery state)", sync_tab)
+        override_chk.setChecked(cfg.battery_override_disabled)
+        sync_form.addWidget(override_chk)
+        sync_form.addStretch(1)
+        tabs.addTab(sync_tab, "Sync")
+
+        # ── Tab 2: Signatures (delegates to SignatureManager) ─────────────────
+        sig_tab = QWidget()
+        sig_tab_layout = QVBoxLayout(sig_tab)
+        open_sig_btn = QPushButton("Open Signature Manager…", sig_tab)
+        sig_tab_layout.addWidget(open_sig_btn)
+        sig_tab_layout.addStretch(1)
+        open_sig_btn.clicked.connect(
+            lambda: sig_manager.open_manager_dialog(dlg)
+        )
+        tabs.addTab(sig_tab, "Signatures")
+
+        dlg_root.addWidget(tabs)
+
+        btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel,
+            dlg,
+        )
+        dlg_root.addWidget(btn_box)
+
+        def _on_save() -> None:
+            self._runtime.sync_config.fetch_mode             = mode_combo.currentText()
+            self._runtime.sync_config.interval_value         = interval_spin.value()
+            self._runtime.sync_config.interval_unit          = interval_unit.currentText()
+            self._runtime.sync_config.battery_detection      = batt_chk.isChecked()
+            self._runtime.sync_config.battery_interval_value = batt_spin.value()
+            self._runtime.sync_config.battery_interval_unit  = batt_unit.currentText()
+            self._runtime.sync_config.battery_override_disabled = override_chk.isChecked()
+            self._runtime._save_state()
+            dlg.accept()
+
+        btn_box.accepted.connect(_on_save)
+        btn_box.rejected.connect(dlg.reject)
+        dlg.exec()
