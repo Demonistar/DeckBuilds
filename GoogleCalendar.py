@@ -1530,10 +1530,15 @@ class GoogleCalendarModule:
 
     def get_workspace_spec(self) -> dict[str, Any]:
         return {
-            "workspace_count": 3,
-            "workspace_titles": ["Google", "Drive", "Gmail"],
-            "workspace_widgets": [self.build_google_workspace, self.build_drive_placeholder, self.build_gmail_placeholder],
-            "ribbon": self.build_ribbon,
+            "tabs": [
+                {"label": "Google", "build": self.build_google_workspace},
+                {"label": "Drive", "build": self.build_drive_placeholder},
+                {"label": "Gmail", "build": self.build_gmail_placeholder},
+            ],
+            "build_ribbon": self.build_ribbon,
+            "on_activate": self.runtime.start_sync_timer,
+            "on_deactivate": self.runtime.stop_sync_timer,
+            "on_release": self.runtime.stop_sync_timer,
         }
 
     def build_google_workspace(self) -> QWidget:
@@ -1565,22 +1570,6 @@ class GoogleCalendarModule:
         return self.module_panel
 
     def module_definition(self) -> dict[str, Any]:
-        workspace_spec = self.get_workspace_spec()
-        workspace_tabs: list[dict[str, Any]] = []
-        titles = list(workspace_spec.get("workspace_titles") or [])
-        widgets = list(workspace_spec.get("workspace_widgets") or [])
-        for idx, factory in enumerate(widgets):
-            if not callable(factory):
-                continue
-            label = str(titles[idx] if idx < len(titles) else f"Workspace {idx + 1}")
-            workspace_tabs.append(
-                {
-                    "id": f"{MODULE_MANIFEST['key']}_workspace_{idx + 1}",
-                    "label": label,
-                    "build": factory,
-                }
-            )
-
         return {
             "key": MODULE_MANIFEST["key"],
             "display_name": MODULE_MANIFEST["display_name"],
@@ -1595,12 +1584,7 @@ class GoogleCalendarModule:
             ],
             "manifest": MODULE_MANIFEST,
             "settings_sections": ["sync_interval", "battery"],
-            "supports_workspaces": bool(workspace_tabs),
-            "workspace_tabs": workspace_tabs,
-            "build_ribbon": workspace_spec.get("ribbon"),
-            "on_workspace_activate": self.runtime.start_sync_timer,
-            "on_workspace_deactivate": self.runtime.stop_sync_timer,
-            "on_workspace_release": self.runtime.stop_sync_timer,
+            "workspace": self.get_workspace_spec(),
             "hooks": {
                 "on_startup": self.runtime.trigger_sync_now,
                 "on_shutdown": self.runtime.shutdown,
