@@ -1265,7 +1265,10 @@ class GoogleCalendarWorkspaceModule:
     def _apply_font_scaling(self) -> None:
         if not self.panel_widget:
             return
-        for w in self.panel_widget.findChildren((QLabel, QPushButton, QCheckBox, QToolButton, QComboBox)):
+        font_widgets: list[QWidget] = []
+        for widget_type in (QLabel, QPushButton, QCheckBox, QToolButton, QComboBox):
+            font_widgets.extend(self.panel_widget.findChildren(widget_type))
+        for w in font_widgets:
             text = ""
             if hasattr(w, "text"):
                 text = str(w.text())
