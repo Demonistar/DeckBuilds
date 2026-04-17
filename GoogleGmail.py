@@ -2432,3 +2432,525 @@ class GmailModulePanel(QWidget):
         btn_box.accepted.connect(_on_save)
         btn_box.rejected.connect(dlg.reject)
         dlg.exec()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Section 6: Workspace Thread List View (Mode 1)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ThreadListView(QWidget):
+    """
+    Mode 1 workspace widget — shows Gmail thread list for a label.
+
+    Signals
+    -------
+    thread_opened(thread_id: str)
+    compose_requested()
+    """
+
+    thread_opened     = Signal(str)
+    compose_requested = Signal()
+
+    # Thread-table column indices
+    _COL_CHECK  = 0
+    _COL_STAR   = 1
+    _COL_IMP    = 2
+    _COL_SENDER = 3
+    _COL_SUBJ   = 4
+    _COL_ATT    = 5
+    _COL_TIME   = 6
+    _COL_COUNT  = 7
+
+    def __init__(
+        self,
+        runtime: GmailRuntime,
+        parent:  Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._runtime        = runtime
+        self._current_label: tuple[str, str] = ("INBOX", "Inbox")
+        self._current_query  = ""
+        self._page_token     = ""
+        self._prev_tokens:   list[str] = []      # stack for Back navigation
+        self._total_hint     = 0
+        self._page_size      = 50
+        self._threads:       list[ThreadSummary] = []
+        self._selected_ids:  set[str] = set()
+        self._build_ui()
+
+    # ── Build ─────────────────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Category tab strip ────────────────────────────────────────────────
+        tab_bar = QWidget(self)
+        tab_row = QHBoxLayout(tab_bar)
+        tab_row.setContentsMargins(6, 4, 6, 4)
+        tab_row.setSpacing(2)
+        self._cat_btns: dict[str, QPushButton] = {}
+        for tab_name in CATEGORY_TABS:
+            btn = QPushButton(tab_name, tab_bar)
+            btn.setCheckable(True)
+            btn.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+            btn.setMinimumHeight(28)
+            btn.clicked.connect(lambda checked, tn=tab_name: self._on_category_tab(tn))
+            self._cat_btns[tab_name] = btn
+            tab_row.addWidget(btn)
+        tab_row.addStretch(1)
+        # Pagination label
+        self._pagination_lbl = QLabel("", tab_bar)
+        self._pagination_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        prev_btn = QPushButton("◀", tab_bar)
+        next_btn = QPushButton("▶", tab_bar)
+        prev_btn.setFixedWidth(28)
+        next_btn.setFixedWidth(28)
+        prev_btn.clicked.connect(self._on_prev_page)
+        next_btn.clicked.connect(self._on_next_page)
+        self._prev_page_btn = prev_btn
+        self._next_page_btn = next_btn
+        tab_row.addWidget(self._pagination_lbl)
+        tab_row.addWidget(prev_btn)
+        tab_row.addWidget(next_btn)
+        root.addWidget(tab_bar)
+
+        # ── Search bar ────────────────────────────────────────────────────────
+        search_bar = QWidget(self)
+        search_row = QHBoxLayout(search_bar)
+        search_row.setContentsMargins(6, 4, 6, 4)
+        self._search_edit = QLineEdit(search_bar)
+        self._search_edit.setPlaceholderText(
+            "Search mail  (from:, to:, subject:, has:attachment, is:unread, label:, before:, after:…)"
+        )
+        self._search_edit.returnPressed.connect(self._on_search)
+        search_btn = QPushButton("Search", search_bar)
+        search_btn.clicked.connect(self._on_search)
+        clear_btn  = QPushButton("✕", search_bar)
+        clear_btn.setFixedWidth(28)
+        clear_btn.clicked.connect(self._on_clear_search)
+        search_row.addWidget(self._search_edit, stretch=1)
+        search_row.addWidget(search_btn)
+        search_row.addWidget(clear_btn)
+        root.addWidget(search_bar)
+
+        # ── Batch toolbar (hidden until rows are checked) ─────────────────────
+        self._batch_bar = QWidget(self)
+        batch_row = QHBoxLayout(self._batch_bar)
+        batch_row.setContentsMargins(6, 2, 6, 2)
+        self._batch_lbl         = QLabel("0 selected", self._batch_bar)
+        batch_archive_btn       = QPushButton("Archive",       self._batch_bar)
+        batch_delete_btn        = QPushButton("Delete",        self._batch_bar)
+        batch_read_btn          = QPushButton("Mark read",     self._batch_bar)
+        batch_unread_btn        = QPushButton("Mark unread",   self._batch_bar)
+        batch_row.addWidget(self._batch_lbl)
+        batch_row.addWidget(batch_archive_btn)
+        batch_row.addWidget(batch_delete_btn)
+        batch_row.addWidget(batch_read_btn)
+        batch_row.addWidget(batch_unread_btn)
+        batch_row.addStretch(1)
+        self._batch_bar.setVisible(False)
+        batch_archive_btn.clicked.connect(self._on_batch_archive)
+        batch_delete_btn.clicked.connect(self._on_batch_delete)
+        batch_read_btn.clicked.connect(lambda: self._on_batch_label([], ["UNREAD"]))
+        batch_unread_btn.clicked.connect(lambda: self._on_batch_label(["UNREAD"], []))
+        root.addWidget(self._batch_bar)
+
+        # ── Thread table ──────────────────────────────────────────────────────
+        self._table = QTableWidget(self)
+        self._table.setColumnCount(self._COL_COUNT)
+        self._table.setHorizontalHeaderLabels(
+            ["", "★", "!", "From", "Subject", "📎", "Date"]
+        )
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setShowGrid(False)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setAlternatingRowColors(False)
+        self._table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        hh = self._table.horizontalHeader()
+        hh.setSectionResizeMode(self._COL_CHECK,  QHeaderView.ResizeMode.Fixed)
+        hh.setSectionResizeMode(self._COL_STAR,   QHeaderView.ResizeMode.Fixed)
+        hh.setSectionResizeMode(self._COL_IMP,    QHeaderView.ResizeMode.Fixed)
+        hh.setSectionResizeMode(self._COL_SENDER, QHeaderView.ResizeMode.Interactive)
+        hh.setSectionResizeMode(self._COL_SUBJ,   QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(self._COL_ATT,    QHeaderView.ResizeMode.Fixed)
+        hh.setSectionResizeMode(self._COL_TIME,   QHeaderView.ResizeMode.ResizeToContents)
+        self._table.setColumnWidth(self._COL_CHECK,  28)
+        self._table.setColumnWidth(self._COL_STAR,   28)
+        self._table.setColumnWidth(self._COL_IMP,    24)
+        self._table.setColumnWidth(self._COL_ATT,    28)
+        self._table.setColumnWidth(self._COL_SENDER, 160)
+
+        self._table.cellClicked.connect(self._on_cell_clicked)
+        self._table.itemChanged.connect(self._on_item_changed)
+        root.addWidget(self._table, stretch=1)
+
+        # ── Loading indicator ─────────────────────────────────────────────────
+        self._loading_lbl = QLabel("Loading…", self)
+        self._loading_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_lbl.setVisible(False)
+        root.addWidget(self._loading_lbl)
+
+        # Set Primary tab active by default
+        self._set_category_active("Primary")
+
+    # ── Category tabs ─────────────────────────────────────────────────────────
+
+    def _set_category_active(self, tab_name: str) -> None:
+        for name, btn in self._cat_btns.items():
+            btn.blockSignals(True)
+            btn.setChecked(name == tab_name)
+            font = btn.font()
+            font.setBold(name == tab_name)
+            btn.setFont(font)
+            btn.blockSignals(False)
+
+    def _on_category_tab(self, tab_name: str) -> None:
+        self._set_category_active(tab_name)
+        label_id = CATEGORY_TAB_LABEL.get(tab_name, "INBOX")
+        self._current_query = ""
+        self._search_edit.clear()
+        self._page_token   = ""
+        self._prev_tokens  = []
+        self._current_label = (label_id, tab_name)
+        self._load_threads()
+
+    # ── Search ────────────────────────────────────────────────────────────────
+
+    def _on_search(self) -> None:
+        query = self._search_edit.text().strip()
+        self._current_query = query
+        self._page_token    = ""
+        self._prev_tokens   = []
+        self._set_category_active("")
+        self._load_threads()
+
+    def _on_clear_search(self) -> None:
+        self._search_edit.clear()
+        self._current_query = ""
+        self._page_token    = ""
+        self._prev_tokens   = []
+        self._set_category_active("Primary")
+        self._current_label = ("INBOX", "Inbox")
+        self._load_threads()
+
+    # ── Pagination ────────────────────────────────────────────────────────────
+
+    def _on_next_page(self) -> None:
+        if not self._page_token:
+            return
+        self._prev_tokens.append(self._page_token)
+        self._load_threads()
+
+    def _on_prev_page(self) -> None:
+        if not self._prev_tokens:
+            self._page_token = ""
+        else:
+            self._page_token = self._prev_tokens.pop()
+        self._load_threads()
+
+    def _update_pagination(self, next_token: str) -> None:
+        page_num  = len(self._prev_tokens) + 1
+        start_row = (page_num - 1) * self._page_size + 1
+        end_row   = start_row + len(self._threads) - 1
+        if self._threads:
+            self._pagination_lbl.setText(f"{start_row}–{end_row}")
+        else:
+            self._pagination_lbl.setText("No results")
+        self._next_page_btn.setEnabled(bool(next_token))
+        self._prev_page_btn.setEnabled(bool(self._prev_tokens))
+
+    # ── Load threads ──────────────────────────────────────────────────────────
+
+    def load_for_label(self, label_id: str, display_name: str) -> None:
+        """External call: switch to label and load threads."""
+        self._current_label = (label_id, display_name)
+        self._current_query = ""
+        self._page_token    = ""
+        self._prev_tokens   = []
+        self._search_edit.clear()
+        self._set_category_active("")
+        self._load_threads()
+
+    def _load_threads(self) -> None:
+        self._loading_lbl.setVisible(True)
+        self._table.setVisible(False)
+        self._selected_ids.clear()
+        self._batch_bar.setVisible(False)
+
+        label_id = self._current_label[0]
+        query    = self._current_query
+
+        try:
+            client = self._runtime._make_client()
+            # Local snooze pseudo-label: show snoozed threads
+            if label_id == "_SNOOZED":
+                snoozed = self._runtime.load_snoozed()
+                threads: list[ThreadSummary] = []
+                next_token = ""
+                for tid in list(snoozed.keys()):
+                    try:
+                        msgs = client.fetch_thread_messages(tid)
+                        if msgs:
+                            m = msgs[-1]
+                            sn, se = _sender_display(m.from_header)
+                            threads.append(ThreadSummary(
+                                thread_id      = tid,
+                                subject        = m.subject,
+                                sender_name    = sn,
+                                sender_email   = se,
+                                snippet        = m.snippet,
+                                timestamp      = _format_timestamp(m.date_header),
+                                is_unread      = m.is_unread,
+                                is_starred     = "STARRED" in m.label_ids,
+                                is_important   = "IMPORTANT" in m.label_ids,
+                                has_attachment = bool(m.attachments),
+                                label_ids      = m.label_ids,
+                                message_count  = len(msgs),
+                            ))
+                    except Exception:
+                        continue
+            else:
+                label_ids = [label_id] if label_id and not query else None
+                threads, next_token = client.fetch_thread_summaries(
+                    label_ids   = label_ids,
+                    query       = query,
+                    page_token  = self._page_token,
+                    max_results = self._page_size,
+                )
+        except RuntimeError as exc:
+            threads    = []
+            next_token = ""
+            self._loading_lbl.setText(f"⚠ {exc}")
+            self._loading_lbl.setVisible(True)
+
+        self._threads   = threads
+        self._page_token = next_token
+        self._populate_table(threads)
+        self._update_pagination(next_token)
+        self._loading_lbl.setVisible(False)
+        self._table.setVisible(True)
+        self._apply_font_scaling()
+
+    # ── Table population ──────────────────────────────────────────────────────
+
+    def _populate_table(self, threads: list[ThreadSummary]) -> None:
+        self._table.setUpdatesEnabled(False)
+        self._table.blockSignals(True)
+        self._table.setRowCount(0)
+        self._table.setRowCount(len(threads))
+
+        for row, t in enumerate(threads):
+            self._table.setRowHeight(row, 26)
+
+            # Col 0: checkbox
+            chk_item = QTableWidgetItem()
+            chk_item.setFlags(
+                Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled
+            )
+            chk_item.setCheckState(Qt.CheckState.Unchecked)
+            chk_item.setData(Qt.ItemDataRole.UserRole, t.thread_id)
+            self._table.setItem(row, self._COL_CHECK, chk_item)
+
+            # Col 1: star
+            star_item = QTableWidgetItem("★" if t.is_starred else "☆")
+            star_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            star_item.setData(Qt.ItemDataRole.UserRole, t.thread_id)
+            if t.is_starred:
+                star_item.setForeground(QColor("#f9ab00"))
+            self._table.setItem(row, self._COL_STAR, star_item)
+
+            # Col 2: important
+            imp_item = QTableWidgetItem("›" if t.is_important else "")
+            imp_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            imp_item.setData(Qt.ItemDataRole.UserRole, t.thread_id)
+            if t.is_important:
+                imp_item.setForeground(QColor("#f9ab00"))
+            self._table.setItem(row, self._COL_IMP, imp_item)
+
+            # Col 3: sender
+            sender_item = QTableWidgetItem(t.sender_name or t.sender_email)
+            sender_item.setData(Qt.ItemDataRole.UserRole, t.thread_id)
+            if t.is_unread:
+                font = sender_item.font()
+                font.setBold(True)
+                sender_item.setFont(font)
+            self._table.setItem(row, self._COL_SENDER, sender_item)
+
+            # Col 4: subject + snippet (truncated — expected in list rows)
+            subj_text = t.subject
+            if t.snippet:
+                subj_text = f"{t.subject}  ·  {t.snippet}"
+            subj_item = QTableWidgetItem(subj_text)
+            subj_item.setData(Qt.ItemDataRole.UserRole, t.thread_id)
+            if t.is_unread:
+                font = subj_item.font()
+                font.setBold(True)
+                subj_item.setFont(font)
+            self._table.setItem(row, self._COL_SUBJ, subj_item)
+
+            # Col 5: attachment
+            att_item = QTableWidgetItem("📎" if t.has_attachment else "")
+            att_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            att_item.setData(Qt.ItemDataRole.UserRole, t.thread_id)
+            self._table.setItem(row, self._COL_ATT, att_item)
+
+            # Col 6: timestamp
+            time_item = QTableWidgetItem(t.timestamp)
+            time_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            time_item.setData(Qt.ItemDataRole.UserRole, t.thread_id)
+            self._table.setItem(row, self._COL_TIME, time_item)
+
+        self._table.blockSignals(False)
+        self._table.setUpdatesEnabled(True)
+
+    # ── Cell click handling ───────────────────────────────────────────────────
+
+    def _on_cell_clicked(self, row: int, col: int) -> None:
+        item = self._table.item(row, self._COL_CHECK)
+        if not item:
+            return
+        thread_id = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        if not thread_id:
+            return
+
+        # Star toggle
+        if col == self._COL_STAR:
+            self._toggle_star(row, thread_id)
+            return
+        # Important toggle
+        if col == self._COL_IMP:
+            self._toggle_important(row, thread_id)
+            return
+        # Checkbox column — toggled by itemChanged; ignore here
+        if col == self._COL_CHECK:
+            return
+        # Any other column — open thread
+        self.thread_opened.emit(thread_id)
+
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() != self._COL_CHECK:
+            return
+        thread_id = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        if not thread_id:
+            return
+        if item.checkState() == Qt.CheckState.Checked:
+            self._selected_ids.add(thread_id)
+        else:
+            self._selected_ids.discard(thread_id)
+        count = len(self._selected_ids)
+        self._batch_bar.setVisible(count > 0)
+        self._batch_lbl.setText(f"{count} selected")
+
+    # ── Star / important toggles ──────────────────────────────────────────────
+
+    def _toggle_star(self, row: int, thread_id: str) -> None:
+        star_item = self._table.item(row, self._COL_STAR)
+        if not star_item:
+            return
+        currently_starred = star_item.text() == "★"
+        try:
+            client = self._runtime._make_client()
+            if currently_starred:
+                client.modify_thread(thread_id, remove_label_ids=["STARRED"])
+                star_item.setText("☆")
+                star_item.setForeground(QColor("#888888"))
+            else:
+                client.modify_thread(thread_id, add_label_ids=["STARRED"])
+                star_item.setText("★")
+                star_item.setForeground(QColor("#f9ab00"))
+        except Exception:
+            pass
+
+    def _toggle_important(self, row: int, thread_id: str) -> None:
+        imp_item = self._table.item(row, self._COL_IMP)
+        if not imp_item:
+            return
+        currently_imp = imp_item.text() == "›"
+        try:
+            client = self._runtime._make_client()
+            if currently_imp:
+                client.modify_thread(thread_id, remove_label_ids=["IMPORTANT"])
+                imp_item.setText("")
+            else:
+                client.modify_thread(thread_id, add_label_ids=["IMPORTANT"])
+                imp_item.setText("›")
+                imp_item.setForeground(QColor("#f9ab00"))
+        except Exception:
+            pass
+
+    # ── Batch operations ──────────────────────────────────────────────────────
+
+    def _on_batch_archive(self) -> None:
+        try:
+            client = self._runtime._make_client()
+            for tid in list(self._selected_ids):
+                client.modify_thread(tid, remove_label_ids=["INBOX"])
+                self._runtime._emit("gmail.message.archived", {"thread_id": tid})
+        except Exception:
+            pass
+        self._selected_ids.clear()
+        self._load_threads()
+
+    def _on_batch_delete(self) -> None:
+        try:
+            client = self._runtime._make_client()
+            for tid in list(self._selected_ids):
+                client.trash_thread(tid)
+                self._runtime._emit("gmail.message.deleted", {"thread_id": tid})
+        except Exception:
+            pass
+        self._selected_ids.clear()
+        self._load_threads()
+
+    def _on_batch_label(
+        self, add_ids: list[str], remove_ids: list[str]
+    ) -> None:
+        try:
+            client = self._runtime._make_client()
+            for tid in list(self._selected_ids):
+                client.modify_thread(tid, add_label_ids=add_ids or None,
+                                     remove_label_ids=remove_ids or None)
+        except Exception:
+            pass
+        self._selected_ids.clear()
+        self._load_threads()
+
+    # ── Font scaling ──────────────────────────────────────────────────────────
+
+    def _fit_widget(self, widget: QWidget, text: str) -> None:
+        if not text or widget.width() < 20:
+            return
+        fm        = widget.fontMetrics()
+        available = max(10, widget.width() - 10)
+        pt        = widget.font().pointSizeF() or 9.0
+        while pt > 6.5 and fm.horizontalAdvance(text) > available:
+            pt -= 0.5
+            f  = widget.font()
+            f.setPointSizeF(pt)
+            widget.setFont(f)
+            fm = widget.fontMetrics()
+
+    def _apply_font_scaling(self) -> None:
+        for w in self.findChildren((QLabel, QPushButton, QToolButton)):
+            if hasattr(w, "text"):
+                self._fit_widget(w, str(w.text()))
+        # Scale header labels
+        hh = self._table.horizontalHeader()
+        for col in range(self._table.columnCount()):
+            hi = self._table.horizontalHeaderItem(col)
+            if hi:
+                self._fit_widget(hh, hi.text())
+
+    def resizeEvent(self, event: Any) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._apply_font_scaling()
+
+    def showEvent(self, event: Any) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._apply_font_scaling()
