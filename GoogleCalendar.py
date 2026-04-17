@@ -62,7 +62,10 @@ MODULE_MANIFEST = {
         "task.deleted",
         "task.due",
     ],
-    "listens": ["calendar.item.*", "task.*"],
+    "listens_for": [
+        {"event_type": "calendar.item.*"},
+        {"event_type": "task.*"},
+    ],
 }
 
 REQUIRED_SCOPES = {
@@ -1527,19 +1530,44 @@ class GoogleCalendarModule:
         return self.module_panel
 
     def module_definition(self) -> dict[str, Any]:
+        workspace_spec = self.get_workspace_spec()
+        workspace_tabs: list[dict[str, Any]] = []
+        titles = list(workspace_spec.get("workspace_titles") or [])
+        widgets = list(workspace_spec.get("workspace_widgets") or [])
+        for idx, factory in enumerate(widgets):
+            if not callable(factory):
+                continue
+            label = str(titles[idx] if idx < len(titles) else f"Workspace {idx + 1}")
+            workspace_tabs.append(
+                {
+                    "id": f"{MODULE_MANIFEST['key']}_workspace_{idx + 1}",
+                    "label": label,
+                    "build": factory,
+                }
+            )
+
         return {
             "key": MODULE_MANIFEST["key"],
             "display_name": MODULE_MANIFEST["display_name"],
             "deck_api_version": MODULE_MANIFEST["deck_api_version"],
             "home_category": MODULE_MANIFEST["home_category"],
-            "tab_definitions": MODULE_MANIFEST["tab_definitions"],
+            "tabs": [
+                {
+                    "tab_id": "google_calendar_main",
+                    "tab_name": "Google Calendar",
+                    "get_content": self.create_tab,
+                }
+            ],
             "manifest": MODULE_MANIFEST,
-            "create_tab": self.create_tab,
-            "get_workspace_spec": self.get_workspace_spec,
             "settings_sections": ["sync_interval", "battery"],
+            "supports_workspaces": bool(workspace_tabs),
+            "workspace_tabs": workspace_tabs,
+            "build_ribbon": workspace_spec.get("ribbon"),
+            "on_workspace_activate": self.runtime.trigger_sync_now,
+            "on_workspace_deactivate": self.runtime.stop_sync_timer,
+            "on_workspace_release": self.runtime.stop_sync_timer,
             "hooks": {
-                "on_open": self.runtime.trigger_sync_now,
-                "on_focus": self.runtime.trigger_sync_now,
+                "on_startup": self.runtime.trigger_sync_now,
             },
         }
 
