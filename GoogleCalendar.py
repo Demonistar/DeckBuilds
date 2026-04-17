@@ -91,6 +91,10 @@ TASK_PROMPT_CRITICALLY_OVERDUE = (
     "marked done, rescheduled, or cancelled. List them, then push for a response."
 )
 
+# NOTE:
+# Keep record models as plain Python classes (no dataclasses) so this module
+# can be safely loaded via dynamic exec() loaders that do not populate
+# sys.modules entries.
 
 class CalendarRecord:
     def __init__(
