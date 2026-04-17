@@ -3605,3 +3605,550 @@ class ComposeView(QWidget):
     def showEvent(self, event: Any) -> None:  # type: ignore[override]
         super().showEvent(event)
         self._apply_font_scaling()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Section 8: Workspace Thread Read View (Mode 3)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ThreadReadView(QWidget):
+    """
+    Mode 3 workspace widget — reads a full thread, one message block per message.
+
+    Signals
+    -------
+    back_requested()
+    reply_requested(msg: MessageDetail)
+    reply_all_requested(msg: MessageDetail)
+    forward_requested(msg: MessageDetail)
+    compose_requested()          — triggered from the reply bar
+    """
+
+    back_requested      = Signal()
+    reply_requested     = Signal(object)
+    reply_all_requested = Signal(object)
+    forward_requested   = Signal(object)
+
+    def __init__(
+        self,
+        runtime:     GmailRuntime,
+        rule_engine: AIRuleEngine,
+        classifier:  EmailClassifier,
+        parent:      Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._runtime     = runtime
+        self._rule_engine = rule_engine
+        self._classifier  = classifier
+        self._messages:   list[MessageDetail] = []
+        self._thread_id   = ""
+        self._send_to_ai: Optional[Callable[[dict], bool]] = None
+        self._build_ui()
+
+    # ── Build ─────────────────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Top action bar ────────────────────────────────────────────────────
+        action_bar = QWidget(self)
+        action_row = QHBoxLayout(action_bar)
+        action_row.setContentsMargins(6, 4, 6, 4)
+        action_row.setSpacing(4)
+
+        self._back_btn    = QPushButton("◀ Back",   action_bar)
+        self._archive_btn = QPushButton("Archive",  action_bar)
+        self._snooze_btn  = QPushButton("Snooze",   action_bar)
+        self._delete_btn  = QPushButton("Delete",   action_bar)
+        self._unread_btn  = QPushButton("Mark Unread", action_bar)
+        self._ai_btn      = QPushButton("Send to AI",  action_bar)
+        self._pagination_lbl = QLabel("", action_bar)
+        self._pagination_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+
+        for btn in (self._back_btn, self._archive_btn, self._snooze_btn,
+                    self._delete_btn, self._unread_btn, self._ai_btn):
+            action_row.addWidget(btn)
+        action_row.addStretch(1)
+        action_row.addWidget(self._pagination_lbl)
+        root.addWidget(action_bar)
+
+        # ── Subject + label chips ─────────────────────────────────────────────
+        header_widget = QWidget(self)
+        header_layout = QVBoxLayout(header_widget)
+        header_layout.setContentsMargins(8, 4, 8, 4)
+        self._subject_lbl = QLabel("", header_widget)
+        self._subject_lbl.setWordWrap(True)
+        font = self._subject_lbl.font()
+        font.setBold(True)
+        font.setPointSizeF(max(10.0, font.pointSizeF() + 2))
+        self._subject_lbl.setFont(font)
+        header_layout.addWidget(self._subject_lbl)
+
+        self._chip_row_widget = QWidget(header_widget)
+        self._chip_row_layout = QHBoxLayout(self._chip_row_widget)
+        self._chip_row_layout.setContentsMargins(0, 2, 0, 2)
+        self._chip_row_layout.setSpacing(4)
+        self._chip_row_layout.addStretch(1)
+        header_layout.addWidget(self._chip_row_widget)
+        root.addWidget(header_widget)
+
+        # ── Message scroll area ───────────────────────────────────────────────
+        self._scroll = QScrollArea(self)
+        self._scroll.setWidgetResizable(True)
+        self._scroll_content = QWidget()
+        self._msg_layout     = QVBoxLayout(self._scroll_content)
+        self._msg_layout.setContentsMargins(8, 4, 8, 4)
+        self._msg_layout.setSpacing(6)
+        self._msg_layout.addStretch(1)
+        self._scroll.setWidget(self._scroll_content)
+        root.addWidget(self._scroll, stretch=1)
+
+        # ── Reply bar ─────────────────────────────────────────────────────────
+        reply_bar    = QWidget(self)
+        reply_row    = QHBoxLayout(reply_bar)
+        reply_row.setContentsMargins(8, 6, 8, 6)
+        reply_btn    = QPushButton("Reply",       reply_bar)
+        fwd_btn      = QPushButton("Forward",     reply_bar)
+        react_btn    = QPushButton("React…",      reply_bar)
+        reply_row.addWidget(reply_btn)
+        reply_row.addWidget(fwd_btn)
+        reply_row.addWidget(react_btn)
+        reply_row.addStretch(1)
+        root.addWidget(reply_bar)
+
+        # ── Connections ───────────────────────────────────────────────────────
+        self._back_btn.clicked.connect(self.back_requested)
+        self._archive_btn.clicked.connect(self._on_archive)
+        self._snooze_btn.clicked.connect(self._on_snooze)
+        self._delete_btn.clicked.connect(self._on_delete)
+        self._unread_btn.clicked.connect(self._on_mark_unread)
+        self._ai_btn.clicked.connect(self._on_send_to_ai)
+        reply_btn.clicked.connect(self._on_reply_last)
+        fwd_btn.clicked.connect(self._on_forward_last)
+        react_btn.clicked.connect(self._on_react)
+
+    # ── Public load ───────────────────────────────────────────────────────────
+
+    def load_thread(self, thread_id: str) -> None:
+        self._thread_id = thread_id
+        try:
+            client   = self._runtime._make_client()
+            messages = client.fetch_thread_messages(thread_id)
+        except RuntimeError as exc:
+            self._clear_messages()
+            self._subject_lbl.setText(f"⚠ {exc}")
+            return
+        self._messages = messages
+        self._render_thread()
+
+    def set_ai_sender(self, fn: Callable[[dict], bool]) -> None:
+        """Inject the deck_api AI-send callable from the workspace."""
+        self._send_to_ai = fn
+
+    # ── Render ────────────────────────────────────────────────────────────────
+
+    def _render_thread(self) -> None:
+        if not self._messages:
+            self._subject_lbl.setText("(empty thread)")
+            self._clear_messages()
+            return
+
+        last = self._messages[-1]
+        self._subject_lbl.setText(last.subject or "(no subject)")
+
+        # Label chips
+        while self._chip_row_layout.count() > 1:
+            item = self._chip_row_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+
+        all_labels = set()
+        for m in self._messages:
+            all_labels.update(m.label_ids)
+        visible_labels = [l for l in all_labels
+                          if l not in {"UNREAD", "STARRED", "IMPORTANT"}]
+        for lid in visible_labels[:6]:
+            chip = self._make_chip(lid.replace("CATEGORY_", "").title())
+            self._chip_row_layout.insertWidget(self._chip_row_layout.count() - 1, chip)
+
+        # Run classifier + rules on last message
+        self._run_auto_classify(last)
+
+        # Build message blocks
+        self._clear_messages()
+        for i, msg in enumerate(self._messages):
+            expanded = (i == len(self._messages) - 1)
+            block    = self._build_message_block(msg, expanded)
+            self._msg_layout.insertWidget(self._msg_layout.count() - 1, block)
+
+        # Scroll to bottom (latest message)
+        self._scroll.verticalScrollBar().setValue(
+            self._scroll.verticalScrollBar().maximum()
+        )
+        self._apply_font_scaling()
+
+    def _clear_messages(self) -> None:
+        while self._msg_layout.count() > 1:
+            item = self._msg_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+
+    # ── Message block factory ─────────────────────────────────────────────────
+
+    def _build_message_block(
+        self, msg: MessageDetail, expanded: bool
+    ) -> QFrame:
+        frame = QFrame(self._scroll_content)
+        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(8, 6, 8, 6)
+        frame_layout.setSpacing(4)
+
+        # ── Header row ────────────────────────────────────────────────────────
+        header_row = QHBoxLayout()
+
+        # Avatar
+        sn, se = _sender_display(msg.from_header)
+        avatar = QLabel(frame)
+        avatar.setFixedSize(36, 36)
+        avatar.setText((sn[0] if sn else "?").upper())
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        clr = _avatar_colour(sn)
+        avatar.setStyleSheet(
+            f"background-color: {clr}; color: white; border-radius: 18px; "
+            "font-size: 14px; font-weight: bold;"
+        )
+        header_row.addWidget(avatar)
+
+        # Sender info
+        info_col = QVBoxLayout()
+        sender_lbl = QLabel(f"<b>{sn}</b>  &lt;{se}&gt;", frame)
+        sender_lbl.setWordWrap(False)
+        date_lbl   = QLabel(msg.date_header, frame)
+        date_lbl.setWordWrap(False)
+        font = date_lbl.font()
+        font.setPointSizeF(max(7.0, font.pointSizeF() - 1))
+        date_lbl.setFont(font)
+        date_lbl.setStyleSheet("color: #888;")
+        info_col.addWidget(sender_lbl)
+        info_col.addWidget(date_lbl)
+        if msg.to_header:
+            to_lbl = QLabel(f"To: {msg.to_header}", frame)
+            to_lbl.setWordWrap(False)
+            to_lbl.setStyleSheet("color: #888; font-size: 10px;")
+            info_col.addWidget(to_lbl)
+        header_row.addLayout(info_col, stretch=1)
+
+        # Star toggle
+        star_btn = QToolButton(frame)
+        star_btn.setText("★" if "STARRED" in msg.label_ids else "☆")
+        star_btn.setCheckable(True)
+        star_btn.setChecked("STARRED" in msg.label_ids)
+        if "STARRED" in msg.label_ids:
+            star_btn.setStyleSheet("color: #f9ab00;")
+        star_btn.clicked.connect(
+            lambda checked, m=msg, b=star_btn: self._toggle_msg_star(m, b, checked)
+        )
+        header_row.addWidget(star_btn)
+
+        # Reply / More buttons
+        reply_btn = QToolButton(frame)
+        reply_btn.setText("↩")
+        reply_btn.setToolTip("Reply")
+        reply_btn.clicked.connect(lambda _, m=msg: self.reply_requested.emit(m))
+        header_row.addWidget(reply_btn)
+
+        # Expand / collapse toggle
+        expand_btn = QToolButton(frame)
+        expand_btn.setText("▲" if expanded else "▼")
+        expand_btn.setCheckable(True)
+        expand_btn.setChecked(expanded)
+        header_row.addWidget(expand_btn)
+
+        frame_layout.addLayout(header_row)
+
+        # ── Body ──────────────────────────────────────────────────────────────
+        body_widget = QWidget(frame)
+        body_layout = QVBoxLayout(body_widget)
+        body_layout.setContentsMargins(0, 4, 0, 4)
+
+        body_edit = QTextEdit(body_widget)
+        body_edit.setReadOnly(True)
+        body_edit.setFrameShape(QFrame.Shape.NoFrame)
+        body_edit.setMinimumHeight(120)
+        if msg.html_body:
+            body_edit.setHtml(msg.html_body)
+        elif msg.plain_body:
+            body_edit.setPlainText(msg.plain_body)
+        else:
+            body_edit.setPlainText("(empty)")
+        body_layout.addWidget(body_edit)
+
+        # Attachment chips
+        if msg.attachments:
+            att_row_widget = QWidget(body_widget)
+            att_row        = QHBoxLayout(att_row_widget)
+            att_row.setContentsMargins(0, 4, 0, 0)
+            att_row.setSpacing(4)
+            for att in msg.attachments:
+                chip = self._make_attachment_chip(
+                    msg.message_id, att, body_widget
+                )
+                att_row.addWidget(chip)
+            att_row.addStretch(1)
+            body_layout.addWidget(att_row_widget)
+
+        frame_layout.addWidget(body_widget)
+        body_widget.setVisible(expanded)
+
+        # Wire expand/collapse
+        def _toggle(checked: bool) -> None:
+            body_widget.setVisible(checked)
+            expand_btn.setText("▲" if checked else "▼")
+
+        expand_btn.clicked.connect(_toggle)
+
+        return frame
+
+    # ── Attachment chip ───────────────────────────────────────────────────────
+
+    def _make_attachment_chip(
+        self, message_id: str, att: dict[str, Any], parent: QWidget
+    ) -> QWidget:
+        chip = QFrame(parent)
+        chip.setFrameShape(QFrame.Shape.StyledPanel)
+        chip_layout = QHBoxLayout(chip)
+        chip_layout.setContentsMargins(4, 2, 4, 2)
+        chip_layout.setSpacing(4)
+
+        icon_lbl = QLabel("📄", chip)
+        name_lbl = QLabel(att.get("filename", "file"), chip)
+        name_lbl.setWordWrap(False)
+        size_lbl = QLabel(_format_size(int(att.get("size", 0))), chip)
+        size_lbl.setStyleSheet("color: #888;")
+        dl_btn   = QPushButton("↓", chip)
+        dl_btn.setFixedWidth(28)
+        dl_btn.setToolTip("Download")
+        dl_btn.clicked.connect(
+            lambda _, mid=message_id, a=att: self._download_attachment(mid, a)
+        )
+        chip_layout.addWidget(icon_lbl)
+        chip_layout.addWidget(name_lbl)
+        chip_layout.addWidget(size_lbl)
+        chip_layout.addWidget(dl_btn)
+        return chip
+
+    # ── Label chip ────────────────────────────────────────────────────────────
+
+    def _make_chip(self, text: str, color: str = "#1a73e8") -> QLabel:
+        chip = QLabel(f" {text} ", self._chip_row_widget)
+        chip.setStyleSheet(
+            f"background-color: {color}22; color: {color}; "
+            f"border: 1px solid {color}55; border-radius: 3px; "
+            "padding: 1px 4px; font-size: 10px;"
+        )
+        chip.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        return chip
+
+    # ── Action handlers ───────────────────────────────────────────────────────
+
+    def _on_archive(self) -> None:
+        if not self._thread_id:
+            return
+        try:
+            client = self._runtime._make_client()
+            client.modify_thread(self._thread_id, remove_label_ids=["INBOX"])
+            self._runtime._emit("gmail.message.archived", {"thread_id": self._thread_id})
+        except Exception as exc:
+            QMessageBox.warning(self, "Archive", str(exc))
+        self.back_requested.emit()
+
+    def _on_delete(self) -> None:
+        if not self._thread_id:
+            return
+        if QMessageBox.question(
+            self, "Delete", "Move thread to Trash?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            client = self._runtime._make_client()
+            client.trash_thread(self._thread_id)
+            self._runtime._emit("gmail.message.deleted", {"thread_id": self._thread_id})
+        except Exception as exc:
+            QMessageBox.warning(self, "Delete", str(exc))
+        self.back_requested.emit()
+
+    def _on_mark_unread(self) -> None:
+        if not self._thread_id:
+            return
+        try:
+            client = self._runtime._make_client()
+            client.modify_thread(self._thread_id, add_label_ids=["UNREAD"])
+        except Exception:
+            pass
+        self.back_requested.emit()
+
+    def _on_snooze(self) -> None:
+        if not self._thread_id:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Snooze until…")
+        dlg_layout = QVBoxLayout(dlg)
+        from PySide6.QtWidgets import QDateTimeEdit
+        from PySide6.QtCore import QDateTime
+        dte = QDateTimeEdit(dlg)
+        dte.setCalendarPopup(True)
+        dte.setDateTime(QDateTime.currentDateTime().addSecs(3600))
+        dlg_layout.addWidget(QLabel("Resurface at:", dlg))
+        dlg_layout.addWidget(dte)
+        btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel,
+            dlg,
+        )
+        dlg_layout.addWidget(btn_box)
+        btn_box.accepted.connect(dlg.accept)
+        btn_box.rejected.connect(dlg.reject)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            until_dt  = dte.dateTime().toPython()
+            until_iso = until_dt.isoformat()
+            self._runtime.snooze_thread(self._thread_id, until_iso)
+            try:
+                client = self._runtime._make_client()
+                client.modify_thread(self._thread_id, remove_label_ids=["INBOX"])
+            except Exception:
+                pass
+            self.back_requested.emit()
+
+    def _toggle_msg_star(
+        self, msg: MessageDetail, btn: QToolButton, checked: bool
+    ) -> None:
+        try:
+            client = self._runtime._make_client()
+            if checked:
+                client.modify_thread(msg.thread_id, add_label_ids=["STARRED"])
+                btn.setText("★")
+                btn.setStyleSheet("color: #f9ab00;")
+            else:
+                client.modify_thread(msg.thread_id, remove_label_ids=["STARRED"])
+                btn.setText("☆")
+                btn.setStyleSheet("")
+        except Exception:
+            pass
+
+    def _on_reply_last(self) -> None:
+        if self._messages:
+            self.reply_requested.emit(self._messages[-1])
+
+    def _on_forward_last(self) -> None:
+        if self._messages:
+            self.forward_requested.emit(self._messages[-1])
+
+    def _on_react(self) -> None:
+        QMessageBox.information(self, "React", "Emoji reactions are not supported by the Gmail API.")
+
+    # ── Attachment download ───────────────────────────────────────────────────
+
+    def _download_attachment(self, message_id: str, att: dict[str, Any]) -> None:
+        filename = att.get("filename", "attachment")
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Attachment", filename
+        )
+        if not save_path:
+            return
+        try:
+            client = self._runtime._make_client()
+            raw    = client.get_attachment(message_id, att["attachment_id"])
+            Path(save_path).write_bytes(raw)
+            QMessageBox.information(self, "Downloaded", f"Saved to {save_path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Download failed", str(exc))
+
+    # ── Send to AI ────────────────────────────────────────────────────────────
+
+    def _on_send_to_ai(self) -> None:
+        if not self._messages:
+            return
+        last = self._messages[-1]
+        sn, se = _sender_display(last.from_header)
+        plain  = last.plain_body or re.sub(r"<[^>]+>", "", last.html_body or "")
+
+        payload = {
+            "type":        "email",
+            "sender_name":  sn,
+            "sender_email": se,
+            "subject":      last.subject,
+            "body_plain":   plain[:1500],
+            "labels":       last.label_ids,
+            "timestamp":    last.date_header,
+        }
+
+        sent = False
+        if callable(self._send_to_ai):
+            try:
+                sent = self._send_to_ai(payload)
+            except Exception:
+                pass
+
+        if not sent:
+            QMessageBox.information(
+                self, "Send to AI",
+                "AI handoff is not available. No host send_to_session path found."
+            )
+
+    def _run_auto_classify(self, msg: MessageDetail) -> None:
+        """Run classifier + rules on message; surface rule suggestions."""
+        sn, se  = _sender_display(msg.from_header)
+        plain   = msg.plain_body or re.sub(r"<[^>]+>", "", msg.html_body or "")
+
+        # Rule engine evaluation
+        actions = self._rule_engine.evaluate(
+            sender_name=sn, sender_email=se,
+            subject=msg.subject, body_plain=plain,
+            label_ids=msg.label_ids,
+        )
+        for action in actions:
+            if action.action == "notify_ai" and callable(self._send_to_ai):
+                try:
+                    self._send_to_ai({
+                        "type": "rule_triggered",
+                        "rule_action": action.action,
+                        "subject": msg.subject,
+                    })
+                except Exception:
+                    pass
+
+    # ── Font scaling ──────────────────────────────────────────────────────────
+
+    def _fit_widget(self, widget: QWidget, text: str) -> None:
+        if not text or widget.width() < 20:
+            return
+        fm        = widget.fontMetrics()
+        available = max(10, widget.width() - 10)
+        pt        = widget.font().pointSizeF() or 9.0
+        while pt > 6.5 and fm.horizontalAdvance(text) > available:
+            pt -= 0.5
+            f  = widget.font()
+            f.setPointSizeF(pt)
+            widget.setFont(f)
+            fm = widget.fontMetrics()
+
+    def _apply_font_scaling(self) -> None:
+        for w in self.findChildren((QLabel, QPushButton, QToolButton)):
+            if hasattr(w, "text"):
+                txt = str(w.text())
+                if txt:
+                    self._fit_widget(w, txt)
+
+    def resizeEvent(self, event: Any) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._apply_font_scaling()
+
+    def showEvent(self, event: Any) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._apply_font_scaling()
