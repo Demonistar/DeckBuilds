@@ -1134,3 +1134,912 @@ class AIRuleEngine:
         )
         msg.setDefaultButton(QMessageBox.StandardButton.No)
         return msg.exec() == QMessageBox.StandardButton.Yes
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Section 3: Sync Engine — QThread with history API, interval, battery config
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SyncConfig  —  persisted sync settings
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SyncConfig:
+    """Sync interval and battery-detection settings, JSON-serialisable."""
+
+    DEFAULT_INTERVAL_VALUE = 5
+    DEFAULT_INTERVAL_UNIT  = "minutes"
+    DEFAULT_BATTERY_DETECT = True
+    DEFAULT_BATTERY_INTERVAL_VALUE = 10
+    DEFAULT_BATTERY_INTERVAL_UNIT  = "minutes"
+
+    def __init__(
+        self,
+        fetch_mode:             str  = "new_only",
+        interval_value:         int  = DEFAULT_INTERVAL_VALUE,
+        interval_unit:          str  = DEFAULT_INTERVAL_UNIT,
+        battery_detection:      bool = DEFAULT_BATTERY_DETECT,
+        battery_interval_value: int  = DEFAULT_BATTERY_INTERVAL_VALUE,
+        battery_interval_unit:  str  = DEFAULT_BATTERY_INTERVAL_UNIT,
+        battery_override_disabled: bool = False,
+    ) -> None:
+        self.fetch_mode              = fetch_mode            # "new_only" | "full"
+        self.interval_value          = interval_value
+        self.interval_unit           = interval_unit         # "seconds" | "minutes" | "hours"
+        self.battery_detection       = battery_detection
+        self.battery_interval_value  = battery_interval_value
+        self.battery_interval_unit   = battery_interval_unit
+        self.battery_override_disabled = battery_override_disabled
+
+    # ── Unit conversion ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _to_ms(value: int, unit: str) -> int:
+        multipliers = {"seconds": 1_000, "minutes": 60_000, "hours": 3_600_000}
+        return max(30_000, value * multipliers.get(unit, 60_000))
+
+    def normal_interval_ms(self) -> int:
+        return self._to_ms(self.interval_value, self.interval_unit)
+
+    def battery_interval_ms(self) -> int:
+        return self._to_ms(self.battery_interval_value, self.battery_interval_unit)
+
+    def effective_interval_ms(self, on_battery: bool) -> int:
+        if self.battery_override_disabled:
+            return self.normal_interval_ms()
+        if on_battery and self.battery_detection:
+            return self.battery_interval_ms()
+        return self.normal_interval_ms()
+
+    # ── Serialisation ─────────────────────────────────────────────────────────
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "fetch_mode":                self.fetch_mode,
+            "interval_value":            self.interval_value,
+            "interval_unit":             self.interval_unit,
+            "battery_detection":         self.battery_detection,
+            "battery_interval_value":    self.battery_interval_value,
+            "battery_interval_unit":     self.battery_interval_unit,
+            "battery_override_disabled": self.battery_override_disabled,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SyncConfig":
+        return cls(
+            fetch_mode              = str(d.get("fetch_mode")             or "new_only"),
+            interval_value          = int(d.get("interval_value")         or cls.DEFAULT_INTERVAL_VALUE),
+            interval_unit           = str(d.get("interval_unit")          or cls.DEFAULT_INTERVAL_UNIT),
+            battery_detection       = bool(d.get("battery_detection",      cls.DEFAULT_BATTERY_DETECT)),
+            battery_interval_value  = int(d.get("battery_interval_value") or cls.DEFAULT_BATTERY_INTERVAL_VALUE),
+            battery_interval_unit   = str(d.get("battery_interval_unit")  or cls.DEFAULT_BATTERY_INTERVAL_UNIT),
+            battery_override_disabled = bool(d.get("battery_override_disabled", False)),
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GmailRuntime  —  auth, state, API orchestration, rule/signature/snooze mgmt
+# ─────────────────────────────────────────────────────────────────────────────
+
+class GmailRuntime:
+    """
+    Owns all backend state for the Gmail module:
+    - Shared google_auth consumption (no independent OAuth ownership)
+    - GmailClient construction and credential refresh
+    - Sync state persistence (historyId, last sync time, auth status)
+    - SyncConfig persistence
+    - AIRuleEngine delegation
+    - Signature storage
+    - Snooze storage
+    """
+
+    def __init__(self, deck_api: dict[str, Any]) -> None:
+        self._deck_api  = deck_api
+        self._log: Callable[[str], None] = (
+            deck_api.get("log") if callable(deck_api.get("log"))
+            else (lambda _m: None)
+        )
+        self._cfg_get = (
+            deck_api.get("cfg_get") if callable(deck_api.get("cfg_get"))
+            else (lambda _k, d=None: d)
+        )
+        self._cfg_set = (
+            deck_api.get("cfg_set") if callable(deck_api.get("cfg_set"))
+            else (lambda _k, _v: None)
+        )
+        self._cfg_path = (
+            deck_api.get("cfg_path") if callable(deck_api.get("cfg_path"))
+            else None
+        )
+        self._broadcast = (
+            deck_api.get("broadcast") if callable(deck_api.get("broadcast"))
+            else None
+        )
+
+        self.sync_state: dict[str, Any] = {
+            "mode":        "local_only",
+            "auth_status": "unknown",
+            "last_sync_at": "",
+            "last_error":  "",
+            "history_id":  "",
+            "user_email":  "",
+        }
+        self.sync_config = SyncConfig()
+
+        self._storage_path        = self._resolve_storage_path()
+        self._google_storage_dir  = self._resolve_google_storage_dir()
+        self._token_path          = (
+            self._google_storage_dir / "token.json"
+            if self._google_storage_dir else None
+        )
+        self._credentials_path    = (
+            self._google_storage_dir / "google_credentials.json"
+            if self._google_storage_dir else None
+        )
+        self._gmail_dir = self._resolve_gmail_dir()
+
+        # Sub-systems
+        self.rule_engine = AIRuleEngine(
+            rules_path = self._gmail_dir / "rules.json" if self._gmail_dir else None,
+            log        = self._log,
+        )
+        self.classifier  = EmailClassifier()
+
+        self._load_state()
+
+    # ── Path resolution ───────────────────────────────────────────────────────
+
+    def _resolve_storage_path(self) -> Optional[Path]:
+        if not callable(self._cfg_path):
+            return None
+        try:
+            p = self._cfg_path("google_gmail_module_state.json")
+            if not p:
+                return None
+            path = Path(p)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return path
+        except Exception as exc:
+            self._log(f"GoogleGmail storage path unavailable: {exc}")
+            return None
+
+    def _resolve_google_storage_dir(self) -> Optional[Path]:
+        if not callable(self._cfg_path):
+            return None
+        try:
+            candidate = self._cfg_path("google_auth/token.json")
+            if candidate:
+                d = Path(candidate).parent
+                d.mkdir(parents=True, exist_ok=True)
+                return d
+        except Exception as exc:
+            self._log(f"GoogleGmail google_auth dir unavailable: {exc}")
+        return None
+
+    def _resolve_gmail_dir(self) -> Optional[Path]:
+        if not callable(self._cfg_path):
+            return None
+        try:
+            p = self._cfg_path("Gmail/placeholder")
+            if not p:
+                return None
+            d = Path(p).parent
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+        except Exception as exc:
+            self._log(f"GoogleGmail Gmail dir unavailable: {exc}")
+            return None
+
+    # ── State persistence ─────────────────────────────────────────────────────
+
+    def _load_state(self) -> None:
+        if self._storage_path and self._storage_path.exists():
+            try:
+                data = json.loads(
+                    self._storage_path.read_text(encoding="utf-8")
+                )
+                state = data.get("sync_state")
+                if isinstance(state, dict):
+                    self.sync_state.update(state)
+                cfg_raw = data.get("sync_config")
+                if isinstance(cfg_raw, dict):
+                    self.sync_config = SyncConfig.from_dict(cfg_raw)
+            except Exception as exc:
+                self._log(f"GoogleGmail state load failed: {exc}")
+
+    def _save_state(self) -> None:
+        payload = {
+            "sync_state":  dict(self.sync_state),
+            "sync_config": self.sync_config.to_dict(),
+            "updated_at":  _now_iso(),
+        }
+        if self._storage_path:
+            try:
+                self._storage_path.write_text(
+                    json.dumps(payload, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            except Exception as exc:
+                self._log(f"GoogleGmail state save failed: {exc}")
+        try:
+            self._cfg_set("module_google_gmail_state", payload)
+        except Exception:
+            pass
+
+    def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
+        if not callable(self._broadcast):
+            return
+        envelope = {
+            "event_type":    event_type,
+            "domain":        "gmail",
+            "origin_module": "google_gmail",
+            "payload":       payload,
+        }
+        try:
+            self._broadcast(envelope)
+        except Exception:
+            pass
+
+    # ── Shared google_auth ────────────────────────────────────────────────────
+
+    def _google_auth_snapshot(self) -> dict[str, Any]:
+        shared = self._cfg_get("modules.shared_resources.google_auth", {})
+        if not isinstance(shared, dict):
+            shared = {}
+        local_token = bool(self._token_path and self._token_path.exists())
+        local_creds = bool(self._credentials_path and self._credentials_path.exists())
+        token_present = bool(
+            shared.get("token_present") or shared.get("token_path") or local_token
+        )
+        creds_present = bool(
+            shared.get("credentials_present") or shared.get("credentials_path") or local_creds
+        )
+        valid = bool(shared.get("token_valid", token_present))
+        return {
+            "token_present":    token_present,
+            "credentials_present": creds_present,
+            "token_valid":      valid,
+        }
+
+    def _set_shared_auth_state(
+        self,
+        token_valid:         bool,
+        token_present:       bool,
+        credentials_present: bool,
+        credentials_path:    str = "",
+    ) -> None:
+        payload = {
+            "token_valid":         bool(token_valid),
+            "token_present":       bool(token_present),
+            "credentials_present": bool(credentials_present),
+            "refreshable":         True,
+            "token_path": (
+                str(self._token_path) if token_present and self._token_path else ""
+            ),
+            "credentials_path": (
+                credentials_path if credentials_path
+                else (
+                    str(self._credentials_path)
+                    if credentials_present and self._credentials_path else ""
+                )
+            ),
+        }
+        try:
+            self._cfg_set("modules.shared_resources.google_auth", payload)
+        except Exception:
+            pass
+
+    def evaluate_auth_status(self) -> str:
+        auth = self._google_auth_snapshot()
+        if auth["token_present"] and auth["token_valid"]:
+            if self.sync_state.get("auth_status") != "authenticated":
+                self.sync_state["auth_status"] = "token_ready"
+            self.sync_state["mode"] = "google_connected"
+        elif auth["credentials_present"]:
+            self.sync_state["auth_status"] = "credentials_only"
+            self.sync_state["mode"] = "local_only"
+        else:
+            self.sync_state["auth_status"] = "missing"
+            self.sync_state["mode"] = "local_only"
+        return str(self.sync_state["auth_status"])
+
+    # ── Auth flow ─────────────────────────────────────────────────────────────
+
+    def authenticate_google(self, selected_credentials_path: str) -> tuple[bool, str]:
+        """
+        Run the OAuth flow using the supplied credentials JSON file.
+        Writes token.json to the shared Google storage dir.
+        """
+        if not self._google_storage_dir or not self._token_path or not self._credentials_path:
+            return False, "Google auth storage location is unavailable."
+        if not selected_credentials_path:
+            return False, "No credentials file selected."
+        sp = Path(selected_credentials_path)
+        if not sp.exists():
+            return False, "Selected credentials file does not exist."
+
+        # Copy credentials file into shared storage
+        try:
+            self._credentials_path.write_text(
+                sp.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+        except Exception as exc:
+            return False, f"Failed to store credentials: {exc}"
+
+        try:
+            from google.auth.transport.requests import Request
+            from google.oauth2.credentials import Credentials
+            from google_auth_oauthlib.flow import InstalledAppFlow
+        except Exception as exc:
+            self.sync_state["auth_status"] = "missing"
+            self.sync_state["mode"]        = "local_only"
+            self.sync_state["last_error"]  = f"Google dependencies unavailable: {exc}"
+            self._save_state()
+            return False, self.sync_state["last_error"]
+
+        creds = None
+        try:
+            # Reuse existing token if present and covers required scopes
+            if self._token_path.exists():
+                try:
+                    creds = Credentials.from_authorized_user_file(
+                        str(self._token_path), GOOGLE_SCOPES
+                    )
+                except Exception:
+                    creds = None
+
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+
+            if not creds or not creds.valid:
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    str(self._credentials_path), GOOGLE_SCOPES
+                )
+                creds = flow.run_local_server(port=0)
+
+            self._token_path.write_text(creds.to_json(), encoding="utf-8")
+
+            # Validate by fetching profile
+            client = GmailClient(creds)
+            profile = client.get_profile()
+            self.sync_state["user_email"] = str(profile.get("emailAddress") or "")
+            self.sync_state["history_id"] = str(profile.get("historyId")    or "")
+            self.sync_state["auth_status"] = "authenticated"
+            self.sync_state["mode"]        = "google_connected"
+            self.sync_state["last_error"]  = ""
+            self._set_shared_auth_state(
+                token_valid=True, token_present=True, credentials_present=True,
+                credentials_path=str(self._credentials_path),
+            )
+            self._save_state()
+            self._log("GoogleGmail authentication successful; token.json written.")
+            return True, "Authentication successful."
+
+        except Exception as exc:
+            self.sync_state["mode"]        = "local_only"
+            self.sync_state["auth_status"] = "missing"
+            self.sync_state["last_error"]  = f"Google authentication failed: {exc}"
+            self._set_shared_auth_state(
+                token_valid=False,
+                token_present=bool(self._token_path and self._token_path.exists()),
+                credentials_present=bool(self._credentials_path and self._credentials_path.exists()),
+            )
+            self._save_state()
+            self._log(self.sync_state["last_error"])
+            return False, self.sync_state["last_error"]
+
+    def _make_client(self) -> GmailClient:
+        """Build a GmailClient from the stored token, refreshing if needed."""
+        if not self._token_path or not self._token_path.exists():
+            raise RuntimeError(
+                "No Gmail token found. Please authenticate via the module panel."
+            )
+        try:
+            from google.auth.transport.requests import Request
+            from google.oauth2.credentials import Credentials
+        except ImportError as exc:
+            raise RuntimeError(
+                "google-auth is not installed. "
+                "Run: pip install google-auth google-auth-oauthlib google-auth-httplib2"
+            ) from exc
+
+        creds = Credentials.from_authorized_user_file(
+            str(self._token_path), GOOGLE_SCOPES
+        )
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            self._token_path.write_text(creds.to_json(), encoding="utf-8")
+        if not creds.valid:
+            raise RuntimeError(
+                "Gmail credentials are invalid. Please re-authenticate."
+            )
+        return GmailClient(creds)
+
+    # ── Sync orchestration ────────────────────────────────────────────────────
+
+    def run_sync(self, force_full: bool = False) -> dict[str, Any]:
+        """
+        Entry point called by GmailSyncWorker.run().
+        Returns {"new_ids": [...], "history_id": "..."}.
+        """
+        self.evaluate_auth_status()
+        if self.sync_state.get("mode") != "google_connected":
+            return {"new_ids": [], "history_id": ""}
+
+        history_id = str(self.sync_state.get("history_id") or "")
+        if (
+            history_id
+            and not force_full
+            and self.sync_config.fetch_mode == "new_only"
+        ):
+            return self._incremental_sync(history_id)
+        return self._full_sync_bootstrap()
+
+    def _incremental_sync(self, history_id: str) -> dict[str, Any]:
+        try:
+            client = self._make_client()
+            resp = client.list_history(
+                start_history_id=history_id,
+                history_types=[
+                    "messageAdded", "messageDeleted",
+                    "labelAdded",   "labelRemoved",
+                ],
+            )
+            new_ids: list[str] = []
+            for record in resp.get("history") or []:
+                for added in record.get("messagesAdded") or []:
+                    msg   = added.get("message") or {}
+                    mid   = str(msg.get("id") or "")
+                    lbls  = msg.get("labelIds") or []
+                    if mid and "INBOX" in lbls:
+                        new_ids.append(mid)
+
+            new_hid = str(resp.get("historyId") or history_id)
+            self.sync_state["history_id"]  = new_hid
+            self.sync_state["last_sync_at"] = _now_iso()
+            self.sync_state["last_error"]  = ""
+            self._save_state()
+
+            if new_ids:
+                self._emit("gmail.message.received", {
+                    "count": len(new_ids), "message_ids": new_ids
+                })
+            self._log(
+                f"GoogleGmail incremental sync: {len(new_ids)} new, "
+                f"historyId={new_hid}"
+            )
+            return {"new_ids": new_ids, "history_id": new_hid}
+
+        except RuntimeError as exc:
+            # Detect expired historyId (HTTP 404) and fall back to full sync
+            if "404" in str(exc) or "status=404" in str(exc):
+                self._log(
+                    "GoogleGmail historyId expired (404); "
+                    "falling back to full sync bootstrap."
+                )
+                self.sync_state["history_id"] = ""
+                return self._full_sync_bootstrap()
+            self.sync_state["last_error"] = str(exc)
+            self._save_state()
+            self._log(f"GoogleGmail incremental sync failed: {exc}")
+            return {"new_ids": [], "history_id": history_id}
+
+        except Exception as exc:
+            self.sync_state["last_error"] = f"Incremental sync error: {exc}"
+            self._save_state()
+            self._log(self.sync_state["last_error"])
+            return {"new_ids": [], "history_id": history_id}
+
+    def _full_sync_bootstrap(self) -> dict[str, Any]:
+        try:
+            client  = self._make_client()
+            profile = client.get_profile()
+            new_hid = str(profile.get("historyId")    or "")
+            email   = str(profile.get("emailAddress") or "")
+            if email:
+                self.sync_state["user_email"] = email
+            self.sync_state["history_id"]   = new_hid
+            self.sync_state["last_sync_at"] = _now_iso()
+            self.sync_state["last_error"]   = ""
+            self._save_state()
+            self._log(
+                f"GoogleGmail full sync bootstrap: "
+                f"historyId={new_hid}, user={email}"
+            )
+            return {"new_ids": [], "history_id": new_hid}
+        except Exception as exc:
+            self.sync_state["last_error"] = f"Full sync error: {exc}"
+            self._save_state()
+            self._log(self.sync_state["last_error"])
+            return {"new_ids": [], "history_id": ""}
+
+    # ── Snooze storage (local-only; Gmail API has no native snooze) ───────────
+
+    def _snooze_path(self) -> Optional[Path]:
+        return (self._gmail_dir / "snooze_data.json") if self._gmail_dir else None
+
+    def load_snoozed(self) -> dict[str, str]:
+        p = self._snooze_path()
+        if not p or not p.exists():
+            return {}
+        try:
+            return dict(json.loads(p.read_text(encoding="utf-8")))
+        except Exception:
+            return {}
+
+    def snooze_thread(self, thread_id: str, until_iso: str) -> None:
+        data = self.load_snoozed()
+        data[thread_id] = until_iso
+        p = self._snooze_path()
+        if p:
+            try:
+                p.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+
+    def unsnooze_thread(self, thread_id: str) -> None:
+        data = self.load_snoozed()
+        data.pop(thread_id, None)
+        p = self._snooze_path()
+        if p:
+            try:
+                p.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+
+    def get_due_snoozed(self) -> list[str]:
+        """Return thread_ids whose snooze-until time has passed."""
+        now  = datetime.now(UTC)
+        data = self.load_snoozed()
+        due: list[str] = []
+        for tid, until_iso in data.items():
+            try:
+                until = datetime.fromisoformat(until_iso.replace("Z", "+00:00"))
+                if now >= until:
+                    due.append(tid)
+            except Exception:
+                continue
+        return due
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GmailSyncWorker  —  background QThread
+# ─────────────────────────────────────────────────────────────────────────────
+
+class GmailSyncWorker(QThread):
+    """
+    Runs GmailRuntime.run_sync() on a background thread.
+
+    Interval respects SyncConfig (normal vs battery override).
+    Battery state is queried from the deck_api "battery_on_battery" key if
+    available; otherwise assumed False (plugged-in).
+
+    Signals
+    -------
+    sync_complete(new_ids: list, history_id: str)
+        Emitted after every successful sync pass.
+    sync_error(message: str)
+        Emitted when a sync pass raises an unhandled exception.
+    """
+
+    sync_complete = Signal(list, str)
+    sync_error    = Signal(str)
+
+    def __init__(
+        self,
+        runtime:  GmailRuntime,
+        deck_api: dict[str, Any],
+        parent:   Optional[QThread] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._runtime   = runtime
+        self._deck_api  = deck_api
+        self._stop_flag = False
+        self._manual_trigger = False
+
+    # ── Control ───────────────────────────────────────────────────────────────
+
+    def trigger_now(self) -> None:
+        """Wake up and run sync immediately, regardless of the current interval."""
+        self._manual_trigger = True
+
+    def stop(self) -> None:
+        self._stop_flag = True
+
+    # ── Battery detection ─────────────────────────────────────────────────────
+
+    def _on_battery(self) -> bool:
+        cfg = self._runtime.sync_config
+        if cfg.battery_override_disabled or not cfg.battery_detection:
+            return False
+        on_batt = self._deck_api.get("battery_on_battery")
+        if callable(on_batt):
+            try:
+                return bool(on_batt())
+            except Exception:
+                return False
+        if isinstance(on_batt, bool):
+            return on_batt
+        return False
+
+    # ── Thread body ───────────────────────────────────────────────────────────
+
+    def run(self) -> None:
+        self._stop_flag      = False
+        self._manual_trigger = False
+
+        while not self._stop_flag:
+            # ── Run one sync pass ─────────────────────────────────────────────
+            try:
+                result = self._runtime.run_sync()
+                self.sync_complete.emit(
+                    result.get("new_ids", []),
+                    result.get("history_id", ""),
+                )
+            except Exception as exc:
+                self.sync_error.emit(str(exc))
+
+            # ── Sleep in 500 ms increments so we can react to stop/trigger ───
+            interval_ms = self._runtime.sync_config.effective_interval_ms(
+                on_battery=self._on_battery()
+            )
+            elapsed = 0
+            while (
+                elapsed < interval_ms
+                and not self._stop_flag
+                and not self._manual_trigger
+            ):
+                self.msleep(500)
+                elapsed += 500
+
+            self._manual_trigger = False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Section 4: Signature System and Local Storage
+# ══════════════════════════════════════════════════════════════════════════════
+
+class SignatureRecord:
+    """One stored email signature."""
+
+    def __init__(
+        self,
+        sig_id:     str,
+        name:       str,
+        content:    str,       # rich-text HTML
+        is_default: bool,
+        created_at: str,
+        updated_at: str,
+    ) -> None:
+        self.sig_id     = sig_id
+        self.name       = name
+        self.content    = content
+        self.is_default = is_default
+        self.created_at = created_at
+        self.updated_at = updated_at
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sig_id":     self.sig_id,
+            "name":       self.name,
+            "content":    self.content,
+            "is_default": self.is_default,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SignatureRecord":
+        return cls(
+            sig_id     = str(d.get("sig_id")     or str(uuid.uuid4())),
+            name       = str(d.get("name")       or "Signature"),
+            content    = str(d.get("content")    or ""),
+            is_default = bool(d.get("is_default", False)),
+            created_at = str(d.get("created_at") or _now_iso()),
+            updated_at = str(d.get("updated_at") or _now_iso()),
+        )
+
+
+class SignatureManager:
+    """
+    Loads and saves signatures to Gmail/signatures/signatures.json.
+    Provides CRUD and default-signature lookup used by compose.
+    """
+
+    def __init__(self, gmail_dir: Optional[Path], log: Callable[[str], None]) -> None:
+        self._dir = gmail_dir
+        self._log = log
+
+    def _path(self) -> Optional[Path]:
+        if not self._dir:
+            return None
+        p = self._dir / "signatures"
+        p.mkdir(parents=True, exist_ok=True)
+        return p / "signatures.json"
+
+    # ── CRUD ──────────────────────────────────────────────────────────────────
+
+    def load_all(self) -> list[SignatureRecord]:
+        p = self._path()
+        if not p or not p.exists():
+            return []
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            return [SignatureRecord.from_dict(d) for d in (raw if isinstance(raw, list) else [])]
+        except Exception as exc:
+            self._log(f"GoogleGmail signatures load failed: {exc}")
+            return []
+
+    def save_all(self, sigs: list[SignatureRecord]) -> None:
+        p = self._path()
+        if not p:
+            return
+        try:
+            p.write_text(
+                json.dumps([s.to_dict() for s in sigs], indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            self._log(f"GoogleGmail signatures save failed: {exc}")
+
+    def upsert(
+        self,
+        sig_id:     str,
+        name:       str,
+        content:    str,
+        is_default: bool,
+    ) -> SignatureRecord:
+        sigs = self.load_all()
+        if is_default:
+            for s in sigs:
+                s.is_default = False
+        existing = next((s for s in sigs if s.sig_id == sig_id), None)
+        now = _now_iso()
+        if existing:
+            existing.name       = name
+            existing.content    = content
+            existing.is_default = is_default
+            existing.updated_at = now
+            self.save_all(sigs)
+            return existing
+        new_sig = SignatureRecord(
+            sig_id=sig_id, name=name, content=content,
+            is_default=is_default, created_at=now, updated_at=now,
+        )
+        sigs.append(new_sig)
+        self.save_all(sigs)
+        return new_sig
+
+    def delete(self, sig_id: str) -> None:
+        self.save_all([s for s in self.load_all() if s.sig_id != sig_id])
+
+    def get_default(self) -> Optional[SignatureRecord]:
+        sigs = self.load_all()
+        for s in sigs:
+            if s.is_default:
+                return s
+        return sigs[0] if sigs else None
+
+    # ── Signature manager dialog ──────────────────────────────────────────────
+
+    def open_manager_dialog(self, parent: Optional[QWidget] = None) -> None:
+        """
+        Show a modal dialog for managing signatures:
+        list on the left, rich-text editor on the right.
+        """
+        dlg = QDialog(parent)
+        dlg.setWindowTitle("Signature Manager")
+        dlg.setMinimumSize(700, 480)
+        root = QHBoxLayout(dlg)
+
+        # Left: list + buttons
+        left = QWidget(dlg)
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        sig_list = QListWidget(left)
+        sig_list.setMinimumWidth(180)
+        left_layout.addWidget(sig_list)
+        btn_row = QHBoxLayout()
+        new_btn = QPushButton("New", left)
+        del_btn = QPushButton("Delete", left)
+        def_btn = QPushButton("Set Default", left)
+        for b in (new_btn, del_btn, def_btn):
+            btn_row.addWidget(b)
+        left_layout.addLayout(btn_row)
+        root.addWidget(left)
+
+        # Right: editor
+        right = QWidget(dlg)
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        name_edit = QLineEdit(right)
+        name_edit.setPlaceholderText("Signature name…")
+        content_edit = QTextEdit(right)
+        content_edit.setAcceptRichText(True)
+        content_edit.setPlaceholderText("Signature content (supports rich text)…")
+        save_btn = QPushButton("Save Signature", right)
+        right_layout.addWidget(QLabel("Name:", right))
+        right_layout.addWidget(name_edit)
+        right_layout.addWidget(QLabel("Content:", right))
+        right_layout.addWidget(content_edit, stretch=1)
+        right_layout.addWidget(save_btn)
+        root.addWidget(right, stretch=1)
+
+        _state: dict[str, Any] = {"current_id": ""}
+
+        def _reload_list() -> None:
+            sig_list.clear()
+            for s in self.load_all():
+                label = f"{'★ ' if s.is_default else ''}{s.name}"
+                item  = QListWidgetItem(label)
+                item.setData(Qt.ItemDataRole.UserRole, s.sig_id)
+                sig_list.addItem(item)
+
+        def _on_select() -> None:
+            item = sig_list.currentItem()
+            if not item:
+                return
+            sid = str(item.data(Qt.ItemDataRole.UserRole) or "")
+            sigs = self.load_all()
+            sig  = next((s for s in sigs if s.sig_id == sid), None)
+            if sig:
+                _state["current_id"] = sig.sig_id
+                name_edit.setText(sig.name)
+                content_edit.setHtml(sig.content)
+
+        def _on_new() -> None:
+            _state["current_id"] = str(uuid.uuid4())
+            name_edit.clear()
+            content_edit.clear()
+
+        def _on_save() -> None:
+            name    = name_edit.text().strip()
+            content = content_edit.toHtml()
+            if not name:
+                QMessageBox.warning(dlg, "Signature", "Please enter a name.")
+                return
+            sid = _state["current_id"] or str(uuid.uuid4())
+            self.upsert(sig_id=sid, name=name, content=content, is_default=False)
+            _state["current_id"] = sid
+            _reload_list()
+
+        def _on_delete() -> None:
+            item = sig_list.currentItem()
+            if not item:
+                return
+            sid = str(item.data(Qt.ItemDataRole.UserRole) or "")
+            if sid:
+                self.delete(sid)
+                _state["current_id"] = ""
+                name_edit.clear()
+                content_edit.clear()
+                _reload_list()
+
+        def _on_set_default() -> None:
+            item = sig_list.currentItem()
+            if not item:
+                return
+            sid  = str(item.data(Qt.ItemDataRole.UserRole) or "")
+            sigs = self.load_all()
+            sig  = next((s for s in sigs if s.sig_id == sid), None)
+            if sig:
+                self.upsert(
+                    sig_id=sid, name=sig.name,
+                    content=sig.content, is_default=True,
+                )
+                _reload_list()
+
+        sig_list.itemSelectionChanged.connect(_on_select)
+        new_btn.clicked.connect(_on_new)
+        save_btn.clicked.connect(_on_save)
+        del_btn.clicked.connect(_on_delete)
+        def_btn.clicked.connect(_on_set_default)
+
+        _reload_list()
+        dlg.exec()
