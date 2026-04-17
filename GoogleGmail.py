@@ -2954,3 +2954,654 @@ class ThreadListView(QWidget):
     def showEvent(self, event: Any) -> None:  # type: ignore[override]
         super().showEvent(event)
         self._apply_font_scaling()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Section 7: Workspace Compose View (Mode 2)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ComposeView(QWidget):
+    """
+    Mode 2 workspace widget — full compose / reply / forward surface.
+
+    Signals
+    -------
+    send_complete()    — message sent, return to thread list
+    discard_complete() — user discarded, return to thread list
+    """
+
+    send_complete    = Signal()
+    discard_complete = Signal()
+
+    def __init__(
+        self,
+        runtime:     GmailRuntime,
+        sig_manager: SignatureManager,
+        parent:      Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._runtime     = runtime
+        self._sig_manager = sig_manager
+
+        self._compose_mode        = "new"
+        self._reply_thread_id     = ""
+        self._reply_message_id    = ""
+        self._attached_files:     list[dict[str, Any]] = []
+        self._undo_timer:         Optional[QTimer] = None
+        self._undo_countdown      = 0
+        self._pending_send_args:  Optional[dict]   = None
+        self._ribbon_ref: Optional["GmailRibbon"]  = None
+
+        self._build_ui()
+
+    # ── Build ─────────────────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(4)
+
+        # From (read-only)
+        from_row = QHBoxLayout()
+        from_lbl = QLabel("From:", self)
+        from_lbl.setFixedWidth(56)
+        self._from_lbl = QLabel(self._runtime.sync_state.get("user_email") or "—", self)
+        from_row.addWidget(from_lbl)
+        from_row.addWidget(self._from_lbl, stretch=1)
+        root.addLayout(from_row)
+
+        # To
+        to_row = QHBoxLayout()
+        to_lbl = QLabel("To:", self)
+        to_lbl.setFixedWidth(56)
+        self._to_edit = QLineEdit(self)
+        self._to_edit.setPlaceholderText("recipient@example.com, …")
+        cc_btn  = QPushButton("Cc", self)
+        bcc_btn = QPushButton("Bcc", self)
+        cc_btn.setFixedWidth(36)
+        bcc_btn.setFixedWidth(40)
+        cc_btn.clicked.connect(self._toggle_cc)
+        bcc_btn.clicked.connect(self._toggle_bcc)
+        to_row.addWidget(to_lbl)
+        to_row.addWidget(self._to_edit, stretch=1)
+        to_row.addWidget(cc_btn)
+        to_row.addWidget(bcc_btn)
+        root.addLayout(to_row)
+
+        # CC (collapsed)
+        self._cc_row_widget = QWidget(self)
+        cc_row = QHBoxLayout(self._cc_row_widget)
+        cc_row.setContentsMargins(0, 0, 0, 0)
+        cc_lbl = QLabel("Cc:", self._cc_row_widget)
+        cc_lbl.setFixedWidth(56)
+        self._cc_edit = QLineEdit(self._cc_row_widget)
+        self._cc_edit.setPlaceholderText("cc@example.com, …")
+        cc_row.addWidget(cc_lbl)
+        cc_row.addWidget(self._cc_edit, stretch=1)
+        self._cc_row_widget.setVisible(False)
+        root.addWidget(self._cc_row_widget)
+
+        # BCC (collapsed)
+        self._bcc_row_widget = QWidget(self)
+        bcc_row = QHBoxLayout(self._bcc_row_widget)
+        bcc_row.setContentsMargins(0, 0, 0, 0)
+        bcc_lbl = QLabel("Bcc:", self._bcc_row_widget)
+        bcc_lbl.setFixedWidth(56)
+        self._bcc_edit = QLineEdit(self._bcc_row_widget)
+        self._bcc_edit.setPlaceholderText("bcc@example.com")
+        bcc_row.addWidget(bcc_lbl)
+        bcc_row.addWidget(self._bcc_edit, stretch=1)
+        self._bcc_row_widget.setVisible(False)
+        root.addWidget(self._bcc_row_widget)
+
+        # Subject
+        subj_row = QHBoxLayout()
+        subj_lbl = QLabel("Subject:", self)
+        subj_lbl.setFixedWidth(56)
+        self._subject_edit = QLineEdit(self)
+        self._subject_edit.setPlaceholderText("Subject…")
+        subj_row.addWidget(subj_lbl)
+        subj_row.addWidget(self._subject_edit, stretch=1)
+        root.addLayout(subj_row)
+
+        # Body
+        self._body_edit = QTextEdit(self)
+        self._body_edit.setAcceptRichText(True)
+        self._body_edit.setPlaceholderText("Compose your message…")
+        root.addWidget(self._body_edit, stretch=1)
+
+        # Attachment chips area
+        self._att_scroll = QScrollArea(self)
+        self._att_scroll.setWidgetResizable(True)
+        self._att_scroll.setMaximumHeight(60)
+        self._att_scroll.setVisible(False)
+        self._att_container = QWidget()
+        self._att_layout    = QHBoxLayout(self._att_container)
+        self._att_layout.setContentsMargins(4, 2, 4, 2)
+        self._att_layout.setSpacing(4)
+        self._att_layout.addStretch(1)
+        self._att_scroll.setWidget(self._att_container)
+        root.addWidget(self._att_scroll)
+
+        # Formatting toolbar
+        fmt_bar = QWidget(self)
+        fmt_row = QHBoxLayout(fmt_bar)
+        fmt_row.setContentsMargins(0, 0, 0, 0)
+        fmt_row.setSpacing(3)
+
+        self._font_combo = QComboBox(fmt_bar)
+        self._font_combo.addItems(["Arial", "Georgia", "Courier New", "Times New Roman", "Verdana"])
+        self._font_combo.setFixedWidth(110)
+        self._font_combo.currentTextChanged.connect(self._on_font_family)
+
+        self._size_combo = QComboBox(fmt_bar)
+        self._size_combo.addItems(["8", "9", "10", "11", "12", "14", "16", "18", "24", "36"])
+        self._size_combo.setCurrentText("11")
+        self._size_combo.setFixedWidth(52)
+        self._size_combo.currentTextChanged.connect(self._on_font_size)
+
+        self._bold_btn      = QToolButton(fmt_bar)
+        self._bold_btn.setText("B")
+        self._bold_btn.setCheckable(True)
+        self._bold_btn.setToolTip("Bold")
+        self._bold_btn.clicked.connect(self._on_bold)
+
+        self._italic_btn    = QToolButton(fmt_bar)
+        self._italic_btn.setText("I")
+        self._italic_btn.setCheckable(True)
+        self._italic_btn.setToolTip("Italic")
+        self._italic_btn.clicked.connect(self._on_italic)
+
+        self._underline_btn = QToolButton(fmt_bar)
+        self._underline_btn.setText("U")
+        self._underline_btn.setCheckable(True)
+        self._underline_btn.setToolTip("Underline")
+        self._underline_btn.clicked.connect(self._on_underline)
+
+        txt_color_btn = QPushButton("A▾", fmt_bar)
+        txt_color_btn.setToolTip("Text colour")
+        txt_color_btn.setFixedWidth(32)
+        txt_color_btn.clicked.connect(self._on_text_color)
+
+        hi_color_btn = QPushButton("H▾", fmt_bar)
+        hi_color_btn.setToolTip("Highlight colour")
+        hi_color_btn.setFixedWidth(32)
+        hi_color_btn.clicked.connect(self._on_highlight_color)
+
+        attach_btn = QPushButton("📎 Attach", fmt_bar)
+        attach_btn.clicked.connect(self._on_attach_file)
+
+        img_btn = QPushButton("🖼 Image", fmt_bar)
+        img_btn.clicked.connect(self._on_attach_image)
+
+        self._sig_combo = QComboBox(fmt_bar)
+        self._sig_combo.setToolTip("Insert signature")
+        self._sig_combo.setFixedWidth(120)
+        self._sig_combo.currentIndexChanged.connect(self._on_sig_selected)
+
+        for w in (self._font_combo, self._size_combo,
+                  self._bold_btn, self._italic_btn, self._underline_btn,
+                  txt_color_btn, hi_color_btn, attach_btn, img_btn,
+                  self._sig_combo):
+            fmt_row.addWidget(w)
+        fmt_row.addStretch(1)
+        root.addWidget(fmt_bar)
+
+        # Action buttons
+        action_bar = QWidget(self)
+        act_row    = QHBoxLayout(action_bar)
+        act_row.setContentsMargins(0, 0, 0, 0)
+        self._send_btn  = QPushButton("Send", action_bar)
+        self._draft_btn = QPushButton("Save Draft", action_bar)
+        discard_btn     = QPushButton("🗑", action_bar)
+        discard_btn.setToolTip("Discard draft")
+        discard_btn.setFixedWidth(36)
+        font = self._send_btn.font()
+        font.setBold(True)
+        self._send_btn.setFont(font)
+        act_row.addWidget(self._send_btn)
+        act_row.addWidget(self._draft_btn)
+        act_row.addStretch(1)
+        act_row.addWidget(discard_btn)
+        root.addWidget(action_bar)
+
+        # Undo-send banner
+        self._undo_bar  = QWidget(self)
+        undo_row        = QHBoxLayout(self._undo_bar)
+        undo_row.setContentsMargins(6, 4, 6, 4)
+        self._undo_lbl  = QLabel("Sending in 5 s…", self._undo_bar)
+        undo_cancel_btn = QPushButton("Undo", self._undo_bar)
+        undo_row.addWidget(self._undo_lbl)
+        undo_row.addStretch(1)
+        undo_row.addWidget(undo_cancel_btn)
+        self._undo_bar.setVisible(False)
+        root.addWidget(self._undo_bar)
+
+        self._send_btn.clicked.connect(self._on_send_clicked)
+        self._draft_btn.clicked.connect(self._on_save_draft)
+        discard_btn.clicked.connect(self._on_discard)
+        undo_cancel_btn.clicked.connect(self._on_undo_send)
+
+        self._refresh_sig_combo()
+
+    # ── Public open modes ─────────────────────────────────────────────────────
+
+    def open_new(self) -> None:
+        self._compose_mode     = "new"
+        self._reply_thread_id  = ""
+        self._reply_message_id = ""
+        self._attached_files   = []
+        self._to_edit.clear()
+        self._cc_edit.clear()
+        self._bcc_edit.clear()
+        self._subject_edit.clear()
+        self._body_edit.clear()
+        self._cc_row_widget.setVisible(False)
+        self._bcc_row_widget.setVisible(False)
+        self._from_lbl.setText(self._runtime.sync_state.get("user_email") or "—")
+        self._rebuild_att_chips()
+        self._insert_default_signature()
+        self._refresh_sig_combo()
+        self._cancel_undo_timer()
+
+    def open_reply(self, msg: MessageDetail, reply_all: bool = False) -> None:
+        self._compose_mode     = "reply_all" if reply_all else "reply"
+        self._reply_thread_id  = msg.thread_id
+        self._reply_message_id = msg.message_id
+        self._attached_files   = []
+        self._cc_edit.clear()
+        self._bcc_edit.clear()
+        self._cc_row_widget.setVisible(False)
+        self._bcc_row_widget.setVisible(False)
+        self._from_lbl.setText(self._runtime.sync_state.get("user_email") or "—")
+        _, se = _sender_display(msg.from_header)
+        self._to_edit.setText(se)
+        if reply_all:
+            self_email = self._runtime.sync_state.get("user_email") or ""
+            others = [a.strip() for a in (msg.to_header or "").split(",")
+                      if a.strip() and a.strip().lower() != self_email.lower()]
+            if others:
+                self._to_edit.setText(", ".join([se] + others))
+            if msg.cc_header:
+                self._cc_edit.setText(msg.cc_header)
+                self._cc_row_widget.setVisible(True)
+        subj = msg.subject or ""
+        if not subj.lower().startswith("re:"):
+            subj = f"Re: {subj}"
+        self._subject_edit.setText(subj)
+        quoted   = self._build_quoted_block(msg)
+        sig      = self._sig_manager.get_default()
+        sig_html = f"<br>-- <br>{sig.content}" if sig else ""
+        self._body_edit.setHtml(f"<br>{sig_html}<br><br>{quoted}")
+        cursor = self._body_edit.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        self._body_edit.setTextCursor(cursor)
+        self._rebuild_att_chips()
+        self._refresh_sig_combo()
+        self._cancel_undo_timer()
+
+    def open_forward(self, msg: MessageDetail) -> None:
+        self._compose_mode     = "forward"
+        self._reply_thread_id  = ""
+        self._reply_message_id = ""
+        self._attached_files   = []
+        self._to_edit.clear()
+        self._cc_edit.clear()
+        self._bcc_edit.clear()
+        self._cc_row_widget.setVisible(False)
+        self._bcc_row_widget.setVisible(False)
+        self._from_lbl.setText(self._runtime.sync_state.get("user_email") or "—")
+        subj = msg.subject or ""
+        if not subj.lower().startswith("fwd:"):
+            subj = f"Fwd: {subj}"
+        self._subject_edit.setText(subj)
+        fwd      = self._build_forward_block(msg)
+        sig      = self._sig_manager.get_default()
+        sig_html = f"<br>-- <br>{sig.content}" if sig else ""
+        self._body_edit.setHtml(f"<br>{sig_html}<br><br>{fwd}")
+        cursor = self._body_edit.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        self._body_edit.setTextCursor(cursor)
+        self._rebuild_att_chips()
+        self._refresh_sig_combo()
+        self._cancel_undo_timer()
+
+    # ── Quoted / forwarded block builders ────────────────────────────────────
+
+    @staticmethod
+    def _build_quoted_block(msg: MessageDetail) -> str:
+        sn, se = _sender_display(msg.from_header)
+        body   = msg.html_body or (f"<pre>{msg.plain_body}</pre>" if msg.plain_body else "")
+        return (
+            f"<div style='color:#555;border-left:3px solid #ccc;padding-left:8px;'>"
+            f"On {msg.date_header}, {sn} &lt;{se}&gt; wrote:<br>{body}</div>"
+        )
+
+    @staticmethod
+    def _build_forward_block(msg: MessageDetail) -> str:
+        sn, se = _sender_display(msg.from_header)
+        body   = msg.html_body or (f"<pre>{msg.plain_body}</pre>" if msg.plain_body else "")
+        return (
+            f"<div style='border-top:1px solid #ccc;padding-top:8px;'>"
+            f"<b>---------- Forwarded message ----------</b><br>"
+            f"From: {sn} &lt;{se}&gt;<br>"
+            f"Date: {msg.date_header}<br>"
+            f"Subject: {msg.subject}<br>"
+            f"To: {msg.to_header}<br><br>{body}</div>"
+        )
+
+    # ── Signature helpers ─────────────────────────────────────────────────────
+
+    def _insert_default_signature(self) -> None:
+        sig = self._sig_manager.get_default()
+        if not sig:
+            return
+        self._body_edit.setHtml(f"<br><br>-- <br>{sig.content}")
+        cursor = self._body_edit.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        self._body_edit.setTextCursor(cursor)
+
+    def _refresh_sig_combo(self) -> None:
+        self._sig_combo.blockSignals(True)
+        self._sig_combo.clear()
+        self._sig_combo.addItem("— Signature —")
+        for s in self._sig_manager.load_all():
+            self._sig_combo.addItem(s.name, s.sig_id)
+        self._sig_combo.blockSignals(False)
+
+    def _on_sig_selected(self, index: int) -> None:
+        if index <= 0:
+            return
+        sig_id = self._sig_combo.itemData(index)
+        sig    = next((s for s in self._sig_manager.load_all() if s.sig_id == sig_id), None)
+        if not sig:
+            return
+        html    = self._body_edit.toHtml()
+        div_idx = html.rfind("-- <br>")
+        if div_idx != -1:
+            new_html = html[:div_idx] + f"-- <br>{sig.content}"
+        else:
+            new_html = html + f"<br>-- <br>{sig.content}"
+        self._body_edit.setHtml(new_html)
+        self._sig_combo.blockSignals(True)
+        self._sig_combo.setCurrentIndex(0)
+        self._sig_combo.blockSignals(False)
+
+    # ── CC / BCC toggles ──────────────────────────────────────────────────────
+
+    def _toggle_cc(self) -> None:
+        self._cc_row_widget.setVisible(not self._cc_row_widget.isVisible())
+
+    def _toggle_bcc(self) -> None:
+        self._bcc_row_widget.setVisible(not self._bcc_row_widget.isVisible())
+
+    # ── Formatting ────────────────────────────────────────────────────────────
+
+    def _on_font_family(self, family: str) -> None:
+        self._body_edit.setFontFamily(family)
+        self._body_edit.setFocus()
+
+    def _on_font_size(self, size_str: str) -> None:
+        try:
+            self._body_edit.setFontPointSize(float(size_str))
+        except ValueError:
+            pass
+        self._body_edit.setFocus()
+
+    def _on_bold(self) -> None:
+        fmt = self._body_edit.currentCharFormat()
+        w   = (QFont.Weight.Normal if fmt.fontWeight() >= QFont.Weight.Bold
+               else QFont.Weight.Bold)
+        self._body_edit.setFontWeight(w)
+        self._bold_btn.setChecked(w == QFont.Weight.Bold)
+        self._body_edit.setFocus()
+
+    def _on_italic(self) -> None:
+        cur = self._body_edit.fontItalic()
+        self._body_edit.setFontItalic(not cur)
+        self._italic_btn.setChecked(not cur)
+        self._body_edit.setFocus()
+
+    def _on_underline(self) -> None:
+        cur = self._body_edit.fontUnderline()
+        self._body_edit.setFontUnderline(not cur)
+        self._underline_btn.setChecked(not cur)
+        self._body_edit.setFocus()
+
+    def _on_text_color(self) -> None:
+        color = QColorDialog.getColor(parent=self)
+        if color.isValid():
+            self._body_edit.setTextColor(color)
+        self._body_edit.setFocus()
+
+    def _on_highlight_color(self) -> None:
+        color = QColorDialog.getColor(parent=self)
+        if color.isValid():
+            fmt = QTextCharFormat()
+            fmt.setBackground(color)
+            cursor = self._body_edit.textCursor()
+            cursor.mergeCharFormat(fmt)
+            self._body_edit.setTextCursor(cursor)
+        self._body_edit.setFocus()
+
+    # ── Attachments ───────────────────────────────────────────────────────────
+
+    def _on_attach_file(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(self, "Attach Files", "", "All files (*)")
+        for p in paths:
+            if p:
+                mt = mimetypes.guess_type(p)[0] or "application/octet-stream"
+                self._attached_files.append({"path": p, "mime_type": mt, "inline": False})
+        self._rebuild_att_chips()
+
+    def _on_attach_image(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Attach Image", "",
+            "Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp)"
+        )
+        if not path:
+            return
+        reply = QMessageBox.question(
+            self, "Image insert", "Insert image inline in body?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                import base64 as _b64
+                mt   = mimetypes.guess_type(path)[0] or "image/png"
+                data = _b64.b64encode(Path(path).read_bytes()).decode("utf-8")
+                self._body_edit.insertHtml(
+                    f'<img src="data:{mt};base64,{data}" style="max-width:100%;" />'
+                )
+            except Exception as exc:
+                QMessageBox.warning(self, "Inline image", f"Could not insert: {exc}")
+        else:
+            mt = mimetypes.guess_type(path)[0] or "image/png"
+            self._attached_files.append({"path": path, "mime_type": mt, "inline": False})
+            self._rebuild_att_chips()
+
+    def _rebuild_att_chips(self) -> None:
+        while self._att_layout.count() > 1:
+            item = self._att_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+        for i, att in enumerate(self._attached_files):
+            p    = Path(str(att.get("path") or ""))
+            size = p.stat().st_size if p.exists() else 0
+            chip = QPushButton(
+                f"  {p.name}  ({_format_size(size)})  ✕",
+                self._att_container
+            )
+            chip.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            chip.clicked.connect(lambda _, ix=i: self._remove_attachment(ix))
+            self._att_layout.insertWidget(self._att_layout.count() - 1, chip)
+        self._att_scroll.setVisible(bool(self._attached_files))
+        self._apply_font_scaling()
+
+    def _remove_attachment(self, index: int) -> None:
+        if 0 <= index < len(self._attached_files):
+            self._attached_files.pop(index)
+        self._rebuild_att_chips()
+
+    # ── Send / Draft / Discard ────────────────────────────────────────────────
+
+    def _on_send_clicked(self) -> None:
+        to      = self._to_edit.text().strip()
+        subject = self._subject_edit.text().strip()
+        if not to:
+            QMessageBox.warning(self, "Send", "Please enter at least one recipient.")
+            return
+        if not subject:
+            if QMessageBox.question(
+                self, "Send", "Subject is empty — send anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            ) != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            _, size = GmailClient.build_raw_message(
+                from_addr   = self._runtime.sync_state.get("user_email") or "",
+                to          = to,
+                subject     = subject,
+                html_body   = self._body_edit.toHtml(),
+                cc          = self._cc_edit.text().strip(),
+                bcc         = self._bcc_edit.text().strip(),
+                attachments = [a for a in self._attached_files if not a.get("inline")],
+            )
+        except Exception:
+            size = 0
+        if size > GMAIL_MAX_SEND_BYTES:
+            QMessageBox.warning(
+                self, "Send",
+                f"Message size ({_format_size(size)}) exceeds the Gmail 25 MB limit. "
+                "Please remove some attachments."
+            )
+            return
+        self._pending_send_args = {
+            "to":        to,
+            "subject":   subject,
+            "html_body": self._body_edit.toHtml(),
+            "cc":        self._cc_edit.text().strip(),
+            "bcc":       self._bcc_edit.text().strip(),
+            "thread_id": self._reply_thread_id,
+            "reply_mid": self._reply_message_id,
+            "atts":      [a for a in self._attached_files if not a.get("inline")],
+        }
+        self._send_btn.setEnabled(False)
+        self._undo_bar.setVisible(True)
+        self._undo_countdown = UNDO_SEND_DELAY_MS // 1000
+        self._undo_lbl.setText(f"Sending in {self._undo_countdown} s…")
+        self._undo_timer = QTimer(self)
+        self._undo_timer.setInterval(1000)
+        self._undo_timer.timeout.connect(self._undo_tick)
+        self._undo_timer.start()
+
+    def _undo_tick(self) -> None:
+        self._undo_countdown -= 1
+        if self._undo_countdown > 0:
+            self._undo_lbl.setText(f"Sending in {self._undo_countdown} s…")
+        else:
+            self._cancel_undo_timer()
+            self._execute_send()
+
+    def _on_undo_send(self) -> None:
+        self._cancel_undo_timer()
+        self._pending_send_args = None
+        self._send_btn.setEnabled(True)
+
+    def _cancel_undo_timer(self) -> None:
+        if self._undo_timer:
+            self._undo_timer.stop()
+            self._undo_timer = None
+        self._undo_bar.setVisible(False)
+
+    def _execute_send(self) -> None:
+        args = self._pending_send_args
+        if not args:
+            return
+        self._pending_send_args = None
+        try:
+            client     = self._runtime._make_client()
+            raw_b64, _ = GmailClient.build_raw_message(
+                from_addr           = self._runtime.sync_state.get("user_email") or "",
+                to                  = args["to"],
+                subject             = args["subject"],
+                html_body           = args["html_body"],
+                cc                  = args.get("cc", ""),
+                bcc                 = args.get("bcc", ""),
+                reply_to_message_id = args.get("reply_mid", ""),
+                thread_id           = args.get("thread_id", ""),
+                attachments         = args.get("atts", []),
+            )
+            client.send_message(raw_b64, thread_id=args.get("thread_id", ""))
+            self._runtime._emit("gmail.message.sent", {
+                "to": args["to"], "subject": args["subject"]
+            })
+            self.send_complete.emit()
+        except Exception as exc:
+            self._send_btn.setEnabled(True)
+            QMessageBox.critical(self, "Send failed", str(exc))
+
+    def _on_save_draft(self) -> None:
+        try:
+            client     = self._runtime._make_client()
+            raw_b64, _ = GmailClient.build_raw_message(
+                from_addr   = self._runtime.sync_state.get("user_email") or "",
+                to          = self._to_edit.text().strip() or "",
+                subject     = self._subject_edit.text().strip() or "",
+                html_body   = self._body_edit.toHtml(),
+                cc          = self._cc_edit.text().strip(),
+                bcc         = self._bcc_edit.text().strip(),
+                thread_id   = self._reply_thread_id,
+                attachments = [a for a in self._attached_files if not a.get("inline")],
+            )
+            client.create_draft(raw_b64, thread_id=self._reply_thread_id)
+            QMessageBox.information(self, "Draft", "Draft saved.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Draft", f"Could not save draft: {exc}")
+
+    def _on_discard(self) -> None:
+        self._cancel_undo_timer()
+        if QMessageBox.question(
+            self, "Discard", "Discard this draft?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) == QMessageBox.StandardButton.Yes:
+            self.discard_complete.emit()
+
+    # ── Ribbon integration ────────────────────────────────────────────────────
+
+    def notify_ribbon_active(self, ribbon: "GmailRibbon") -> None:
+        self._ribbon_ref = ribbon
+        ribbon.set_compose_active(True)
+
+    def notify_ribbon_inactive(self, ribbon: "GmailRibbon") -> None:
+        if self._ribbon_ref:
+            self._ribbon_ref.set_compose_active(False)
+        self._ribbon_ref = None
+
+    # ── Font scaling ──────────────────────────────────────────────────────────
+
+    def _fit_widget(self, widget: QWidget, text: str) -> None:
+        if not text or widget.width() < 20:
+            return
+        fm        = widget.fontMetrics()
+        available = max(10, widget.width() - 10)
+        pt        = widget.font().pointSizeF() or 9.0
+        while pt > 6.5 and fm.horizontalAdvance(text) > available:
+            pt -= 0.5
+            f  = widget.font()
+            f.setPointSizeF(pt)
+            widget.setFont(f)
+            fm = widget.fontMetrics()
+
+    def _apply_font_scaling(self) -> None:
+        for w in self.findChildren((QLabel, QPushButton, QToolButton)):
+            if hasattr(w, "text"):
+                self._fit_widget(w, str(w.text()))
+
+    def resizeEvent(self, event: Any) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._apply_font_scaling()
+
+    def showEvent(self, event: Any) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._apply_font_scaling()
