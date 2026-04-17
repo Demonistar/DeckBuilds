@@ -450,7 +450,13 @@ class SyncWorker(QObject):
         self.timer.timeout.connect(self.run_sync)
 
     def start(self):
+        self.start_timer()
+
+    def start_timer(self):
         self.timer.start(self.runtime.current_sync_interval_ms())
+
+    def stop_timer(self):
+        self.timer.stop()
 
     def trigger_now(self):
         self.run_sync()
@@ -481,6 +487,10 @@ class ReminderWorker(QObject):
         self.minute_timer.start(60_000)
         self.midnight_timer.start(60_000)
 
+    def stop(self):
+        self.minute_timer.stop()
+        self.midnight_timer.stop()
+
     def _check_midnight(self):
         now = datetime.now(UTC)
         if now.hour == 0 and now.minute == 0:
@@ -498,6 +508,9 @@ class GoogleCalendarRuntime(QObject):
     status_changed = Signal(str)
     request_open_event = Signal(str)
     request_focus_datetime = Signal(datetime)
+    request_start_sync_timer = Signal()
+    request_stop_sync_timer = Signal()
+    request_stop_reminder_timers = Signal()
 
     def __init__(self, deck_api: dict[str, Any]):
         super().__init__()
@@ -588,6 +601,8 @@ class GoogleCalendarRuntime(QObject):
         self._sync_worker = SyncWorker(self)
         self._sync_worker.moveToThread(self._sync_thread)
         self._sync_thread.started.connect(self._sync_worker.start)
+        self.request_start_sync_timer.connect(self._sync_worker.start_timer)
+        self.request_stop_sync_timer.connect(self._sync_worker.stop_timer)
         self._sync_worker.sync_completed.connect(self._on_sync_completed)
         self._sync_worker.sync_error.connect(self._on_sync_error)
         self._sync_thread.start()
@@ -596,6 +611,7 @@ class GoogleCalendarRuntime(QObject):
         self._reminder_worker = ReminderWorker(self)
         self._reminder_worker.moveToThread(self._reminder_thread)
         self._reminder_thread.started.connect(self._reminder_worker.start)
+        self.request_stop_reminder_timers.connect(self._reminder_worker.stop)
         self._reminder_worker.reminder_payload.connect(self._send_ai_payload)
         self._reminder_thread.start()
 
@@ -628,6 +644,25 @@ class GoogleCalendarRuntime(QObject):
     def trigger_sync_now(self) -> None:
         if self._sync_worker:
             self._sync_worker.trigger_now()
+
+    def start_sync_timer(self, _claim: Optional[dict[str, Any]] = None) -> None:
+        self.request_start_sync_timer.emit()
+
+    def stop_sync_timer(self, _claim: Optional[dict[str, Any]] = None) -> None:
+        self.request_stop_sync_timer.emit()
+
+    def cleanup_timers(self) -> None:
+        self.request_stop_sync_timer.emit()
+        self.request_stop_reminder_timers.emit()
+
+    def shutdown(self, *_args: Any, **_kwargs: Any) -> None:
+        self.cleanup_timers()
+        if self._sync_thread and self._sync_thread.isRunning():
+            self._sync_thread.quit()
+            self._sync_thread.wait(1500)
+        if self._reminder_thread and self._reminder_thread.isRunning():
+            self._reminder_thread.quit()
+            self._reminder_thread.wait(1500)
 
     def _on_sync_completed(self, _payload: dict) -> None:
         self.last_synced_at = datetime.now(UTC)
@@ -1563,11 +1598,12 @@ class GoogleCalendarModule:
             "supports_workspaces": bool(workspace_tabs),
             "workspace_tabs": workspace_tabs,
             "build_ribbon": workspace_spec.get("ribbon"),
-            "on_workspace_activate": self.runtime.trigger_sync_now,
+            "on_workspace_activate": self.runtime.start_sync_timer,
             "on_workspace_deactivate": self.runtime.stop_sync_timer,
             "on_workspace_release": self.runtime.stop_sync_timer,
             "hooks": {
                 "on_startup": self.runtime.trigger_sync_now,
+                "on_shutdown": self.runtime.shutdown,
             },
         }
 
