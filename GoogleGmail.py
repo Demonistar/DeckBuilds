@@ -4152,3 +4152,243 @@ class ThreadReadView(QWidget):
     def showEvent(self, event: Any) -> None:  # type: ignore[override]
         super().showEvent(event)
         self._apply_font_scaling()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Section 9: Gmail Ribbon Widget
+# ══════════════════════════════════════════════════════════════════════════════
+
+class GmailRibbon(QWidget):
+    """
+    Deck ribbon widget owned by the Gmail module.
+
+    Layout (left → right)
+    ─────────────────────
+    LEFT   Current folder/label name
+    CENTER Compose formatting controls (bold / italic / underline / font /
+           size / text-colour) — enabled only when Compose (Mode 2) is active
+    RIGHT  Signature selector  ·  Settings button
+
+    The compose view calls notify_ribbon_active/inactive to enable/disable
+    the centre section.  The ribbon forwards font-format signals back to
+    whichever ComposeView is currently live.
+    """
+
+    # Emitted when the user changes a formatting control while compose is active
+    bold_toggled      = Signal(bool)
+    italic_toggled    = Signal(bool)
+    underline_toggled = Signal(bool)
+    font_family_changed = Signal(str)
+    font_size_changed   = Signal(float)
+    text_color_requested = Signal()
+    sig_selected        = Signal(str)   # sig_id
+    settings_requested  = Signal()
+    fetch_now_requested = Signal()
+
+    def __init__(
+        self,
+        runtime:     GmailRuntime,
+        sig_manager: SignatureManager,
+        parent:      Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._runtime     = runtime
+        self._sig_manager = sig_manager
+        self._compose_active = False
+        self._build_ui()
+
+    # ── Build ─────────────────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        row = QHBoxLayout(self)
+        row.setContentsMargins(6, 2, 6, 2)
+        row.setSpacing(6)
+
+        # ── LEFT: current context label ───────────────────────────────────────
+        self._context_lbl = QLabel("Gmail  ·  Inbox", self)
+        font = self._context_lbl.font()
+        font.setBold(True)
+        self._context_lbl.setFont(font)
+        self._context_lbl.setMinimumWidth(100)
+        row.addWidget(self._context_lbl)
+
+        sep1 = QFrame(self)
+        sep1.setFrameShape(QFrame.Shape.VLine)
+        row.addWidget(sep1)
+
+        # ── CENTER: compose formatting ────────────────────────────────────────
+        self._fmt_widget = QWidget(self)
+        fmt_row = QHBoxLayout(self._fmt_widget)
+        fmt_row.setContentsMargins(0, 0, 0, 0)
+        fmt_row.setSpacing(3)
+
+        self._rb_font_combo = QComboBox(self._fmt_widget)
+        self._rb_font_combo.addItems(
+            ["Arial", "Georgia", "Courier New", "Times New Roman", "Verdana"]
+        )
+        self._rb_font_combo.setFixedWidth(110)
+        self._rb_font_combo.currentTextChanged.connect(
+            lambda t: self.font_family_changed.emit(t)
+        )
+
+        self._rb_size_combo = QComboBox(self._fmt_widget)
+        self._rb_size_combo.addItems(
+            ["8", "9", "10", "11", "12", "14", "16", "18", "24", "36"]
+        )
+        self._rb_size_combo.setCurrentText("11")
+        self._rb_size_combo.setFixedWidth(52)
+        self._rb_size_combo.currentTextChanged.connect(
+            lambda t: self.font_size_changed.emit(float(t)) if t.isdigit() else None
+        )
+
+        self._rb_bold_btn = QToolButton(self._fmt_widget)
+        self._rb_bold_btn.setText("B")
+        self._rb_bold_btn.setCheckable(True)
+        self._rb_bold_btn.setToolTip("Bold")
+        bold_f = self._rb_bold_btn.font()
+        bold_f.setBold(True)
+        self._rb_bold_btn.setFont(bold_f)
+        self._rb_bold_btn.clicked.connect(
+            lambda c: self.bold_toggled.emit(c)
+        )
+
+        self._rb_italic_btn = QToolButton(self._fmt_widget)
+        self._rb_italic_btn.setText("I")
+        self._rb_italic_btn.setCheckable(True)
+        self._rb_italic_btn.setToolTip("Italic")
+        self._rb_italic_btn.clicked.connect(
+            lambda c: self.italic_toggled.emit(c)
+        )
+
+        self._rb_underline_btn = QToolButton(self._fmt_widget)
+        self._rb_underline_btn.setText("U")
+        self._rb_underline_btn.setCheckable(True)
+        self._rb_underline_btn.setToolTip("Underline")
+        self._rb_underline_btn.clicked.connect(
+            lambda c: self.underline_toggled.emit(c)
+        )
+
+        self._rb_color_btn = QPushButton("A▾", self._fmt_widget)
+        self._rb_color_btn.setFixedWidth(32)
+        self._rb_color_btn.setToolTip("Text colour")
+        self._rb_color_btn.clicked.connect(self.text_color_requested)
+
+        # Attachment count indicator
+        self._att_count_lbl = QLabel("", self._fmt_widget)
+        self._att_count_lbl.setToolTip("Attached files")
+
+        for w in (
+            self._rb_font_combo, self._rb_size_combo,
+            self._rb_bold_btn, self._rb_italic_btn, self._rb_underline_btn,
+            self._rb_color_btn, self._att_count_lbl,
+        ):
+            fmt_row.addWidget(w)
+
+        row.addWidget(self._fmt_widget)
+        self._fmt_widget.setEnabled(False)
+
+        sep2 = QFrame(self)
+        sep2.setFrameShape(QFrame.Shape.VLine)
+        row.addWidget(sep2)
+
+        # ── RIGHT: signature selector + settings ──────────────────────────────
+        self._rb_sig_combo = QComboBox(self)
+        self._rb_sig_combo.setToolTip("Active signature")
+        self._rb_sig_combo.setFixedWidth(130)
+        self._rb_sig_combo.currentIndexChanged.connect(self._on_sig_selected)
+        self._refresh_sig_combo()
+
+        self._settings_btn = QPushButton("⚙ Settings", self)
+        self._settings_btn.clicked.connect(self.settings_requested)
+
+        self._fetch_btn = QPushButton("↻ Fetch Now", self)
+        self._fetch_btn.clicked.connect(self.fetch_now_requested)
+
+        row.addWidget(self._rb_sig_combo)
+        row.addWidget(self._settings_btn)
+        row.addWidget(self._fetch_btn)
+        row.addStretch(1)
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def set_context_label(self, text: str) -> None:
+        """Update the left-section label to show current folder/view name."""
+        self._context_lbl.setText(text)
+        self._fit_widget(self._context_lbl, text)
+
+    def set_compose_active(self, active: bool) -> None:
+        """Enable or disable the formatting centre section."""
+        self._compose_active = active
+        self._fmt_widget.setEnabled(active)
+
+    def set_attachment_count(self, count: int) -> None:
+        if count > 0:
+            self._att_count_lbl.setText(f"📎 {count}")
+        else:
+            self._att_count_lbl.setText("")
+
+    def refresh_signatures(self) -> None:
+        self._refresh_sig_combo()
+
+    def sync_bold(self, bold: bool) -> None:
+        self._rb_bold_btn.blockSignals(True)
+        self._rb_bold_btn.setChecked(bold)
+        self._rb_bold_btn.blockSignals(False)
+
+    def sync_italic(self, italic: bool) -> None:
+        self._rb_italic_btn.blockSignals(True)
+        self._rb_italic_btn.setChecked(italic)
+        self._rb_italic_btn.blockSignals(False)
+
+    def sync_underline(self, underline: bool) -> None:
+        self._rb_underline_btn.blockSignals(True)
+        self._rb_underline_btn.setChecked(underline)
+        self._rb_underline_btn.blockSignals(False)
+
+    # ── Internal ─────────────────────────────────────────────────────────────
+
+    def _refresh_sig_combo(self) -> None:
+        self._rb_sig_combo.blockSignals(True)
+        self._rb_sig_combo.clear()
+        self._rb_sig_combo.addItem("— Signature —")
+        for s in self._sig_manager.load_all():
+            self._rb_sig_combo.addItem(s.name, s.sig_id)
+        self._rb_sig_combo.blockSignals(False)
+
+    def _on_sig_selected(self, index: int) -> None:
+        if index <= 0:
+            return
+        sig_id = self._rb_sig_combo.itemData(index)
+        if sig_id:
+            self.sig_selected.emit(str(sig_id))
+        self._rb_sig_combo.blockSignals(True)
+        self._rb_sig_combo.setCurrentIndex(0)
+        self._rb_sig_combo.blockSignals(False)
+
+    # ── Font scaling ──────────────────────────────────────────────────────────
+
+    def _fit_widget(self, widget: QWidget, text: str) -> None:
+        if not text or widget.width() < 20:
+            return
+        fm        = widget.fontMetrics()
+        available = max(10, widget.width() - 10)
+        pt        = widget.font().pointSizeF() or 9.0
+        while pt > 6.5 and fm.horizontalAdvance(text) > available:
+            pt -= 0.5
+            f  = widget.font()
+            f.setPointSizeF(pt)
+            widget.setFont(f)
+            fm = widget.fontMetrics()
+
+    def _apply_font_scaling(self) -> None:
+        for w in self.findChildren((QLabel, QPushButton, QToolButton)):
+            if hasattr(w, "text"):
+                self._fit_widget(w, str(w.text()))
+
+    def resizeEvent(self, event: Any) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._apply_font_scaling()
+
+    def showEvent(self, event: Any) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._apply_font_scaling()
