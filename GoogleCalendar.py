@@ -68,6 +68,9 @@ MODULE_MANIFEST = {
     ],
 }
 
+MODULE_OWNER_KEY = "google_calendar"
+MODULE_TAB_ID = "google_calendar_main"
+
 REQUIRED_SCOPES = {
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/calendar.events",
@@ -1531,9 +1534,9 @@ class GoogleCalendarModule:
     def get_workspace_spec(self) -> dict[str, Any]:
         return {
             "tabs": [
-                {"label": "Google", "build": self.build_google_workspace},
-                {"label": "Drive", "build": self.build_drive_placeholder},
-                {"label": "Gmail", "build": self.build_gmail_placeholder},
+                {"id": "google_workspace", "label": "Google", "build": self.build_google_workspace},
+                {"id": "drive_workspace", "label": "Drive", "build": self.build_drive_placeholder},
+                {"id": "gmail_workspace", "label": "Gmail", "build": self.build_gmail_placeholder},
             ],
             "build_ribbon": self.build_ribbon,
             "on_activate": self.runtime.start_sync_timer,
@@ -1570,21 +1573,27 @@ class GoogleCalendarModule:
         return self.module_panel
 
     def module_definition(self) -> dict[str, Any]:
+        workspace_spec = self.get_workspace_spec()
         return {
-            "key": MODULE_MANIFEST["key"],
+            "key": MODULE_OWNER_KEY,
+            "module_key": MODULE_OWNER_KEY,
             "display_name": MODULE_MANIFEST["display_name"],
             "deck_api_version": MODULE_MANIFEST["deck_api_version"],
             "home_category": MODULE_MANIFEST["home_category"],
             "tabs": [
                 {
-                    "tab_id": "google_calendar_main",
+                    "id": MODULE_TAB_ID,
+                    "tab_id": MODULE_TAB_ID,
+                    "tab_key": MODULE_TAB_ID,
                     "tab_name": "Google Calendar",
                     "get_content": self.create_tab,
                 }
             ],
             "manifest": MODULE_MANIFEST,
             "settings_sections": ["sync_interval", "battery"],
-            "workspace": self.get_workspace_spec(),
+            "workspace": workspace_spec,
+            "supports_workspaces": True,
+            "workspace_tabs": workspace_spec["tabs"],
             "hooks": {
                 "on_startup": self.runtime.trigger_sync_now,
                 "on_shutdown": self.runtime.shutdown,
