@@ -10051,13 +10051,17 @@ import zlib
         for idx, row in enumerate(tabs_raw[:self.MAX_WORKSPACE_TABS]):
             if not isinstance(row, dict):
                 continue
+            slot = int(row.get("slot") or (idx + 1))
+            if slot < 1 or slot > self.MAX_WORKSPACE_TABS:
+                continue
             claim_tabs.append({
-                "slot": idx + 1,
-                "label": str(row.get("label") or row.get("title") or f"Workspace {idx + 1}"),
+                "slot": slot,
+                "label": str(row.get("label") or row.get("title") or f"Workspace {slot}"),
                 "build": row.get("build") or row.get("factory") or row.get("get_content"),
-                "id": str(row.get("id") or f"{key}_workspace_{idx + 1}"),
+                "id": str(row.get("id") or f"{key}_workspace_{slot}"),
                 "meta": dict(row.get("meta") or {}),
             })
+        claim_tabs.sort(key=lambda row: int(row.get("slot") or 0))
         if not claim_tabs:
             self.release_workspaces()
             return {}
@@ -10111,9 +10115,17 @@ import zlib
         return dict(self._active_workspace_claim) if self._active_workspace_owner_key else {}
 
     def _build_deck_api(self) -> dict:
+        diagnostics_logger = None
+        if hasattr(self._deck, "_diag_tab") and hasattr(self._deck._diag_tab, "log"):
+            diagnostics_logger = self._deck._diag_tab.log
         return {
             "deck_api_version": self.DECK_API_VERSION,
             "log": lambda msg: self._log(f"[MODULE] {msg}"),
+            "diagnostics_log": (
+                lambda msg, level="INFO": diagnostics_logger(str(msg), str(level))
+                if callable(diagnostics_logger)
+                else self._log(f"[MODULE][{str(level or 'INFO').upper()}] {msg}")
+            ),
             "cfg_get": lambda k, d=None: CFG.get(k, d),
             "cfg_set": lambda k, v: CFG.__setitem__(k, v),
             "cfg_path": lambda name: cfg_path(name),
@@ -10838,6 +10850,7 @@ class EchoDeck(QMainWindow):
         if self._dialogue_tabs is not None:
             self._ensure_workspace_tabs(self._dialogue_tabs)
             self._capture_base_tab_indexes(self._dialogue_tabs)
+            self._append_chat("SYSTEM", "[WORKSPACE] workspace bank initialized")
 
     def _find_dialogue_tab_widget(self):
         candidates = self.findChildren(QTabWidget)
@@ -10859,16 +10872,41 @@ class EchoDeck(QMainWindow):
 
     def _ensure_workspace_tabs(self, tabs) -> None:
         existing = {str(row.get("slot")): row for row in self._workspace_tab_bank}
+        self_idx = None
+        for idx in range(tabs.count()):
+            if tabs.tabText(idx).strip().lower() == "self":
+                self_idx = idx
+                break
+        insert_idx = (self_idx + 1) if self_idx is not None else tabs.count()
         for slot in range(1, 6):
             k = str(slot)
-            if k in existing:
+            row = existing.get(k)
+            if row is None:
+                page = QWidget()
+                lay = QVBoxLayout(page)
+                lay.setContentsMargins(0, 0, 0, 0)
+                lay.setSpacing(0)
+                row = {
+                    "slot": slot,
+                    "widget": page,
+                    "default_label": f"Workspace {slot}",
+                    "label": f"Workspace {slot}",
+                    "mounted": None,
+                }
+                self._workspace_tab_bank.append(row)
+            page = row.get("widget")
+            if page is None:
                 continue
-            page = QWidget()
-            lay = QVBoxLayout(page)
-            lay.setContentsMargins(0, 0, 0, 0)
-            lay.setSpacing(0)
-            row = {"slot": slot, "widget": page, "label": f"Workspace {slot}", "mounted": None}
-            self._workspace_tab_bank.append(row)
+            idx = tabs.indexOf(page)
+            if idx < 0:
+                tabs.insertTab(insert_idx, page, row.get("default_label") or f"Workspace {slot}")
+                idx = tabs.indexOf(page)
+            tabs.setTabText(idx, row.get("default_label") or f"Workspace {slot}")
+            if hasattr(tabs, "setTabVisible"):
+                tabs.setTabVisible(idx, False)
+            else:
+                tabs.tabBar().setTabVisible(idx, False)
+            insert_idx += 1
         self._workspace_tab_bank.sort(key=lambda x: int(x.get("slot") or 0))
 
     def _clear_workspace_mounts(self) -> None:
@@ -10884,17 +10922,24 @@ class EchoDeck(QMainWindow):
                 w = item.widget()
                 if w is not None:
                     w.setParent(None)
+            if row.get("mounted") is not None:
+                self._append_chat("SYSTEM", f"[WORKSPACE] slot {row.get('slot')} content cleared")
             row["mounted"] = None
 
     def _workspace_tabs_hidden(self) -> None:
         tabs = self._dialogue_tabs
         if tabs is None:
             return
-        for row in sorted(self._workspace_tab_bank, key=lambda r: int(r.get("slot") or 0), reverse=True):
+        for row in sorted(self._workspace_tab_bank, key=lambda r: int(r.get("slot") or 0)):
             page = row.get("widget")
             idx = tabs.indexOf(page)
             if idx >= 0:
-                tabs.removeTab(idx)
+                tabs.setTabText(idx, row.get("default_label") or f"Workspace {row.get('slot')}")
+                if hasattr(tabs, "setTabVisible"):
+                    tabs.setTabVisible(idx, False)
+                else:
+                    tabs.tabBar().setTabVisible(idx, False)
+                self._append_chat("SYSTEM", f"[WORKSPACE] slot {row.get('slot')} hidden")
 
     def _focus_session_tab(self) -> None:
         tabs = self._dialogue_tabs
@@ -10937,20 +10982,17 @@ class EchoDeck(QMainWindow):
     def _apply_workspace_claim(self, module_key: str, claim: dict) -> None:
         self._workspace_owner_key = module_key
         self._active_workspace_claim = dict(claim or {})
-        self._workspace_tabs_hidden()
         self._clear_workspace_mounts()
         tabs = self._dialogue_tabs
         if tabs is None:
             return
-        for row in sorted(self._workspace_tab_bank, key=lambda r: int(r.get("slot") or 0)):
-            page = row.get("widget")
-            if tabs.indexOf(page) >= 0:
-                tabs.removeTab(tabs.indexOf(page))
+        claimed_slots: set[int] = set()
         for tab in claim.get("tabs") or []:
             slot = int(tab.get("slot") or 0)
             if slot < 1 or slot > 5:
                 continue
             row = self._workspace_tab_bank[slot - 1]
+            claimed_slots.add(slot)
             label = str(tab.get("label") or f"Workspace {slot}")
             row["label"] = label
             page = row["widget"]
@@ -10964,8 +11006,30 @@ class EchoDeck(QMainWindow):
             if isinstance(built, QWidget):
                 page.layout().addWidget(built)
                 row["mounted"] = built
-            tabs.addTab(page, label)
+                self._append_chat("SYSTEM", f"[WORKSPACE] slot {slot} content mounted")
+            idx = tabs.indexOf(page)
+            if idx >= 0:
+                tabs.setTabText(idx, label)
+                if hasattr(tabs, "setTabVisible"):
+                    tabs.setTabVisible(idx, True)
+                else:
+                    tabs.tabBar().setTabVisible(idx, True)
+                self._append_chat("SYSTEM", f"[WORKSPACE] slot {slot} shown")
+        for row in self._workspace_tab_bank:
+            slot = int(row.get("slot") or 0)
+            if slot in claimed_slots:
+                continue
+            page = row.get("widget")
+            idx = tabs.indexOf(page)
+            if idx >= 0:
+                tabs.setTabText(idx, row.get("default_label") or f"Workspace {slot}")
+                if hasattr(tabs, "setTabVisible"):
+                    tabs.setTabVisible(idx, False)
+                else:
+                    tabs.tabBar().setTabVisible(idx, False)
+                self._append_chat("SYSTEM", f"[WORKSPACE] slot {slot} hidden")
         self._set_workspace_ribbon(module_key, claim)
+        self._append_chat("SYSTEM", f"[WORKSPACE] active module workspace claim applied: {module_key}")
 
     def _clear_active_module_workspaces(self) -> None:
         if self._workspace_owner_key:
@@ -10975,6 +11039,7 @@ class EchoDeck(QMainWindow):
         self._workspace_tabs_hidden()
         self._clear_workspace_mounts()
         self._set_workspace_ribbon("", {})
+        self._append_chat("SYSTEM", "[WORKSPACE] workspace claim released")
 
     def _sync_workspace_owner_from_active_tab(self, _idx: int) -> None:
         if not hasattr(self, "_spell_tabs") or self._spell_tabs is None:
