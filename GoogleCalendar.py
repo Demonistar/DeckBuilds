@@ -519,6 +519,11 @@ class GoogleCalendarRuntime(QObject):
         super().__init__()
         self.deck_api = deck_api
         self.log: Callable[[str], None] = deck_api.get("log") if callable(deck_api.get("log")) else (lambda _m: None)
+        self.diag_log: Callable[[str, str], None] = (
+            deck_api.get("diagnostics_log")
+            if callable(deck_api.get("diagnostics_log"))
+            else (lambda _m, _lvl="INFO": self.log(_m))
+        )
         self.cfg_get: Callable[[str, Any], Any] = (
             deck_api.get("cfg_get") if callable(deck_api.get("cfg_get")) else (lambda _k, d=None: d)
         )
@@ -565,6 +570,9 @@ class GoogleCalendarRuntime(QObject):
         self.init_auth_state()
         self._init_workers()
 
+    def _diag(self, msg: str, level: str = "INFO") -> None:
+        self.diag_log(f"[GoogleCalendar] {msg}", level)
+
     def module_storage_path(self, filename: str) -> Path:
         if callable(self.cfg_path):
             p = Path(self.cfg_path(filename))
@@ -579,6 +587,7 @@ class GoogleCalendarRuntime(QObject):
         if not token_path.exists():
             self.auth_status = "pending_setup"
             self.status_changed.emit("Google auth pending setup")
+            self._diag("auth status pending_setup (token missing)")
             return
         try:
             payload = json.loads(token_path.read_text(encoding="utf-8"))
@@ -591,9 +600,11 @@ class GoogleCalendarRuntime(QObject):
             else:
                 self.auth_status = "ready"
             self.status_changed.emit(f"Google auth status: {self.auth_status}")
+            self._diag(f"auth status {self.auth_status}")
         except Exception:
             self.auth_status = "pending_setup"
             self.status_changed.emit("Google auth pending setup")
+            self._diag("auth status pending_setup (token parse failed)", "WARN")
 
     def attach_google_services(self, calendar_service: Any, tasks_service: Any) -> None:
         self._google_calendar_service = calendar_service
@@ -615,7 +626,7 @@ class GoogleCalendarRuntime(QObject):
         self._reminder_worker.moveToThread(self._reminder_thread)
         self._reminder_thread.started.connect(self._reminder_worker.start)
         self.request_stop_reminder_timers.connect(self._reminder_worker.stop)
-        self._reminder_worker.reminder_payload.connect(self._send_ai_payload)
+        self._reminder_worker.reminder_payload.connect(self._route_background_payload_to_diagnostics)
         self._reminder_thread.start()
 
     def current_sync_interval_ms(self) -> int:
@@ -672,7 +683,7 @@ class GoogleCalendarRuntime(QObject):
         self.data_changed.emit()
 
     def _on_sync_error(self, error: str) -> None:
-        self.log(f"GoogleCalendar sync error: {error}")
+        self._diag(f"sync error: {error}", "WARN")
 
     def perform_sync(self) -> dict[str, Any]:
         if not self._google_calendar_service or not self._google_tasks_service:
@@ -997,6 +1008,10 @@ class GoogleCalendarRuntime(QObject):
             self.ai_blocker = ""
         except Exception:
             pass
+
+    def _route_background_payload_to_diagnostics(self, payload: dict[str, Any]) -> None:
+        payload_type = str(payload.get("type") or "unknown")
+        self._diag(f"sync/debug routed to diagnostics type={payload_type}")
 
     def send_event_to_ai(self, payload: dict[str, Any]) -> None:
         self._send_ai_payload(payload)
@@ -1525,43 +1540,38 @@ class GoogleCalendarModule:
     def __init__(self, deck_api: dict[str, Any]):
         self.deck_api = deck_api
         self.runtime = GoogleCalendarRuntime(deck_api)
-        self.workspace_widget = GoogleWorkspaceWidget(self.runtime)
-        self.module_panel = ModulePanelWidget(self.runtime, self.workspace_widget)
+        self.calendar_workspace_widget = GoogleWorkspaceWidget(self.runtime)
+        self.tasks_workspace_widget = GoogleWorkspaceWidget(self.runtime)
+        self.tasks_workspace_widget.set_mode("tasks")
+        self.module_panel = ModulePanelWidget(self.runtime, self.calendar_workspace_widget)
         self.module_panel.task_mode_changed.connect(
-            lambda is_task: self.workspace_widget.set_mode("tasks" if is_task else "calendar")
+            lambda is_task: self.calendar_workspace_widget.set_mode("tasks" if is_task else "calendar")
         )
+        self.runtime._diag("register() called")
 
     def get_workspace_spec(self) -> dict[str, Any]:
-        return {
+        spec = {
             "tabs": [
-                {"id": "google_workspace", "label": "Google", "build": self.build_google_workspace},
-                {"id": "drive_workspace", "label": "Drive", "build": self.build_drive_placeholder},
-                {"id": "gmail_workspace", "label": "Gmail", "build": self.build_gmail_placeholder},
+                {"slot": 1, "id": "calendar_workspace", "label": "Calendar", "build": self.build_calendar_workspace},
+                {"slot": 2, "id": "tasks_workspace", "label": "Tasks", "build": self.build_tasks_workspace},
             ],
             "build_ribbon": self.build_ribbon,
             "on_activate": self.runtime.start_sync_timer,
             "on_deactivate": self.runtime.stop_sync_timer,
-            "on_release": self.runtime.stop_sync_timer,
+            "on_release": self.release_workspace,
         }
+        self.runtime._diag("workspace contract declared")
+        return spec
 
-    def build_google_workspace(self) -> QWidget:
-        return self.workspace_widget
+    def build_calendar_workspace(self) -> QWidget:
+        self.runtime._diag("workspace build callable invoked for slot 1")
+        self.calendar_workspace_widget.set_mode("calendar")
+        return self.calendar_workspace_widget
 
-    def build_drive_placeholder(self) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lbl = FontFitLabel("Coming Soon — Google Drive")
-        lbl.setAlignment(Qt.AlignCenter)
-        lay.addWidget(lbl, 1)
-        return w
-
-    def build_gmail_placeholder(self) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lbl = FontFitLabel("Coming Soon — Google Gmail")
-        lbl.setAlignment(Qt.AlignCenter)
-        lay.addWidget(lbl, 1)
-        return w
+    def build_tasks_workspace(self) -> QWidget:
+        self.runtime._diag("workspace build callable invoked for slot 2")
+        self.tasks_workspace_widget.set_mode("tasks")
+        return self.tasks_workspace_widget
 
     def build_ribbon(self) -> QWidget:
         w = QWidget()
@@ -1571,6 +1581,18 @@ class GoogleCalendarModule:
 
     def create_tab(self) -> QWidget:
         return self.module_panel
+
+    def activate_workspace(self, claim: Optional[dict[str, Any]] = None) -> None:
+        self.runtime._diag("Google module activated")
+        self.runtime.start_sync_timer(claim)
+
+    def deactivate_workspace(self, claim: Optional[dict[str, Any]] = None) -> None:
+        self.runtime._diag("Google module deactivated")
+        self.runtime.stop_sync_timer(claim)
+
+    def release_workspace(self, claim: Optional[dict[str, Any]] = None) -> None:
+        self.runtime._diag("Google workspace released")
+        self.runtime.stop_sync_timer(claim)
 
     def module_definition(self) -> dict[str, Any]:
         workspace_spec = self.get_workspace_spec()
@@ -1594,6 +1616,9 @@ class GoogleCalendarModule:
             "workspace": workspace_spec,
             "supports_workspaces": True,
             "workspace_tabs": workspace_spec["tabs"],
+            "on_workspace_activate": self.activate_workspace,
+            "on_workspace_deactivate": self.deactivate_workspace,
+            "on_workspace_release": self.release_workspace,
             "hooks": {
                 "on_startup": self.runtime.trigger_sync_now,
                 "on_shutdown": self.runtime.shutdown,
