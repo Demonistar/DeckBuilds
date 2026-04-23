@@ -10144,18 +10144,109 @@ import zlib
             ),
         }
 
+    @staticmethod
+    def _extract_request_text(context: dict) -> str:
+        if not isinstance(context, dict):
+            return ""
+        candidates = (
+            context.get("user_message"),
+            context.get("question"),
+            context.get("prompt"),
+            context.get("text"),
+            context.get("instruction"),
+        )
+        for value in candidates:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    @staticmethod
+    def _has_explicit_project_reset(text: str) -> bool:
+        lowered = str(text or "").strip().lower()
+        if not lowered:
+            return False
+        reset_markers = (
+            "not about this project",
+            "not about the project",
+            "unrelated to this project",
+            "unrelated to the project",
+            "not related to this project",
+            "not related to the project",
+            "not about kaiju hud",
+            "unrelated to kaiju hud",
+        )
+        return any(marker in lowered for marker in reset_markers)
+
+    @classmethod
+    def _classify_request_domain(cls, context: dict) -> str:
+        text = cls._extract_request_text(context).lower()
+        if cls._has_explicit_project_reset(text):
+            return "general_unrelated"
+        if not text:
+            return "project_local"
+
+        project_markers = (
+            "this file",
+            "this codebase",
+            "in the repo",
+            "repository",
+            "project",
+            ".py",
+            "readme",
+            "open file",
+            "fix bug",
+            "refactor",
+        )
+        api_markers = (
+            "api",
+            "tool",
+            "tools",
+            "agent",
+            "agents",
+            "platform",
+            "sdk",
+            "model",
+            "claude",
+            "openai",
+            "anthropic",
+        )
+        if any(marker in text for marker in project_markers):
+            return "project_local"
+        if any(marker in text for marker in api_markers):
+            return "api_or_platform_general"
+        return "general_unrelated"
+
     def request_ai_interpretation(self, source_module_key: str, context: dict) -> bool:
+        context_obj = context if isinstance(context, dict) else {}
+        request_domain = self._classify_request_domain(context_obj)
+        explicit_reset = self._has_explicit_project_reset(self._extract_request_text(context_obj))
+        routing = {
+            "request_domain": request_domain,
+            "project_context_reset": explicit_reset,
+            "allow_project_file_reads": request_domain == "project_local" and not explicit_reset,
+            "answer_domain": (
+                "project"
+                if request_domain == "project_local" and not explicit_reset
+                else "general_api_platform"
+                if request_domain == "api_or_platform_general"
+                else "general"
+            ),
+        }
         payload = {
             "source_module_key": str(source_module_key or "").strip().lower(),
-            "context": context if isinstance(context, dict) else {},
+            "context": context_obj,
             "intent": "persona_interpretation",
+            "routing": routing,
         }
         try:
             if hasattr(self._deck, "_queue_hidden_runtime_event"):
                 self._deck._queue_hidden_runtime_event(
                     "module_ai_interpretation",
                     payload,
-                    "module requested persona interpretation"
+                    (
+                        "module requested persona interpretation "
+                        f"(classification={request_domain}, project_file_reads={routing['allow_project_file_reads']})"
+                    )
                 )
                 return True
         except Exception as ex:
