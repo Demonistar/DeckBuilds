@@ -10,6 +10,7 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import Qt, QDate
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QDateEdit,
     QFormLayout,
@@ -20,6 +21,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QTextEdit,
@@ -301,27 +304,65 @@ class MealPrepperPanel(QWidget):
         self.refresh_tree()
 
     def _build_ui(self) -> None:
-        root = QHBoxLayout(self)
-        splitter = QSplitter(Qt.Horizontal, self)
+        ui_font = self.font()
+        ui_font.setPointSize(10)
+        self.setFont(ui_font)
+        self.setMinimumSize(1000, 750)
 
-        left = QWidget(self)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        root.addWidget(scroll_area)
+
+        content = QWidget(scroll_area)
+        content.setMinimumSize(1000, 750)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(10, 10, 10, 10)
+        content_layout.setSpacing(8)
+        scroll_area.setWidget(content)
+
+        splitter = QSplitter(Qt.Horizontal, content)
+        content_layout.addWidget(splitter)
+
+        left = QWidget(content)
         left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(10, 10, 10, 10)
+        left_layout.setSpacing(8)
+        left_header = QLabel("Recipe List", left)
+        self._style_section_header(left_header)
+        left_layout.addWidget(left_header)
         self.recipe_tree = QTreeWidget(left)
         self.recipe_tree.setHeaderLabels(["Meal Prep Recipes"])
+        self.recipe_tree.setMinimumWidth(240)
+        self.recipe_tree.setAlternatingRowColors(True)
+        self.recipe_tree.setWordWrap(True)
+        self.recipe_tree.setTextElideMode(Qt.ElideNone)
+        self.recipe_tree.setStyleSheet("QTreeView::item { min-height: 28px; }")
+        self.recipe_tree.setSelectionMode(QAbstractItemView.SingleSelection)
         self.recipe_tree.itemSelectionChanged.connect(self._on_recipe_selected)
         left_layout.addWidget(self.recipe_tree)
 
-        right = QWidget(self)
+        right = QWidget(content)
         right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(10, 10, 10, 10)
+        right_layout.setSpacing(8)
 
         recipe_box = QGroupBox("Recipe Details", right)
+        self._style_groupbox(recipe_box)
         rf = QFormLayout(recipe_box)
+        self._style_form_layout(rf)
         self.recipe_name = QLineEdit(recipe_box)
         self.recipe_category = QComboBox(recipe_box)
         self.recipe_category.addItems(CATEGORIES)
         self.recipe_ingredients = QTextEdit(recipe_box)
+        self.recipe_ingredients.setMinimumHeight(100)
         self.recipe_instructions = QTextEdit(recipe_box)
+        self.recipe_instructions.setMinimumHeight(120)
         self.recipe_notes = QTextEdit(recipe_box)
+        self.recipe_notes.setMinimumHeight(80)
         self.recipe_shelf_value = QSpinBox(recipe_box)
         self.recipe_shelf_value.setRange(1, 3650)
         self.recipe_shelf_unit = QComboBox(recipe_box)
@@ -338,15 +379,19 @@ class MealPrepperPanel(QWidget):
         shelf_wrap = QWidget(recipe_box)
         shelf_layout = QHBoxLayout(shelf_wrap)
         shelf_layout.setContentsMargins(0, 0, 0, 0)
+        shelf_layout.setSpacing(8)
         shelf_layout.addWidget(self.recipe_shelf_value)
         shelf_layout.addWidget(self.recipe_shelf_unit)
         rf.addRow("Default shelf life", shelf_wrap)
-
         rf.addRow("Expected jars per batch", self.recipe_expected_jars)
         rf.addRow("Tags (comma-separated)", self.recipe_tags)
 
         stats_box = QGroupBox("Current Batch + Statistics", right)
+        self._style_groupbox(stats_box)
         self.stats_layout = QGridLayout(stats_box)
+        self.stats_layout.setContentsMargins(10, 10, 10, 10)
+        self.stats_layout.setHorizontalSpacing(12)
+        self.stats_layout.setVerticalSpacing(8)
         self.stats_labels: dict[str, QLabel] = {}
         stat_fields = [
             "Last made date",
@@ -362,14 +407,21 @@ class MealPrepperPanel(QWidget):
             "Projected next batch needed date",
         ]
         for idx, title in enumerate(stat_fields):
-            lbl = QLabel("-", stats_box)
-            lbl.setWordWrap(True)
-            self.stats_layout.addWidget(QLabel(title, stats_box), idx, 0)
-            self.stats_layout.addWidget(lbl, idx, 1)
-            self.stats_labels[title] = lbl
+            title_label = QLabel(title, stats_box)
+            title_label.setWordWrap(True)
+            title_label.setMinimumWidth(180)
+            title_label.setMinimumHeight(28)
+            value_label = QLabel("-", stats_box)
+            value_label.setWordWrap(True)
+            value_label.setMinimumHeight(28)
+            self.stats_layout.addWidget(title_label, idx, 0)
+            self.stats_layout.addWidget(value_label, idx, 1)
+            self.stats_labels[title] = value_label
 
         batch_box = QGroupBox("Batch Tracking", right)
+        self._style_groupbox(batch_box)
         bf = QFormLayout(batch_box)
+        self._style_form_layout(bf)
         self.batch_date = QDateEdit(batch_box)
         self.batch_date.setCalendarPopup(True)
         self.batch_date.setDate(QDate.currentDate())
@@ -385,23 +437,28 @@ class MealPrepperPanel(QWidget):
         self.batch_best_by.setCalendarPopup(True)
         self.batch_best_by.setDate(QDate.currentDate())
         self.batch_notes = QTextEdit(batch_box)
+        self.batch_notes.setMinimumHeight(80)
         self.batch_shelf_value.valueChanged.connect(self._recalc_best_by)
         self.batch_shelf_unit.currentTextChanged.connect(self._recalc_best_by)
         self.batch_date.dateChanged.connect(self._recalc_best_by)
-
         bf.addRow("Jar Date / Batch Date", self.batch_date)
         bf.addRow("Total Jars Made", self.batch_total)
         bf.addRow("Jars Remaining", self.batch_remaining)
         shelf_batch_wrap = QWidget(batch_box)
         sb_layout = QHBoxLayout(shelf_batch_wrap)
         sb_layout.setContentsMargins(0, 0, 0, 0)
+        sb_layout.setSpacing(8)
         sb_layout.addWidget(self.batch_shelf_value)
         sb_layout.addWidget(self.batch_shelf_unit)
         bf.addRow("Shelf Life", shelf_batch_wrap)
         bf.addRow("Best By Date", self.batch_best_by)
         bf.addRow("Notes", self.batch_notes)
 
-        btn_row1 = QHBoxLayout()
+        recipe_actions_box = QGroupBox("Recipe Actions", right)
+        self._style_groupbox(recipe_actions_box)
+        btn_row1 = QHBoxLayout(recipe_actions_box)
+        btn_row1.setContentsMargins(10, 10, 10, 10)
+        btn_row1.setSpacing(8)
         for label, fn in [
             ("New Recipe", self._new_recipe),
             ("Edit Recipe", self._edit_recipe),
@@ -410,44 +467,130 @@ class MealPrepperPanel(QWidget):
         ]:
             b = QPushButton(label, self)
             b.clicked.connect(fn)
+            self._style_action_button(b)
             btn_row1.addWidget(b)
-        right_layout.addWidget(recipe_box)
-        right_layout.addLayout(btn_row1)
-        right_layout.addWidget(stats_box)
-        right_layout.addWidget(batch_box)
+        btn_row1.addStretch(1)
 
+        batch_actions_box = QGroupBox("Batch Actions", right)
+        self._style_groupbox(batch_actions_box)
+        batch_actions_layout = QVBoxLayout(batch_actions_box)
+        batch_actions_layout.setContentsMargins(10, 10, 10, 10)
+        batch_actions_layout.setSpacing(8)
         btn_row2 = QHBoxLayout()
+        btn_row2.setSpacing(8)
         for label, fn in [
             ("New Batch", self._new_batch),
             ("Save Batch", self._save_batch),
             ("Ate One Jar", self._ate_one_jar),
+        ]:
+            b = QPushButton(label, self)
+            b.clicked.connect(fn)
+            self._style_action_button(b)
+            btn_row2.addWidget(b)
+        btn_row2.addStretch(1)
+        btn_row3 = QHBoxLayout()
+        btn_row3.setSpacing(8)
+        for label, fn in [
             ("Add Jar", self._add_jar),
             ("Remove Jar", self._remove_jar),
             ("Mark Batch Finished", self._finish_batch),
         ]:
             b = QPushButton(label, self)
             b.clicked.connect(fn)
-            btn_row2.addWidget(b)
-        right_layout.addLayout(btn_row2)
+            self._style_action_button(b)
+            btn_row3.addWidget(b)
+        btn_row3.addStretch(1)
+        batch_actions_layout.addLayout(btn_row2)
+        batch_actions_layout.addLayout(btn_row3)
 
-        send_row = QHBoxLayout()
+        send_box = QGroupBox("Send To", right)
+        self._style_groupbox(send_box)
+        send_row = QHBoxLayout(send_box)
+        send_row.setContentsMargins(10, 10, 10, 10)
+        send_row.setSpacing(8)
         send_ai = QPushButton("Send To AI", self)
         send_ai.clicked.connect(self._send_to_ai)
+        self._style_send_button(send_ai)
         send_row.addWidget(send_ai)
-        send_shop = QPushButton("Send to Shopping List", self)
+        send_shop = QPushButton("Send To Shopping List", self)
         send_shop.setEnabled(False)
         send_shop.setToolTip("Coming Soon — Shopping List module not installed.")
+        self._style_send_button(send_shop)
         send_row.addWidget(send_shop)
-        send_book = QPushButton("Send to Recipe Book", self)
+        send_book = QPushButton("Send To Recipe Book", self)
         send_book.setEnabled(False)
         send_book.setToolTip("Coming Soon — Recipe Book module not installed.")
+        self._style_send_button(send_book)
         send_row.addWidget(send_book)
-        right_layout.addLayout(send_row)
+        send_row.addStretch(1)
+
+        right_layout.addWidget(recipe_box)
+        right_layout.addWidget(recipe_actions_box)
+        right_layout.addWidget(stats_box)
+        right_layout.addWidget(batch_box)
+        right_layout.addWidget(batch_actions_box)
+        right_layout.addWidget(send_box)
+        right_layout.addStretch(1)
 
         splitter.addWidget(left)
         splitter.addWidget(right)
-        splitter.setSizes([280, 900])
-        root.addWidget(splitter)
+        splitter.setSizes([320, 960])
+        self._apply_readability_sizing()
+
+    def _style_groupbox(self, box: QGroupBox) -> None:
+        title_font = box.font()
+        title_font.setPointSize(11)
+        title_font.setBold(True)
+        box.setFont(title_font)
+
+    def _style_section_header(self, label: QLabel) -> None:
+        header_font = label.font()
+        header_font.setPointSize(12)
+        header_font.setBold(True)
+        label.setFont(header_font)
+        label.setMinimumHeight(28)
+
+    def _style_form_layout(self, layout: QFormLayout) -> None:
+        layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        layout.setHorizontalSpacing(12)
+        layout.setVerticalSpacing(8)
+        layout.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        layout.setFormAlignment(Qt.AlignTop | Qt.AlignLeft)
+
+    def _style_action_button(self, button: QPushButton) -> None:
+        button.setMinimumWidth(130)
+        button.setMinimumHeight(38)
+        button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        button.setStyleSheet("letter-spacing: 0px;")
+
+    def _style_send_button(self, button: QPushButton) -> None:
+        self._style_action_button(button)
+        button.setMinimumWidth(180)
+
+    def _apply_readability_sizing(self) -> None:
+        for label in self.findChildren(QLabel):
+            label.setMinimumHeight(max(24, label.minimumHeight()))
+            label.setWordWrap(True)
+            label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        for line in self.findChildren(QLineEdit):
+            line.setMinimumHeight(28)
+            line.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        for combo in self.findChildren(QComboBox):
+            combo.setMinimumHeight(30)
+            combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        for spin in self.findChildren(QSpinBox):
+            spin.setMinimumHeight(30)
+            spin.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        for date_edit in self.findChildren(QDateEdit):
+            date_edit.setMinimumHeight(30)
+            date_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        for text in self.findChildren(QTextEdit):
+            text.setMinimumHeight(max(80, text.minimumHeight()))
+            text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        for button in self.findChildren(QPushButton):
+            button.setMinimumHeight(max(38, button.minimumHeight()))
+            button.setStyleSheet("letter-spacing: 0px;")
 
     def refresh_tree(self) -> None:
         self.recipe_tree.clear()
@@ -460,12 +603,15 @@ class MealPrepperPanel(QWidget):
                 grouped[cat].append(recipe)
         for cat in CATEGORIES:
             parent = QTreeWidgetItem([cat])
+            parent.setToolTip(0, cat)
             parent.setExpanded(True)
             self.recipe_tree.addTopLevelItem(parent)
             for recipe in grouped[cat]:
                 status = self._status_for_recipe(recipe)
                 indicator = "⚠ " if status in {"near_best_by", "expired", "low_stock", "out"} else ""
-                child = QTreeWidgetItem([f"{indicator}{recipe.get('name')}"])
+                recipe_name = str(recipe.get("name") or "")
+                child = QTreeWidgetItem([f"{indicator}{recipe_name}"])
+                child.setToolTip(0, recipe_name)
                 child.setData(0, Qt.UserRole, recipe.get("id"))
                 parent.addChild(child)
         self.recipe_tree.expandAll()
