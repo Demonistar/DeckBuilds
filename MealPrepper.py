@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QDateEdit,
     QFormLayout,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -25,7 +24,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
-    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -499,29 +497,36 @@ class MealPrepperWidget(QWidget):
 
         self.setStyleSheet(
             """
-            QWidget { font-size: 11pt; letter-spacing: 0px; }
-            QLabel { font-size: 11pt; }
+            QWidget { font-size: 10pt; letter-spacing: 0px; }
+            QLabel { font-size: 10pt; }
             QLineEdit, QComboBox, QSpinBox, QDateEdit { min-height: 32px; padding: 4px 8px; font-size: 11pt; }
-            QPushButton { min-height: 40px; min-width: 140px; padding: 8px 14px; letter-spacing: 0px; font-size: 11pt; }
+            QPushButton { min-height: 40px; padding: 8px 12px; letter-spacing: 0px; font-size: 10pt; }
             QPlainTextEdit { min-height: 90px; font-size: 11pt; padding: 6px; }
-            QListWidget { font-size: 11pt; }
+            QListWidget { font-size: 10pt; min-height: 160px; }
             """
         )
 
-        splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        splitter.setChildrenCollapsible(False)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-        left = self._build_left_panel()
-        right = self._build_right_panel()
+        content = QWidget(scroll)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(10)
 
-        left.setMinimumWidth(300)
-        right.setMinimumWidth(750)
+        content_layout.addWidget(self._build_top_section(content))
+        content_layout.addWidget(self._build_recipe_management_section(content))
+        content_layout.addWidget(self._build_recipe_section(content))
+        content_layout.addWidget(self._build_stats_section(content))
+        content_layout.addWidget(self._build_batch_section(content))
+        content_layout.addWidget(self._build_batch_actions_section(content))
+        content_layout.addWidget(self._build_send_to_section(content))
+        content_layout.addStretch(1)
 
-        splitter.addWidget(left)
-        splitter.addWidget(right)
-        splitter.setSizes([340, 960])
-
-        root.addWidget(splitter)
+        scroll.setWidget(content)
+        root.addWidget(scroll)
 
     def _section_title(self, text: str) -> QLabel:
         lbl = QLabel(text)
@@ -529,13 +534,28 @@ class MealPrepperWidget(QWidget):
         lbl.setMinimumHeight(30)
         return lbl
 
-    def _build_left_panel(self) -> QWidget:
+    def _configure_form_layout(self, form: QFormLayout) -> None:
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+
+    def _add_button_rows(self, parent_layout: QVBoxLayout, parent: QWidget, buttons: list[QPushButton]) -> None:
+        for idx in range(0, len(buttons), 2):
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            row.addWidget(buttons[idx], 1)
+            if idx + 1 < len(buttons):
+                row.addWidget(buttons[idx + 1], 1)
+            parent_layout.addLayout(row)
+
+    def _build_top_section(self, parent: QWidget) -> QWidget:
         panel = QWidget(self)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        layout.addWidget(self._section_title("Recipe List"))
+        layout.addWidget(self._section_title("1. Search + Recipe Selector"))
 
         self.search_edit = QLineEdit(panel)
         self.search_edit.setPlaceholderText("Search recipes...")
@@ -553,34 +573,29 @@ class MealPrepperWidget(QWidget):
         layout.addWidget(self.recipe_list, 1)
         return panel
 
-    def _build_right_panel(self) -> QWidget:
-        wrap = QWidget(self)
-        outer = QVBoxLayout(wrap)
-        outer.setContentsMargins(0, 0, 0, 0)
+    def _build_recipe_management_section(self, parent: QWidget) -> QWidget:
+        box = QFrame(parent)
+        box.setFrameShape(QFrame.Shape.StyledPanel)
+        layout = QVBoxLayout(box)
+        layout.setSpacing(8)
+        layout.addWidget(self._section_title("2. Recipe Management"))
 
-        scroll = QScrollArea(wrap)
-        scroll.setWidgetResizable(True)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.btn_new_recipe = QPushButton("New Recipe", box)
+        self.btn_save_recipe = QPushButton("Save Recipe", box)
+        self.btn_delete_recipe = QPushButton("Delete Recipe", box)
+        self.btn_clear_recipe = QPushButton("Clear Form", box)
 
-        content = QWidget(scroll)
-        v = QVBoxLayout(content)
-        v.setContentsMargins(8, 8, 8, 8)
-        v.setSpacing(14)
+        self.btn_new_recipe.clicked.connect(self._new_recipe)
+        self.btn_save_recipe.clicked.connect(self._save_recipe)
+        self.btn_delete_recipe.clicked.connect(self._delete_recipe)
+        self.btn_clear_recipe.clicked.connect(self._clear_recipe_form)
 
-        recipe_box = self._build_recipe_section(content)
-        stats_box = self._build_stats_section(content)
-        batch_box = self._build_batch_section(content)
-        send_box = self._build_send_to_section(content)
-
-        v.addWidget(recipe_box)
-        v.addWidget(stats_box)
-        v.addWidget(batch_box)
-        v.addWidget(send_box)
-        v.addStretch(1)
-
-        scroll.setWidget(content)
-        outer.addWidget(scroll)
-        return wrap
+        self._add_button_rows(
+            layout,
+            box,
+            [self.btn_new_recipe, self.btn_save_recipe, self.btn_delete_recipe, self.btn_clear_recipe],
+        )
+        return box
 
     def _build_recipe_section(self, parent: QWidget) -> QWidget:
         box = QFrame(parent)
@@ -588,11 +603,10 @@ class MealPrepperWidget(QWidget):
         layout = QVBoxLayout(box)
         layout.setSpacing(8)
 
-        layout.addWidget(self._section_title("1. Recipe Details"))
+        layout.addWidget(self._section_title("3. Recipe Details"))
 
         form = QFormLayout()
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(8)
+        self._configure_form_layout(form)
 
         self.name_edit = QLineEdit(box)
         self.category_edit = QComboBox(box)
@@ -629,24 +643,6 @@ class MealPrepperWidget(QWidget):
         form.addRow("Expected jars/servings per batch", self.expected_jars)
         form.addRow("Tags", self.tags_edit)
         layout.addLayout(form)
-
-        actions_grid = QGridLayout()
-        self.btn_new_recipe = QPushButton("New Recipe", box)
-        self.btn_save_recipe = QPushButton("Save Recipe", box)
-        self.btn_delete_recipe = QPushButton("Delete Recipe", box)
-        self.btn_clear_recipe = QPushButton("Clear Form", box)
-
-        self.btn_new_recipe.clicked.connect(self._new_recipe)
-        self.btn_save_recipe.clicked.connect(self._save_recipe)
-        self.btn_delete_recipe.clicked.connect(self._delete_recipe)
-        self.btn_clear_recipe.clicked.connect(self._clear_recipe_form)
-
-        actions_grid.addWidget(self.btn_new_recipe, 0, 0)
-        actions_grid.addWidget(self.btn_save_recipe, 0, 1)
-        actions_grid.addWidget(self.btn_delete_recipe, 1, 0)
-        actions_grid.addWidget(self.btn_clear_recipe, 1, 1)
-        layout.addLayout(actions_grid)
-
         return box
 
     def _build_stats_section(self, parent: QWidget) -> QWidget:
@@ -654,10 +650,10 @@ class MealPrepperWidget(QWidget):
         box.setFrameShape(QFrame.Shape.StyledPanel)
         layout = QVBoxLayout(box)
         layout.setSpacing(8)
-        layout.addWidget(self._section_title("2. Current Batch + Statistics"))
+        layout.addWidget(self._section_title("4. Current Batch + Statistics"))
 
         self.stats_form = QFormLayout()
-        self.stats_form.setVerticalSpacing(6)
+        self._configure_form_layout(self.stats_form)
         self.stats_labels: dict[str, QLabel] = {}
 
         rows = [
@@ -676,7 +672,7 @@ class MealPrepperWidget(QWidget):
         for key, label in rows:
             value = QLabel(NOT_ENOUGH_HISTORY, box)
             value.setMinimumHeight(30)
-            value.setWordWrap(False)
+            value.setWordWrap(True)
             self.stats_labels[key] = value
             self.stats_form.addRow(label, value)
 
@@ -688,10 +684,10 @@ class MealPrepperWidget(QWidget):
         box.setFrameShape(QFrame.Shape.StyledPanel)
         layout = QVBoxLayout(box)
         layout.setSpacing(8)
-        layout.addWidget(self._section_title("3. Batch Tracking"))
+        layout.addWidget(self._section_title("5. Batch Tracking"))
 
         form = QFormLayout()
-        form.setVerticalSpacing(8)
+        self._configure_form_layout(form)
 
         self.batch_date = QDateEdit(box)
         self.batch_date.setCalendarPopup(True)
@@ -733,14 +729,21 @@ class MealPrepperWidget(QWidget):
         form.addRow("Best-by date", self.best_by_date)
         form.addRow("Batch notes", self.batch_notes)
         layout.addLayout(form)
+        return box
 
-        btn_grid = QGridLayout()
+    def _build_batch_actions_section(self, parent: QWidget) -> QWidget:
+        box = QFrame(parent)
+        box.setFrameShape(QFrame.Shape.StyledPanel)
+        layout = QVBoxLayout(box)
+        layout.setSpacing(8)
+        layout.addWidget(self._section_title("6. Batch Actions"))
+
         self.btn_new_batch = QPushButton("New Batch", box)
         self.btn_save_batch = QPushButton("Save Batch", box)
         self.btn_ate_one = QPushButton("Ate One", box)
         self.btn_add_one = QPushButton("Add One", box)
         self.btn_remove_one = QPushButton("Remove One", box)
-        self.btn_finish_batch = QPushButton("Mark Batch Finished", box)
+        self.btn_finish_batch = QPushButton("Mark Finished", box)
 
         self.btn_new_batch.clicked.connect(self._new_batch)
         self.btn_save_batch.clicked.connect(self._save_batch)
@@ -749,14 +752,11 @@ class MealPrepperWidget(QWidget):
         self.btn_remove_one.clicked.connect(self._remove_one)
         self.btn_finish_batch.clicked.connect(self._mark_batch_finished)
 
-        btn_grid.addWidget(self.btn_new_batch, 0, 0)
-        btn_grid.addWidget(self.btn_save_batch, 0, 1)
-        btn_grid.addWidget(self.btn_ate_one, 1, 0)
-        btn_grid.addWidget(self.btn_add_one, 1, 1)
-        btn_grid.addWidget(self.btn_remove_one, 2, 0)
-        btn_grid.addWidget(self.btn_finish_batch, 2, 1)
-        layout.addLayout(btn_grid)
-
+        self._add_button_rows(
+            layout,
+            box,
+            [self.btn_new_batch, self.btn_save_batch, self.btn_ate_one, self.btn_add_one, self.btn_remove_one, self.btn_finish_batch],
+        )
         return box
 
     def _build_send_to_section(self, parent: QWidget) -> QWidget:
@@ -764,9 +764,8 @@ class MealPrepperWidget(QWidget):
         box.setFrameShape(QFrame.Shape.StyledPanel)
         layout = QVBoxLayout(box)
         layout.setSpacing(8)
-        layout.addWidget(self._section_title("4. Send To"))
+        layout.addWidget(self._section_title("7. Send To"))
 
-        row = QHBoxLayout()
         self.btn_send_ai = QPushButton("Send To AI", box)
         self.btn_send_shop = QPushButton("Send To Shopping List", box)
         self.btn_send_recipe_book = QPushButton("Send To Recipe Book", box)
@@ -777,11 +776,7 @@ class MealPrepperWidget(QWidget):
         self.btn_send_shop.setToolTip("Coming Soon — Shopping List module not installed.")
         self.btn_send_recipe_book.setToolTip("Coming Soon — Recipe Book module not installed.")
 
-        row.addWidget(self.btn_send_ai)
-        row.addWidget(self.btn_send_shop)
-        row.addWidget(self.btn_send_recipe_book)
-        row.addStretch(1)
-        layout.addLayout(row)
+        self._add_button_rows(layout, box, [self.btn_send_ai, self.btn_send_shop, self.btn_send_recipe_book])
         return box
 
     def _msg_error(self, text: str) -> None:
