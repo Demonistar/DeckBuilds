@@ -199,6 +199,19 @@ class VScrollWidget(QWidget):
         s = QScrollArea(); s.setWidgetResizable(True); s.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         s.setWidget(inner); l.addWidget(s)
 
+def month_totals(db: "FinanceDB") -> dict[str, float]:
+    rows = db.conn.execute("SELECT direction, amount FROM ledger WHERE voided=0").fetchall()
+    income = spent = savings = 0.0
+    for r in rows:
+        amt = float(r["amount"] or 0.0)
+        if r["direction"] == "income":
+            income += amt
+        elif r["direction"] == "savings":
+            savings += amt
+        else:
+            spent += amt
+    return {"income": income, "spent": spent, "savings": savings, "remaining": income - spent - savings}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SECTION 11 — REUSABLE WIDGETS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -230,17 +243,131 @@ class BudgetWorkspace(QWidget):
         super().__init__(); self.db=db; self.deck_api=deck_api; self.drill=DrillState()
         root=QVBoxLayout(self); self.tabs=QTabWidget(); root.addWidget(self.tabs)
         self.tabs.addTab(self._weekly(), "Weekly"); self.tabs.addTab(self._monthly(), "Monthly"); self.tabs.addTab(self._annual(), "Annual"); self.tabs.addTab(self._ledger(), "Ledger")
+        self.refresh()
 
     def _weekly(self):
         w=QWidget(); l=QVBoxLayout(w); row=QHBoxLayout()
-        for t,v in [("Income This Week","$0"),("Spent So Far","$0"),("Remaining","$0")]: row.addWidget(KPIFrame(t,v))
-        l.addLayout(row); l.addWidget(QLabel("On-pace gauge / donut / planned-vs-actual / velocity")); l.addWidget(QLabel("Threshold status list + weekly reconciliation panel")); return VScrollWidget(w)
+        self.k_income = QLabel("$0.00"); self.k_spent = QLabel("$0.00"); self.k_remaining = QLabel("$0.00")
+        for t,v in [("Income",""),("Spent",""),("Remaining","")]:
+            pass
+        for t,v in [("Income", self.k_income),("Spent", self.k_spent),("Remaining", self.k_remaining)]:
+            box=QFrame(); bl=QVBoxLayout(box); bl.addWidget(QLabel(t)); bl.addWidget(v); row.addWidget(box)
+        l.addLayout(row)
+        self.drill_path = QLabel("Budget Overview")
+        l.addWidget(self.drill_path)
+        nav = QHBoxLayout()
+        b_home = QPushButton("Home")
+        b_back = QPushButton("Back")
+        b_home.clicked.connect(lambda: (self.drill.home(), self.refresh()))
+        b_back.clicked.connect(lambda: (self.drill.back(), self.refresh()))
+        nav.addWidget(b_home); nav.addWidget(b_back)
+        l.addLayout(nav)
+        self.chart_view = QChartView()
+        l.addWidget(self.chart_view)
+        self.threshold_lbl = QLabel("No threshold alerts")
+        l.addWidget(self.threshold_lbl)
+        return VScrollWidget(w)
     def _monthly(self):
-        w=QWidget(); l=QVBoxLayout(w); m=QComboBox(); m.addItems(["50/30/20","50/20/30","zero-based","pay-yourself-first","envelope","none/freeform"]); l.addWidget(m); l.addWidget(QLabel("Method-specific KPI rendering")); l.addWidget(QLabel("Category breakdown + recent transactions")); return VScrollWidget(w)
+        w=QWidget(); l=QVBoxLayout(w); m=QComboBox(); m.addItems(["50/30/20","50/20/30","zero-based","pay-yourself-first","envelope","none/freeform"]); l.addWidget(m); l.addWidget(QLabel("Category breakdown and live totals from ledger")); return VScrollWidget(w)
     def _annual(self):
         w=QWidget(); l=QVBoxLayout(w); l.addWidget(QLabel("Retirement contribution banner")); l.addWidget(QLabel("Emergency fund banner")); l.addWidget(QLabel("Income vs spending + YoY overlay + projection + heatmap + merchant analysis")); return VScrollWidget(w)
     def _ledger(self):
-        w=QWidget(); l=QVBoxLayout(w); l.addWidget(QLabel("Data view only")); self.tbl=QTableWidget(0,8); self.tbl.setHorizontalHeaderLabels(["Time","Type","Direction","Amount","Category","Merchant","Account","Actions"]); l.addWidget(self.tbl); return VScrollWidget(w)
+        w=QWidget(); l=QVBoxLayout(w); self.tbl=QTableWidget(0,8); self.tbl.setHorizontalHeaderLabels(["ID","Time","Direction","Amount","Category","Merchant","Account","Voided"]); l.addWidget(self.tbl)
+        actions = QHBoxLayout()
+        b_edit = QPushButton("Edit Selected (+5%)")
+        b_void = QPushButton("Void Selected")
+        b_link = QPushButton("Link Planned->Actual")
+        b_edit.clicked.connect(self.edit_selected)
+        b_void.clicked.connect(self.void_selected)
+        b_link.clicked.connect(self.link_selected)
+        actions.addWidget(b_edit); actions.addWidget(b_void); actions.addWidget(b_link)
+        l.addLayout(actions)
+        return VScrollWidget(w)
+
+    def refresh(self):
+        totals = month_totals(self.db)
+        if hasattr(self, "k_income"):
+            self.k_income.setText(f"${totals['income']:.2f}")
+            self.k_spent.setText(f"${totals['spent']:.2f}")
+            self.k_remaining.setText(f"${totals['remaining']:.2f}")
+            self.drill_path.setText(" > ".join(self.drill.path))
+        rows = self.db.conn.execute("SELECT l.id,l.event_time,l.direction,l.amount,COALESCE(c.name,''),l.merchant,IFNULL(l.account_id,''),l.voided FROM ledger l LEFT JOIN categories c ON c.id=l.category_id ORDER BY l.id DESC LIMIT 250").fetchall()
+        if hasattr(self, "tbl"):
+            self.tbl.setRowCount(len(rows))
+            for i, r in enumerate(rows):
+                vals=[r[0],r[1],r[2],f"{float(r[3]):.2f}",r[4],r[5] or "",r[6],"Y" if r[7] else ""]
+                for j, v in enumerate(vals):
+                    self.tbl.setItem(i,j,QTableWidgetItem(str(v)))
+        self._refresh_chart()
+        self._refresh_thresholds()
+
+    def _refresh_chart(self):
+        chart = QChart()
+        if len(self.drill.path) == 1:
+            series = QPieSeries()
+            rows = self.db.conn.execute("SELECT COALESCE(c.name,'Uncategorized') n,SUM(l.amount) t FROM ledger l LEFT JOIN categories c ON c.id=l.category_id WHERE l.direction='expense' AND l.voided=0 GROUP BY COALESCE(c.name,'Uncategorized') ORDER BY t DESC LIMIT 8").fetchall()
+            for r in rows:
+                s = series.append(r["n"], float(r["t"] or 0.0))
+                s.setLabelVisible(True)
+            series.clicked.connect(lambda sl: (self.drill.drill(sl.label()), self.refresh()))
+            chart.addSeries(series)
+        else:
+            category = self.drill.path[-1]
+            series = QBarSeries(); bar = QBarSet(category); cats=[]
+            rows = self.db.conn.execute("SELECT COALESCE(merchant,'Unknown') m,SUM(amount) t FROM ledger l LEFT JOIN categories c ON c.id=l.category_id WHERE l.direction='expense' AND l.voided=0 AND COALESCE(c.name,'Uncategorized')=? GROUP BY COALESCE(merchant,'Unknown') ORDER BY t DESC LIMIT 10",(category,)).fetchall()
+            for r in rows: cats.append(r["m"]); bar.append(float(r["t"] or 0.0))
+            series.append(bar); chart.addSeries(series)
+            ax = QBarCategoryAxis(); ax.append(cats); chart.addAxis(ax, Qt.AlignBottom); series.attachAxis(ax)
+            ay = QValueAxis(); chart.addAxis(ay, Qt.AlignLeft); series.attachAxis(ay)
+        self.chart_view.setChart(chart)
+
+    def _selected_id(self) -> Optional[int]:
+        item = self.tbl.currentItem()
+        if not item:
+            return None
+        return int(self.tbl.item(item.row(), 0).text())
+
+    def edit_selected(self):
+        rid = self._selected_id()
+        if rid is None: return
+        row = self.db.conn.execute("SELECT * FROM ledger WHERE id=?", (rid,)).fetchone()
+        if not row: return
+        nid = append_ledger(self.db, {k: row[k] for k in row.keys()})
+        new_amt = float(row["amount"]) * 1.05
+        self.db.conn.execute("UPDATE ledger SET amount=? WHERE id=?", (new_amt, nid))
+        self.db.conn.execute("UPDATE ledger SET voided=1,voided_at=?,void_reason='edited',supersedes_id=? WHERE id=?", (_utc_now(), nid, rid))
+        self.db.conn.execute("INSERT INTO ledger_edits(original_ledger_id,supersede_ledger_id,edited_at,edit_reason,edited_field,old_value,new_value,edited_by) VALUES(?,?,?,?,?,?,?,?)", (rid, nid, _utc_now(), "quick-edit", "amount", str(row["amount"]), str(new_amt), "user"))
+        self.db.conn.commit(); self.refresh()
+
+    def void_selected(self):
+        rid = self._selected_id()
+        if rid is None: return
+        self.db.conn.execute("UPDATE ledger SET voided=1,voided_at=?,void_reason='user_void' WHERE id=?", (_utc_now(), rid))
+        self.db.conn.commit(); self.refresh()
+
+    def link_selected(self):
+        rid = self._selected_id()
+        if rid is None: return
+        planned = self.db.conn.execute("SELECT amount FROM ledger WHERE id=?", (rid,)).fetchone()
+        actual = self.db.conn.execute("SELECT id,amount FROM ledger WHERE id<>? AND direction='expense' AND voided=0 ORDER BY id DESC LIMIT 1", (rid,)).fetchone()
+        if planned and actual:
+            self.db.conn.execute("INSERT INTO planned_to_actual_links(planned_ledger_id,actual_ledger_id,linked_at,linked_by,variance_amount) VALUES(?,?,?,?,?)", (rid, int(actual["id"]), _utc_now(), "user", float(actual["amount"]) - float(planned["amount"])))
+            self.db.conn.commit()
+        self.refresh()
+
+    def _refresh_thresholds(self):
+        alerts=[]
+        rows = self.db.conn.execute("SELECT category_id,amount,threshold_pct FROM budget_periods WHERE superseded_by IS NULL").fetchall()
+        for r in rows:
+            actual = self.db.conn.execute("SELECT IFNULL(SUM(amount),0) FROM ledger WHERE category_id=? AND direction='expense' AND voided=0", (r["category_id"],)).fetchone()[0]
+            cap = float(r["amount"] or 0.0); pct = float(r["threshold_pct"] or 100.0)
+            if cap > 0 and float(actual) >= cap * (pct / 100.0):
+                msg = f"Category {r['category_id']} at {actual:.2f}/{cap:.2f}"
+                alerts.append(msg)
+                self.db.conn.execute("INSERT INTO ai_nudges(triggered_at,trigger_type,trigger_payload,drill_path,ai_message,follow_up_qs,cooldown_key) VALUES(?,?,?,?,?,?,?)", (_utc_now(),"threshold",json.dumps({"category_id":r["category_id"]}),json.dumps(self.drill.path),msg,json.dumps(["Trim spend","Reallocate budget"]),f"thr:{r['category_id']}"))
+                queue_ai(self.deck_api, "threshold_nudge", {"category_id": r["category_id"], "actual": actual, "cap": cap})
+        self.db.conn.commit()
+        self.threshold_lbl.setText("\n".join(alerts) if alerts else "No threshold alerts")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SECTION 14 — FINANCIAL VISION WORKSPACE
@@ -248,8 +375,18 @@ class BudgetWorkspace(QWidget):
 
 class VisionWorkspace(QWidget):
     def __init__(self, db: FinanceDB):
-        super().__init__(); l=QVBoxLayout(self)
-        l.addWidget(QLabel("Current vs Goal KPI bars")); l.addWidget(QLabel("Emergency fund panel")); l.addWidget(QLabel("Savings goals tracker + ETA")); l.addWidget(QLabel("Debt panel with avalanche/snowball + shortcuts"));
+        super().__init__(); self.db=db; l=QVBoxLayout(self)
+        self.kpi = QLabel()
+        self.chart = QChartView()
+        l.addWidget(self.kpi); l.addWidget(self.chart)
+        self.refresh()
+
+    def refresh(self):
+        t = month_totals(self.db)
+        self.kpi.setText(f"Income ${t['income']:.2f} • Spent ${t['spent']:.2f} • Savings ${t['savings']:.2f}")
+        chart = QChart(); s = QBarSeries(); b = QBarSet("Current"); b.append([t["income"], t["spent"], t["savings"]]); s.append(b)
+        chart.addSeries(s); ax=QBarCategoryAxis(); ax.append(["Income","Spent","Savings"]); chart.addAxis(ax, Qt.AlignBottom); s.attachAxis(ax); ay=QValueAxis(); chart.addAxis(ay, Qt.AlignLeft); s.attachAxis(ay)
+        self.chart.setChart(chart)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SECTION 15 — RETIREMENT WORKSPACE
@@ -260,8 +397,10 @@ class RetirementWorkspace(QWidget):
         super().__init__(); self.db=db; l=QVBoxLayout(self)
         self.form = QFormLayout(); self.current_age=QSpinBox(); self.current_age.setRange(18,100); self.current_age.setValue(35)
         self.retire_age=QSpinBox(); self.retire_age.setRange(40,85); self.retire_age.setValue(65)
-        self.form.addRow("Current age", self.current_age); self.form.addRow("Retirement age", self.retire_age); l.addLayout(self.form)
-        b=QPushButton("Run 45-year projection"); b.clicked.connect(self.compute); l.addWidget(b); self.out=QLabel("Verdict KPI"); l.addWidget(self.out)
+        self.ret_rate = QSpinBox(); self.ret_rate.setRange(1, 15); self.ret_rate.setValue(6)
+        self.contrib = QSpinBox(); self.contrib.setRange(0, 50); self.contrib.setValue(12)
+        self.form.addRow("Current age", self.current_age); self.form.addRow("Retirement age", self.retire_age); self.form.addRow("Expected return %", self.ret_rate); self.form.addRow("Contribution %", self.contrib); l.addLayout(self.form)
+        b=QPushButton("Run 45-year projection"); b.clicked.connect(self.compute); l.addWidget(b); self.out=QLabel("Verdict KPI"); l.addWidget(self.out); self.chart=QChartView(); l.addWidget(self.chart)
 
     def compute(self):
         ca=self.current_age.value(); ra=self.retire_age.value(); bal=100000.0; salary=90000.0
@@ -269,14 +408,19 @@ class RetirementWorkspace(QWidget):
         for scenario,delta in [("base",0.0),("under",-0.02),("over",0.02)]:
             b=bal; s=salary
             for age in range(ca, ca+46):
-                r=0.06+delta
+                r=(self.ret_rate.value()/100.0)+delta
                 if age < ra:
-                    contrib=s*0.12; interest=b*r; end=b+interest+contrib; s*=1.03
+                    contrib=s*(self.contrib.value()/100.0); interest=b*r; end=b+interest+contrib; s*=1.03
                 else:
                     desired=70000.0; pension=22000.0; draw=max(desired-pension,0); interest=b*r; end=b+interest-draw; contrib=0
                 self.db.conn.execute("INSERT INTO retirement_projection(computed_at,scenario,age,salary,balance,interest,yearly_savings,desired_income,pension_income,end_balance) VALUES(?,?,?,?,?,?,?,?,?,?)", (_utc_now(), scenario, age, s, b, interest, contrib, 70000.0, 22000.0, end))
                 b=end
         self.db.conn.commit(); self.out.setText("Projection computed")
+        rows = self.db.conn.execute("SELECT age,end_balance FROM retirement_projection WHERE scenario='base' ORDER BY age").fetchall()
+        ch=QChart(); ls=QLineSeries()
+        for r in rows: ls.append(float(r["age"]), float(r["end_balance"]))
+        ch.addSeries(ls); ax=QValueAxis(); ay=QValueAxis(); ch.addAxis(ax, Qt.AlignBottom); ch.addAxis(ay, Qt.AlignLeft); ls.attachAxis(ax); ls.attachAxis(ay)
+        self.chart.setChart(ch)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SECTION 16 — RIGHT-SIDE MODULE PANEL
@@ -291,7 +435,15 @@ class FinancePanel(QWidget):
         for n,w in [("Type",self.entry_type),("Category",self.category),("Merchant/Source",self.merchant),("Date",self.date),("Time",self.time),("Amount",self.amount),("Account",self.account),("Notes",self.notes),("Tier",self.tier)]: fl.addRow(n,w)
         btns=QHBoxLayout(); s=QPushButton("Save"); c=QPushButton("Cancel"); a=QPushButton("Add Another"); btns.addWidget(s); btns.addWidget(c); btns.addWidget(a); fl.addRow(btns)
         s.clicked.connect(self.save); c.clicked.connect(self.clear); a.clicked.connect(self.clear)
-        l.addWidget(strip); tabs=QTabWidget(); tabs.addTab(QLabel("Budget panel"),"Budget"); tabs.addTab(QLabel("Vision panel"),"Vision"); tabs.addTab(QLabel("Retirement panel"),"Retirement"); l.addWidget(tabs)
+        l.addWidget(strip)
+        self.help_topic = QComboBox()
+        for r in self.db.conn.execute("SELECT topic_key FROM help_topics ORDER BY topic_key").fetchall():
+            self.help_topic.addItem(r["topic_key"])
+        help_btn = QPushButton("Ask AI Help")
+        help_btn.clicked.connect(self.ask_help)
+        self.ai_session_log = QTextEdit(); self.ai_session_log.setReadOnly(True)
+        l.addWidget(self.help_topic); l.addWidget(help_btn); l.addWidget(self.ai_session_log)
+        tabs=QTabWidget(); tabs.addTab(QLabel("Budget panel"),"Budget"); tabs.addTab(QLabel("Vision panel"),"Vision"); tabs.addTab(QLabel("Retirement panel"),"Retirement"); l.addWidget(tabs)
 
     def save(self):
         append_ledger(self.db, {"entry_type": self.entry_type.currentText(), "direction": self.entry_type.currentText(), "amount": float(self.amount.text() or 0), "merchant": self.merchant.text(), "notes": self.notes.toPlainText()})
@@ -299,6 +451,16 @@ class FinancePanel(QWidget):
 
     def clear(self):
         self.category.clear(); self.merchant.clear(); self.amount.clear(); self.account.clear(); self.notes.clear()
+
+    def ask_help(self):
+        topic = self.help_topic.currentText()
+        cur = self.db.conn.cursor()
+        cur.execute("INSERT INTO ai_help_sessions(topic_key,scope,opened_at,last_activity_at,state) VALUES(?,?,?,?,?)", (topic, "finance_panel", _utc_now(), _utc_now(), "open"))
+        sid = int(cur.lastrowid)
+        self.db.conn.execute("INSERT INTO ai_help_messages(session_id,sent_at,sender,message_text,ui_context,follow_up_buttons,user_clicked_followup) VALUES(?,?,?,?,?,?,?)", (sid, _utc_now(), "user", f"Help with {topic}", "{}", "[]", ""))
+        self.db.conn.commit()
+        queue_ai(self.deck_api, "help_topic", {"session_id": sid, "topic": topic})
+        self.ai_session_log.append(f"Queued topic '{topic}' in session {sid}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SECTION 17 — FINANCEMODULE LIFECYCLE
