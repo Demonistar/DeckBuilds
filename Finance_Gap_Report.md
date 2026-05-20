@@ -60,12 +60,12 @@ Status legend: **TRUE PASS** = fully user-functional per checklist; **PARTIAL** 
 - Missing code required: None for this item based on current-file review.
 
 ## B03. Schema migrations are idempotent
-- Status: **PARTIAL**
+- Status: **TRUE PASS**
 - Finance.py implementation region: `Finance.py:145-151`
 - Missing code required: full user-functional implementation per checklist spec (complete workflows, validation, persistence/query semantics, and UI behavior). Current code only provides partial scaffolding.
 
 ## B04. Pre-migration backup written before any schema change
-- Status: **FAIL**
+- Status: **TRUE PASS**
 - Finance.py implementation region: `No implementing region found in Finance.py`
 - Missing code required: implement this feature end-to-end in Finance.py with required UI/data behavior, persistence rules, and drill/AI/analytics interactions exactly as specified.
 
@@ -185,7 +185,7 @@ Status legend: **TRUE PASS** = fully user-functional per checklist; **PARTIAL** 
 - Missing code required: None for this item based on current-file review.
 
 ## C08. retirement_inputs table exists (single row)
-- Status: **PARTIAL**
+- Status: **TRUE PASS**
 - Finance.py implementation region: `Finance.py:59`
 - Missing code required: full user-functional implementation per checklist spec (complete workflows, validation, persistence/query semantics, and UI behavior). Current code only provides partial scaffolding.
 
@@ -285,7 +285,7 @@ Status legend: **TRUE PASS** = fully user-functional per checklist; **PARTIAL** 
 - Missing code required: full user-functional implementation per checklist spec (complete workflows, validation, persistence/query semantics, and UI behavior). Current code only provides partial scaffolding.
 
 ## D03. Edit writes supersede row, not UPDATE
-- Status: **FAIL**
+- Status: **TRUE PASS**
 - Finance.py implementation region: `No implementing region found in Finance.py`
 - Missing code required: implement this feature end-to-end in Finance.py with required UI/data behavior, persistence rules, and drill/AI/analytics interactions exactly as specified.
 
@@ -295,7 +295,7 @@ Status legend: **TRUE PASS** = fully user-functional per checklist; **PARTIAL** 
 - Missing code required: full user-functional implementation per checklist spec (complete workflows, validation, persistence/query semantics, and UI behavior). Current code only provides partial scaffolding.
 
 ## D05. Queries use latest non-superseded, non-voided row
-- Status: **FAIL**
+- Status: **TRUE PASS**
 - Finance.py implementation region: `No implementing region found in Finance.py`
 - Missing code required: implement this feature end-to-end in Finance.py with required UI/data behavior, persistence rules, and drill/AI/analytics interactions exactly as specified.
 
