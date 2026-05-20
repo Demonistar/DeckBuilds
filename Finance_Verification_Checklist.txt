@@ -1,0 +1,1121 @@
+================================================================================
+              ECHO DECK : FINANCE MODULE
+            Feature Verification Checklist v1.0
+================================================================================
+
+Source of truth: EchoDeck_Finance_Bible_v1.docx
+Use this checklist to verify the final Finance.py implementation against the
+locked design. Every item is a testable line. Each carries a summary so a
+reviewer can confirm without re-reading the full bible.
+
+Legend:
+  [ ]   not yet verified
+  [X]   verified working
+  [F]   verified failing (note what)
+  [N/A] not applicable for this build
+
+================================================================================
+SECTION A. MODULE STRUCTURE AND MANIFEST
+================================================================================
+
+[ ] A01. Single-file module
+        Summary: Finance.py is one self-contained .py file. No subfolders, no
+        bundled assets, no separate manifest file.
+
+[ ] A02. MODULE_MANIFEST present at top
+        Summary: Top-level dict with key="Finance", display_name, description,
+        version, deck_api_version="1.0", home_category="Professional",
+        secondary_categories, entry_function="register", tab_definitions.
+
+[ ] A03. MODULE_KEY constant matches manifest
+        Summary: MODULE_KEY = "Finance" at top level, exact string match
+        to MODULE_MANIFEST["key"].
+
+[ ] A04. tab_definitions lists three tabs
+        Summary: finance_budget, finance_vision, finance_retirement, with
+        readable tab_name strings.
+
+[ ] A05. register() function signature and validation
+        Summary: register(deck_api: dict) -> dict. Raises RuntimeError if
+        deck_api_version is not "1.0". Constructs the module instance, returns
+        the contract dict.
+
+[ ] A06. Contract returns three workspace entries
+        Summary: workspace.tabs contains entries for slots 1, 2, 3 with id,
+        label, and build callable for each.
+
+[ ] A07. Contract returns three module panel tabs
+        Summary: tabs[] contains finance_budget, finance_vision,
+        finance_retirement with get_content callables.
+
+[ ] A08. on_release and on_deactivate both wired
+        Summary: workspace.on_release and workspace.on_deactivate both point
+        to module.release.
+
+[ ] A09. EDM packaging produces installable file
+        Summary: edm_packager.py converts Finance.py to Finance.edm. Header
+        carries manifest metadata. Payload is signed and encrypted.
+
+================================================================================
+SECTION B. RUNTIME STORAGE AND LIFECYCLE
+================================================================================
+
+[ ] B01. Creates DeckRoot/Finances/ on first load
+        Summary: Module creates the storage folder if absent. No errors on
+        re-init.
+
+[ ] B02. Creates or opens finance.db
+        Summary: SQLite database file at DeckRoot/Finances/finance.db.
+        Opens existing or creates new on first run.
+
+[ ] B03. Schema migrations are idempotent
+        Summary: Running register() twice does not error or duplicate data.
+        schema_version table tracks current version.
+
+[ ] B04. Pre-migration backup written before any schema change
+        Summary: Before applying any migration, file copy to
+        backups/finance_premig_v<old>_to_v<new>_<timestamp>.db.
+
+[ ] B05. Seeded categories on first run only
+        Summary: 18 default categories installed with is_system=1 if and
+        only if the categories table is empty.
+
+[ ] B06. Seeded vision_categories on first run only
+        Summary: 7 vision categories (Income, Home, Transportation, Food,
+        Entertainment, Misc, Savings) installed on first run.
+
+[ ] B07. Seeded help_topics on first run only
+        Summary: Approximately 35-50 help topics seeded with title,
+        short_explanation, detailed_explanation, worked_example,
+        ai_prompt_template, follow_up_buttons.
+
+[ ] B08. Default budget_method is "none" on fresh install
+        Summary: settings_history scope='budget_method' key='active'
+        value='none' written on first run.
+
+[ ] B09. release() stops all timers
+        Summary: Every QTimer created by the module is stopped in
+        release(). Verified by counting active timers before and after.
+
+[ ] B10. release() disconnects all signal connections
+        Summary: data_changed and any custom signals are disconnected
+        completely. No dangling slot references.
+
+[ ] B11. release() hides and deleteLater()s every cached widget
+        Summary: Every widget reference cached on module instance has
+        hide() called, then deleteLater(), then is set to None.
+
+[ ] B12. release() closes database connection
+        Summary: Final commit then close. Reference set to None.
+
+[ ] B13. No setParent(None) anywhere in module
+        Summary: Forbidden pattern. grep should return zero matches.
+
+[ ] B14. No QThread creation anywhere in module
+        Summary: Forbidden pattern. All sync runs via main-thread QTimer.
+
+[ ] B15. No setFixedWidth on buttons
+        Summary: Forbidden pattern. Buttons size to text.
+
+[ ] B16. No placeholder views
+        Summary: Forbidden pattern. Welcome panel handles empty state,
+        not placeholder skeleton views.
+
+[ ] B17. AI dispatch routes through ai_queue.db only
+        Summary: Module writes to ai_queue.db. Does not import or call
+        Claude/ChatGPT/Grok/etc. directly.
+
+[ ] B18. Sync and debug logging routes to Diagnostics
+        Summary: Does not write to chat tab, Self tab, or session path.
+
+[ ] B19. Daily backup writes to backups/finance_YYYY-MM-DD.db
+        Summary: On first module activation each day, backup file written.
+        Older than 30 days rotated out.
+
+[ ] B20. backup_log entry written for every backup
+        Summary: Row in backup_log with timestamp, path, type, row count,
+        file size.
+
+================================================================================
+SECTION C. DATABASE SCHEMA
+================================================================================
+
+[ ] C01. ledger table exists with all specified columns
+        Summary: id, event_time, recorded_at, entry_type, direction, amount,
+        category_id, subcategory, merchant, description, account_id, tier,
+        recurrence_id, linked_to_id, source, supersedes_id, voided,
+        voided_at, void_reason, notes. Indexes on event_time, category_id,
+        account_id, merchant, supersedes_id, voided.
+
+[ ] C02. settings_history table exists
+        Summary: id, effective_from, recorded_at, setting_scope, setting_key,
+        setting_value, changed_by, notes. Index on (scope, key, effective_from).
+
+[ ] C03. accounts table exists
+        Summary: id, name, account_type, institution, created_at, active,
+        opening_balance, opening_date, credit_limit, interest_rate,
+        min_payment, notes.
+
+[ ] C04. categories table exists
+        Summary: id, name (unique), parent_id, default_tier, color, icon,
+        sort_order, active, is_system, created_at.
+
+[ ] C05. recurring_schedule table exists
+        Summary: id, created_at, event_type, name, category_id, amount,
+        frequency, next_due_date, day_of_month, account_id, tier, active,
+        auto_post, superseded_by, notes.
+
+[ ] C06. vision_categories table exists
+        Summary: id, name (unique), sort_order, is_system, created_at.
+
+[ ] C07. savings_goals table exists
+        Summary: id, name, total_to_save, save_monthly, start_date,
+        target_date, completed_date, linked_account, auto_log_on_complete,
+        superseded_by, voided, notes, created_at.
+
+[ ] C08. retirement_inputs table exists (single row)
+        Summary: id=1 constraint, all 18 input fields, last_reviewed_at,
+        updated_at.
+
+[ ] C09. retirement_projection table exists
+        Summary: id, computed_at, scenario, age, salary, balance, interest,
+        yearly_savings, desired_income, pension_income, end_balance. Index
+        on (scenario, age).
+
+[ ] C10. emergency_fund table exists (single row)
+        Summary: id=1 constraint, target_months, linked_account_id,
+        last_reviewed_at, updated_at.
+
+[ ] C11. budget_periods table exists
+        Summary: id, effective_from, period_type, category_id, amount,
+        threshold_pct, threshold_amt, warning_mode, superseded_by,
+        created_by, notes.
+
+[ ] C12. planned_to_actual_links table exists
+        Summary: id, planned_ledger_id, actual_ledger_id, linked_at,
+        linked_by, variance_amount.
+
+[ ] C13. ledger_edits table exists
+        Summary: id, original_ledger_id, supersede_ledger_id, edited_at,
+        edit_reason, edited_field, old_value, new_value, edited_by.
+
+[ ] C14. ai_help_sessions table exists
+        Summary: id, topic_key, scope, opened_at, last_activity_at,
+        closed_at, close_reason, context_snapshot, related_session_ids, state.
+
+[ ] C15. ai_help_messages table exists
+        Summary: id, session_id, sent_at, sender, message_text, ui_context,
+        follow_up_buttons, user_clicked_followup.
+
+[ ] C16. ai_nudges table exists
+        Summary: id, triggered_at, trigger_type, trigger_payload, drill_path,
+        ai_message, follow_up_qs, user_action, acted_at, snooze_until,
+        cooldown_key.
+
+[ ] C17. plan_snapshots table exists
+        Summary: id, snapshot_at, snapshot_name, scope, data_blob,
+        created_by, notes.
+
+[ ] C18. help_topics table exists
+        Summary: topic_key (PK), title, short_explanation,
+        detailed_explanation, worked_example, ai_prompt_template,
+        follow_up_buttons, related_topic_keys.
+
+[ ] C19. workspace_preferences table exists
+        Summary: workspace_key, subtab_key, view_mode, remember_last,
+        drill_state, updated_at. Composite PK on (workspace_key, subtab_key).
+
+[ ] C20. kpi_cache table exists
+        Summary: id, kpi_key, workspace, subtab, period_start, period_end,
+        drill_scope, computed_at, cache_value, is_dirty. Index on
+        (kpi_key, is_dirty).
+
+[ ] C21. category_tier_defaults table exists
+        Summary: category_id (PK), default_tier.
+
+[ ] C22. debt_metadata table exists
+        Summary: account_id (PK), payoff_strategy, target_payoff_date,
+        notes, updated_at.
+
+[ ] C23. weekly_reconciliations table exists
+        Summary: id, week_starting (unique), reconciled_at, variance_total,
+        notes.
+
+[ ] C24. backup_log table exists
+        Summary: id, backup_at, backup_path, backup_type, row_count,
+        file_size_bytes.
+
+[ ] C25. schema_version table exists
+        Summary: version (PK), applied_at, description.
+
+================================================================================
+SECTION D. APPEND-ONLY LEDGER BEHAVIOR
+================================================================================
+
+[ ] D01. New transaction writes ledger row
+        Summary: Quick Add saves a new row. recorded_at is set to now.
+        amount is positive, direction tells sign.
+
+[ ] D02. No ledger row is ever deleted
+        Summary: Delete action sets voided=true with voided_at and
+        void_reason. Original row remains in table.
+
+[ ] D03. Edit writes supersede row, not UPDATE
+        Summary: Editing a row in Ledger view creates a new row with
+        supersedes_id pointing at original. Original is unchanged.
+
+[ ] D04. ledger_edits row written on every edit
+        Summary: Each edited field gets one ledger_edits row with field
+        name, old value, new value, reason.
+
+[ ] D05. Queries use latest non-superseded, non-voided row
+        Summary: All aggregations and views filter out superseded rows and
+        voided rows by default.
+
+[ ] D06. "Show edit history" filter reveals chains
+        Summary: Toggle in Ledger view shows original + all supersedes
+        chronologically with edit reasons.
+
+[ ] D07. "Show voided" filter reveals voided rows
+        Summary: Voided rows displayed struck-through and dimmed when
+        filter on.
+
+[ ] D08. Undo void available for 7 days
+        Summary: Voided rows show "Undo void" button for 7 days after
+        voiding. After that, button gone but row still in DB.
+
+[ ] D09. Settings changes write to settings_history
+        Summary: Every budget threshold change, every retirement input
+        change, every method change writes a new settings_history row.
+
+[ ] D10. "Current setting" query is time-aware
+        Summary: Reading current value uses
+        WHERE effective_from <= now ORDER BY effective_from DESC LIMIT 1.
+
+[ ] D11. Account balance computed not stored
+        Summary: Account balance = opening_balance + sum of ledger rows
+        for that account minus pending checks. Never read from a stored
+        column.
+
+================================================================================
+SECTION E. BUDGET WORKSPACE (SLOT 1)
+================================================================================
+
+[ ] E01. Workspace claims slot 1
+        Summary: Build callable for slot 1 produces Budget workspace widget.
+
+[ ] E02. Four sub-tabs present
+        Summary: Weekly, Monthly, Annual, Ledger tabs.
+
+[ ] E03. View toggle on Weekly/Monthly/Annual
+        Summary: KPI / Data segmented buttons with pin icon at top.
+
+[ ] E04. Ledger sub-tab is always Data
+        Summary: View toggle hidden on Ledger sub-tab. Always grid view.
+
+[ ] E05. Weekly KPI mode shows 4 top KPI tiles
+        Summary: Income this week, Spent so far, Remaining, On-pace gauge.
+
+[ ] E06. Weekly KPI mode shows expense donut + planned-vs-actual bars
+        Summary: Two charts side by side, donut of category spend and
+        grouped bar of planned vs actual per category.
+
+[ ] E07. Weekly KPI mode shows spending velocity line
+        Summary: Cumulative spend day-by-day with last week's line
+        overlaid.
+
+[ ] E08. Weekly KPI mode shows threshold status list
+        Summary: Bottom of Weekly view lists categories with progress bars,
+        over-budget at top in red.
+
+[ ] E09. Weekly reconciliation panel functional
+        Summary: List of week's transactions with reconcile checkboxes,
+        variance summary, "Complete reconciliation" button writes
+        weekly_reconciliations row.
+
+[ ] E10. Monthly KPI mode shows budget method selector
+        Summary: Top of Monthly view has dropdown with all 6 methods,
+        help icon next to selector.
+
+[ ] E11. 50/30/20 method renders three rings
+        Summary: Needs ring (target 50%), Wants ring (30%), Savings/Debt
+        ring (20%). Each drillable.
+
+[ ] E12. 50/20/30 method renders three rings (Penn variant)
+        Summary: Needs (50%), Savings (20%), Wants (30%) ordering.
+
+[ ] E13. Zero-based method renders running balance ticker
+        Summary: Income, Total Assigned, Unassigned displayed at top.
+        Goal: get Unassigned to $0.
+
+[ ] E14. Pay-yourself-first method renders two panels
+        Summary: Pay Yourself panel with target savings and progress.
+        Everything Else panel with remaining.
+
+[ ] E15. Envelope method renders per-category cards
+        Summary: Cards with envelope amount, spent, remaining, progress bar,
+        end-of-month rule selector.
+
+[ ] E16. None/freeform method shows generic KPIs
+        Summary: No methodology overlay. Standard KPI tiles only.
+
+[ ] E17. Annual sub-tab shows retirement contribution banner
+        Summary: "Current annual savings rate: X% of gross. Target:
+        10-15%." with Adjust and Dismiss buttons.
+
+[ ] E18. Annual sub-tab shows emergency fund banner
+        Summary: "Your emergency fund covers N months. Target: 6 months."
+        with Adjust target and View progress.
+
+[ ] E19. Annual sub-tab shows Income vs Spending line chart
+        Summary: Monthly income vs monthly spend, predictive months
+        dashed and shaded.
+
+[ ] E20. Year-over-year overlay when prior year data exists
+        Summary: Prior year's line behind current year in muted color.
+        Only renders if SELECT COUNT(*) FROM ledger WHERE event_time
+        in prior calendar year > 0.
+
+[ ] E21. Category trend matrix renders
+        Summary: Small multiples, one mini line chart per category, 12
+        months of data.
+
+[ ] E22. Day-of-week heatmap renders (Annual)
+        Summary: 7-column grid Sun-Sat, category rows, color intensity
+        per cell. Click cell to drill.
+
+[ ] E23. Merchant frequency chart renders (Annual)
+        Summary: Top 15 merchants by transaction count, bar chart, click
+        to drill.
+
+[ ] E24. Predictive Annual source priority correct
+        Summary: Year-over-year if prior data, YTD trend if no prior,
+        recurring schedule fallback. Source labeled on chart.
+
+[ ] E25. Ledger sub-tab has full filter bar
+        Summary: Date range, category, account, merchant, type filters,
+        plus Show superseded / Show voided / Show edit history checkboxes.
+
+[ ] E26. Ledger columns match spec
+        Summary: Date, Type, Category, Subcategory, Merchant, Description,
+        Amount, Direction, Account, Tier, Source, Notes columns visible.
+
+[ ] E27. Ledger column elision at narrow widths
+        Summary: Notes, Source, Description, Subcategory elide first at
+        narrow widths with hover-to-reveal tooltip.
+
+[ ] E28. Ledger Edit (pencil) icon per row
+        Summary: Read-only by default. Click pencil unlocks one row,
+        row turns yellow.
+
+[ ] E29. Ledger Save writes supersede row
+        Summary: After edit and Save, supersedes_id written, ledger_edits
+        row created, grid refreshes.
+
+[ ] E30. Ledger Delete (trash) icon per row
+        Summary: Prompts for void reason. On confirm sets voided=true
+        with reason.
+
+[ ] E31. Ledger bulk operations
+        Summary: Multi-select via checkboxes. Bulk recategorize and bulk
+        void available.
+
+[ ] E32. Ledger pagination
+        Summary: 200 rows per page. First / Prev / Page N of M / Next
+        / Last navigation.
+
+================================================================================
+SECTION F. VISION WORKSPACE (SLOT 2)
+================================================================================
+
+[ ] F01. Workspace claims slot 2
+        Summary: Build callable for slot 2 produces Vision workspace
+        widget.
+
+[ ] F02. Current vs Goal paired bars render
+        Summary: One paired horizontal bar per Vision category, Current
+        from ledger aggregation, Goal from settings_history.
+
+[ ] F03. Current vs Goal color coding
+        Summary: Green at or better than goal, orange worse than goal,
+        red gap exceeds 50%.
+
+[ ] F04. Vision category mapping configurable
+        Summary: settings_history scope='vision_category_mapping' allows
+        moving budget categories between vision buckets.
+
+[ ] F05. Emergency Fund panel renders
+        Summary: Months covered gauge, target months, target dollars,
+        linked account, ETA at current pace.
+
+[ ] F06. Emergency Fund target auto-derived
+        Summary: Target = average monthly expenses (last 3 months)
+        multiplied by target_months. User can override to flat amount.
+
+[ ] F07. Savings Goals progress bars render
+        Summary: One bar per active goal, start date and target date
+        markers, ETA, status (on pace, behind, ahead).
+
+[ ] F08. Goal completion auto-logs savings_actual
+        Summary: When current >= total_to_save and user confirms,
+        ledger row written with type=savings_actual for the full amount.
+
+[ ] F09. Debt panel renders when debts exist
+        Summary: Per-debt cards with balance, rate, min payment, payoff
+        estimate, strategy selector.
+
+[ ] F10. Avalanche and snowball strategy ordering
+        Summary: When multiple debts exist, ordered per chosen strategy.
+        Avalanche = highest rate first, Snowball = smallest balance first.
+
+[ ] F11. Debt charge entry shortcut
+        Summary: "Add charge" button opens Quick Add with debt account
+        preselected.
+
+[ ] F12. Debt payment logging shortcut
+        Summary: "Log payment" button opens Quick Add with transfer type.
+
+[ ] F13. Data mode shows three grids
+        Summary: vision_categories, savings_goals, debt_accounts grids
+        stacked vertically with edit toggles.
+
+================================================================================
+SECTION G. RETIREMENT WORKSPACE (SLOT 3)
+================================================================================
+
+[ ] G01. Workspace claims slot 3
+        Summary: Build callable for slot 3 produces Retirement workspace
+        widget.
+
+[ ] G02. Three input blocks present
+        Summary: Now, At Retirement, Uncertainty blocks with help icons
+        on every field.
+
+[ ] G03. Block 1 inputs present
+        Summary: Current age, annual income, inflation/income increase,
+        current retirement balance, annual savings amount, annual savings
+        increase, investment return.
+
+[ ] G04. Block 2 inputs present
+        Summary: Annual pension benefit, pension benefit increase, desired
+        retirement age, retirement years, income replacement, retirement
+        investment return.
+
+[ ] G05. Block 3 inputs present
+        Summary: 5 uncertainty fields for return, savings, savings
+        increase, pension, pension increase.
+
+[ ] G06. Projection math iterative loop reproduces Book_4
+        Summary: 45-year loop, saving phase and drawdown phase, three
+        scenarios. Output written to retirement_projection.
+
+[ ] G07. Three scenarios computed and stored
+        Summary: base, under, over rows in retirement_projection with
+        scenario column.
+
+[ ] G08. Projection recomputes only when dirty
+        Summary: Dirty flag set when retirement_inputs changes. Lazy
+        recompute on next render.
+
+[ ] G09. Verdict KPI tile shows success/failure
+        Summary: "CONGRATULATIONS! At age X, you will have a savings
+        balance of $Y" or "OOPS! This plan will only provide income up
+        to age Z."
+
+[ ] G10. Years to retirement tile renders
+        Summary: Big countdown number, current_age subtracted from
+        retirement_age.
+
+[ ] G11. Projected balance at retirement age tile renders
+        Summary: Dollar amount from retirement_projection at the age
+        equal to desired_retirement_age.
+
+[ ] G12. Balance projection chart renders
+        Summary: Line chart from current age through end of plan, base
+        scenario solid line.
+
+[ ] G13. Uncertainty bands toggleable
+        Summary: Under and over scenarios shown as shaded bands when
+        toggled on in legend.
+
+[ ] G14. Vertical line at retirement age
+        Summary: Dashed vertical line on chart at retirement_age.
+
+[ ] G15. Color shift at retirement age
+        Summary: Line is one color during saving phase, different color
+        during drawdown phase.
+
+[ ] G16. Year tooltip on hover
+        Summary: Hovering any year shows tooltip with salary, balance,
+        interest, savings, desired income, pension, end balance.
+
+[ ] G17. Salary and savings trajectory chart
+        Summary: Secondary chart shows salary curve and yearly savings
+        contribution.
+
+[ ] G18. Replacement income visual
+        Summary: Bar chart at retirement age showing current desired
+        income vs projected available.
+
+[ ] G19. Sensitivity tiles render
+        Summary: Cards for "what if return 5%", "what if save $5k more",
+        "what if work until 67", "what if inflation 4%".
+
+[ ] G20. Sensitivity tile click re-renders chart with dashed override
+        Summary: Click a tile, chart shows dashed line for the override
+        scenario without committing changes.
+
+[ ] G21. Savings rate banner pulls from Budget
+        Summary: "Current annual savings rate: X% of gross. Target:
+        10-15%." Color-coded.
+
+[ ] G22. 90-day review banner appears when due
+        Summary: If last_reviewed_at older than 90 days, "It's been 4
+        months since you reviewed these assumptions" banner shows.
+
+[ ] G23. Data mode shows 45-row projection table
+        Summary: Excel-style grid with Age, Salary, Balance, Interest,
+        Yearly savings, Desired income, Pension income, End balance
+        columns. Three scenario tabs.
+
+================================================================================
+SECTION H. MODULE PANEL (RIGHT-SIDE)
+================================================================================
+
+[ ] H01. Three top-level tabs present
+        Summary: Budget, Vision, Retirement tabs in module panel.
+
+[ ] H02. Quick Transaction Entry strip permanent at top
+        Summary: Visible regardless of which tab is active.
+
+[ ] H03. Quick Add fields complete
+        Summary: Type, Category, Merchant, Date, Time, Amount, Account,
+        Notes, Tier fields.
+
+[ ] H04. Quick Add category dropdown sorted by frequency
+        Summary: Most-used categories (last 90 days) pinned at top.
+
+[ ] H05. Quick Add merchant autocomplete works
+        Summary: Typing in merchant field shows suggestions from prior
+        ledger rows.
+
+[ ] H06. Quick Add tier defaults from category_tier_defaults
+        Summary: Selecting category auto-fills tier from defaults,
+        overridable.
+
+[ ] H07. Quick Add Save flow complete
+        Summary: Ledger row written, data_changed fired, caches dirty-
+        flagged, thresholds checked, AI nudge queued if breach.
+
+[ ] H08. "Add another" preserves category and merchant
+        Summary: Form stays open with category and merchant retained,
+        amount and notes blanked.
+
+[ ] H09. Keyboard shortcuts work
+        Summary: Enter saves, Esc cancels, Ctrl+Enter saves and starts
+        another.
+
+[ ] H10. Income type variant of Quick Add
+        Summary: Type=Income switches category to income subset, merchant
+        becomes Source label, tier hidden.
+
+[ ] H11. Savings type variant
+        Summary: Type=Savings locks category to Savings, adds Goal link
+        dropdown.
+
+[ ] H12. Check type variant
+        Summary: Type=Check adds "Cleared yet? Pending / Cleared" radio.
+        Pending writes check_pending entry_type.
+
+[ ] H13. Budget tab subsections present
+        Summary: Budget Method, Recurring Entries, Budget Caps &
+        Thresholds, Weekly Reconciliation.
+
+[ ] H14. Method selector with help icons
+        Summary: All 6 methods selectable. Method-specific parameters
+        appear inline.
+
+[ ] H15. Recurring entries CRUD
+        Summary: Add, edit, deactivate recurring income, expenses, savings.
+        Edits write supersede rows.
+
+[ ] H16. Per-category budget caps editor
+        Summary: Table of categories with weekly cap, threshold,
+        warning mode columns. Edit inline.
+
+[ ] H17. Vision tab subsections present
+        Summary: Vision Category Goals, Savings Goals, Emergency Fund
+        Settings, Debt Management.
+
+[ ] H18. Savings Goal CRUD
+        Summary: Add goal with name, total, monthly, start, target,
+        linked account, auto_log_on_complete toggle.
+
+[ ] H19. Emergency Fund settings editor
+        Summary: Target months selector (3/6/9), linked account picker,
+        override target amount field.
+
+[ ] H20. Debt entry form
+        Summary: Per-debt: account name, type, balance, APR, min payment,
+        credit limit, strategy preference.
+
+[ ] H21. Retirement tab three accordions
+        Summary: Now, At Retirement, Uncertainty accordions with all
+        input fields and help icons.
+
+[ ] H22. Retirement input edit invalidates projection cache
+        Summary: Any input change writes settings_history row, marks
+        retirement_projection dirty.
+
+[ ] H23. Recompute now button
+        Summary: Explicit recompute trigger at bottom of Retirement tab.
+
+================================================================================
+SECTION I. VIEW TOGGLE AND LAYOUT
+================================================================================
+
+[ ] I01. KPI / Data toggle on every applicable workspace
+        Summary: Segmented button at top of Budget Weekly/Monthly/Annual,
+        Vision, and Retirement.
+
+[ ] I02. Pin icon (remember last) per toggle
+        Summary: Small pin next to toggle. Filled = remembering, hollow =
+        default behavior.
+
+[ ] I03. View mode stored in workspace_preferences
+        Summary: Per (workspace_key, subtab_key). Restored on workspace
+        activation.
+
+[ ] I04. Default view modes per spec
+        Summary: KPI default for Budget Weekly/Monthly/Annual, Vision,
+        Retirement. Data always for Budget Ledger.
+
+[ ] I05. Horizontal scroll forbidden (verified)
+        Summary: Every workspace wrapped in QScrollArea with horizontal
+        bar policy=AlwaysOff. Resize to narrow width does not introduce
+        horizontal scroll.
+
+[ ] I06. Charts size policy Expanding/Preferred
+        Summary: Every chart widget set to (Expanding, Preferred) size
+        policy.
+
+[ ] I07. Tables horizontal scroll off
+        Summary: Every QTableWidget has horizontal bar policy=AlwaysOff
+        with column elision.
+
+[ ] I08. ResponsiveGrid helper class works
+        Summary: Custom class reflows columns at width breakpoints. Test:
+        resize window narrow, columns collapse from 4 to 2 to 1.
+
+[ ] I09. Charts resize on window resize
+        Summary: resizeEvent handlers re-render charts at new dimensions.
+
+[ ] I10. Long category names ellipsize
+        Summary: Narrow tables show "..." for long names. Hover reveals
+        full name via tooltip.
+
+================================================================================
+SECTION J. EMPTY STATE AND FIRST RUN
+================================================================================
+
+[ ] J01. Welcome panel renders on empty ledger
+        Summary: COUNT(*) FROM ledger WHERE NOT voided AND
+        supersedes_id IS NULL = 0 triggers Welcome panel.
+
+[ ] J02. Welcome panel offers tour or jump-in
+        Summary: Two buttons: "Take the guided tour" and "Just get
+        started." Both clickable.
+
+[ ] J03. Welcome panel shows the note
+        Summary: Text reads "Note: once you begin entering data, this
+        screen will no longer show."
+
+[ ] J04. Tour has 5 steps
+        Summary: Workspaces overview, Quick Add, Budget Method, Help
+        icons, Snapshots.
+
+[ ] J05. Tour state persisted to prevent re-trigger
+        Summary: settings_history scope='first_run_tour' written once
+        completed. Doesn't re-fire on workspace activation.
+
+[ ] J06. "Always show tour" setting available
+        Summary: Toggle in module panel. When on, welcome screen appears
+        on every startup even after data exists.
+
+[ ] J07. Welcome panel swaps out automatically
+        Summary: Once first non-opening-balance row exists, KPI view
+        renders instead of Welcome panel.
+
+================================================================================
+SECTION K. DRILL-DOWN NAVIGATION
+================================================================================
+
+[ ] K01. DrillableChart base class implemented
+        Summary: Class exists with NavigationStack, DrillLevel objects,
+        breadcrumb, back, home, double-click handler.
+
+[ ] K02. Double-click drills on every chart
+        Summary: Charts in Budget, Vision, Retirement all respond to
+        double-click on data points.
+
+[ ] K03. Single click selects only (no drill)
+        Summary: Single click shows tooltip with value, no view change.
+
+[ ] K04. Right-click context menu present
+        Summary: "Drill in", "Show transactions for this", "Send this
+        slice to AI", "Export this view" options.
+
+[ ] K05. Breadcrumb always visible
+        Summary: Visible at level 0 showing "Overview". Each segment
+        clickable to jump to that level.
+
+[ ] K06. Back and Home buttons always visible
+        Summary: Greyed out at level 0, active at deeper levels.
+
+[ ] K07. Drill level appears in chart title
+        Summary: Chart title updates: "Food > Fast Food > McDonald's".
+
+[ ] K08. Send-to-AI is drill-aware
+        Summary: AI payload includes drill_path, filters, scope_key,
+        full data at deepest level.
+
+[ ] K09. Keyboard navigation works
+        Summary: Enter drills focused point, Backspace goes back, Escape
+        returns to root.
+
+[ ] K10. Drill state survives view-mode toggle
+        Summary: Data view shows ledger pre-filtered to drill scope.
+
+[ ] K11. Drill state persisted per workspace+subtab
+        Summary: workspace_preferences.drill_state stores JSON. Restores
+        on workspace activation.
+
+[ ] K12. Canonical Food drill path works
+        Summary: Categories donut > Food slice > Fast Food slice >
+        McDonald's bar > McDonald's transactions line chart. Four levels.
+
+[ ] K13. Vision Current vs Goal drilldown
+        Summary: Click Vision category bar > Budget category breakdown
+        > transactions for selected category.
+
+[ ] K14. Savings Goals drilldown
+        Summary: Click goal > contribution history line chart > individual
+        contributions table.
+
+[ ] K15. Debt panel drilldown
+        Summary: Click debt > charges and payments over time > specific
+        month's transactions.
+
+[ ] K16. Retirement chart drilldown
+        Summary: Click year on balance projection > year detail panel >
+        scenario comparison for that year.
+
+[ ] K17. Day-of-week heatmap drilldown
+        Summary: Click cell (e.g. Tuesday x Food) > all Food transactions
+        on Tuesdays YTD line chart.
+
+[ ] K18. Annual YoY chart drilldown
+        Summary: Click month on YoY line > category breakdown for that
+        month current year vs prior year.
+
+================================================================================
+SECTION L. AI INTEGRATION
+================================================================================
+
+[ ] L01. Help session opens on [?] click
+        Summary: ai_help_sessions row created with topic_key and scope.
+
+[ ] L02. Session context snapshot captured
+        Summary: context_snapshot JSON includes current finance state
+        relevant to topic.
+
+[ ] L03. Prior session continuity
+        Summary: New session loads summaries of prior sessions on same
+        topic_key into context.
+
+[ ] L04. Session state lifecycle
+        Summary: States are active, idle, closed. Idle after 15 min,
+        closed on user satisfaction click.
+
+[ ] L05. Session closes on module switch
+        Summary: Switching to a clearly unrelated module marks session
+        closed.
+
+[ ] L06. Session closes on topic shift detection
+        Summary: AI detects topic shift in user message, asks for
+        confirmation, closes if user confirms shift.
+
+[ ] L07. AI message structure
+        Summary: Returns text response plus follow_up_buttons array.
+        Stored in ai_help_messages.
+
+[ ] L08. Follow-up buttons clickable
+        Summary: Clicking a follow-up sends another AI exchange in same
+        session.
+
+[ ] L09. Threshold breach triggers nudge
+        Summary: When budget threshold trips, ai_nudges row written with
+        trigger_payload.
+
+[ ] L10. Trigger_payload structure complete
+        Summary: Category, period, budget, spent, remaining, threshold,
+        days left, transactions, subcategory breakdown, historical context,
+        user goals.
+
+[ ] L11. AI dispatch via ai_queue.db
+        Summary: Module writes payload to ai_queue.db. UI polls for
+        response.
+
+[ ] L12. Frequency cap enforced
+        Summary: One nudge per cooldown_key per 24h (configurable).
+        Cooldown_key format: category_thresholdtype.
+
+[ ] L13. Snooze action on nudge banner
+        Summary: User clicks snooze, snooze_until = now + 1 hour. Re-
+        presents at that time.
+
+[ ] L14. Dismiss action on nudge banner
+        Summary: Sets user_action='dismissed'. Does not re-present.
+
+[ ] L15. Engage action on nudge banner
+        Summary: "Yes, let's talk" opens help session with full trigger
+        payload as context.
+
+[ ] L16. Help topic seeded coverage
+        Summary: At minimum: 50_30_20, 50_20_30, zero_based, pay_yourself
+        _first, envelope, roth_ira, traditional_ira, 401k, investment
+        _return, income_replacement, inflation_rate, retirement_uncertain
+        ty, emergency_fund, avalanche_vs_snowball_debt, needs_vs_wants,
+        gross_vs_net_income, fixed_vs_variable_expenses, take_home_pay,
+        compound_interest, threshold_warnings, planned_vs_actual_variance,
+        plus one topic per input field.
+
+[ ] L17. Help popover two-tier explanation
+        Summary: Short explanation visible by default. "Show worked
+        example" expander, "Show me more detail" expander.
+
+[ ] L18. Ask AI button on every help popover
+        Summary: Always available as escape hatch.
+
+[ ] L19. ai_prompt_template substitution
+        Summary: User-state placeholders substituted into AI prompt
+        before dispatch.
+
+================================================================================
+SECTION M. ANALYTICS AND PREDICTIVE
+================================================================================
+
+[ ] M01. KPI cache dirty-flag pattern works
+        Summary: Ledger write sets is_dirty=1 for affected scopes. Render
+        recomputes only if dirty.
+
+[ ] M02. Year-over-year query works once 365 days of data
+        Summary: SQL group by year for category. Renders only if prior
+        year has rows.
+
+[ ] M03. Day-of-week heatmap query correct
+        Summary: GROUP BY strftime('%w', event_time). 7 buckets Sun-Sat.
+
+[ ] M04. Time-of-day distribution query
+        Summary: Bucketed by hour of event_time.
+
+[ ] M05. Merchant frequency query
+        Summary: Top N merchants by count and by sum, drillable.
+
+[ ] M06. Planned-vs-actual auto-match logic
+        Summary: When actual lands, search planned within +/-50% amount,
+        +/-7 days, same category. Suggest link if exactly one match.
+
+[ ] M07. Variance computed on link
+        Summary: variance_amount = actual.amount - planned.amount written
+        to planned_to_actual_links at link time.
+
+[ ] M08. Trend-based plan suggestion
+        Summary: Variance >20% std dev over 6 months prompts "update your
+        plan from X to Y" suggestion.
+
+[ ] M09. Predictive Annual priority correct
+        Summary: Year-over-year first, YTD trend second, recurring third.
+        Source labeled on chart.
+
+[ ] M10. Predictive month source labels visible
+        Summary: Chart shows "projected: $X (based on last year)" or
+        "(based on YTD trend)" etc.
+
+================================================================================
+SECTION N. PENDING TRANSACTIONS
+================================================================================
+
+[ ] N01. Pending check writes check_pending row
+        Summary: entry_type='check_pending' on ledger row.
+
+[ ] N02. Pending check affects budget tracking immediately
+        Summary: Budget remaining decreases by check amount instantly.
+
+[ ] N03. Pending check does NOT affect display balance
+        Summary: Account balance display does not subtract pending amount
+        until cleared.
+
+[ ] N04. Pending widget on Budget Weekly and Vision
+        Summary: Lists pending checks with "Mark cleared" button per row.
+
+[ ] N05. Mark cleared writes check_cleared row
+        Summary: New ledger row with entry_type='check_cleared' and
+        linked_to_id pointing at original pending row.
+
+[ ] N06. Account display balance updates on clear
+        Summary: Balance display reflects cleared amount after clearing.
+
+================================================================================
+SECTION O. SNAPSHOTS
+================================================================================
+
+[ ] O01. Monthly automatic snapshot on 1st
+        Summary: At 00:01 on 1st of month, snapshot row written with
+        scope='all', name='Auto YYYY-MM-01', created_by='auto_monthly'.
+
+[ ] O02. Quarterly automatic snapshot on 1st of quarter
+        Summary: Jan 1, Apr 1, Jul 1, Oct 1 trigger quarterly snapshot
+        with name='Q# YYYY'.
+
+[ ] O03. Manual snapshot button per workspace
+        Summary: "Save snapshot" button in each workspace. Writes scope
+        =workspace_key.
+
+[ ] O04. Snapshot data_blob captures full state
+        Summary: JSON includes budget, vision, retirement, accounts as
+        per spec.
+
+[ ] O05. Snapshot browser accessible
+        Summary: History menu in module panel lists all snapshots
+        chronologically.
+
+[ ] O06. Snapshot view modal opens
+        Summary: Click snapshot to view frozen state in read-only modal.
+
+[ ] O07. Snapshot compare
+        Summary: Select two snapshots, click Compare, see diff.
+
+================================================================================
+SECTION P. CONSTRAINTS AND HARD RULES
+================================================================================
+
+[ ] P01. No em dashes in any UI string or output
+        Summary: grep for the em dash character across all source produces zero matches in
+        user-facing strings.
+
+[ ] P02. Type hints on all public function signatures
+        Summary: Spot check 10 public methods. All have hints.
+
+[ ] P03. Logging routes to Diagnostics
+        Summary: No prints to stdout. No writes to chat or session paths.
+
+[ ] P04. Clean separation of layers
+        Summary: Data, Analysis, Chart widget, Workspace builders, Module
+        panel, AI integration, Help system, Module class all distinguishable
+        in source.
+
+[ ] P05. No bank/CC API code
+        Summary: Verified manual-entry only. No imports of plaid, yodlee,
+        or similar.
+
+[ ] P06. No multi-currency code
+        Summary: All amounts are single currency.
+
+[ ] P07. No PDF export code in v1
+        Summary: No reportlab, no fpdf, no similar in imports.
+
+[ ] P08. No CSV import in v1
+        Summary: No csv import handler. Export only.
+
+[ ] P09. Receipt-level item drilling NOT present
+        Summary: Deepest drill is per-merchant line chart, not per-line-
+        item.
+
+[ ] P10. Single .py file size
+        Summary: File size approximately 4,500-5,500 lines. One file.
+        Ready for edm_packager.
+
+[ ] P11. EDM package round-trips correctly
+        Summary: Finance.py through edm_packager_gui.py produces Finance
+        .edm. Deck installs it. Module loads and functions.
+
+[ ] P12. Module truly uninstalls cleanly
+        Summary: Install module, use it, uninstall. No leftover widgets.
+        No leftover signals. Verified across all 7 modules sister test
+        (the recurring uninstall bug pattern from prior debugging does
+        not recur here).
+
+================================================================================
+SECTION Q. WORKED EXAMPLE VERIFICATION
+================================================================================
+
+[ ] Q01. Taco Bell scenario reproduces exactly
+        Summary: Food budget $200/week, threshold $50. Add HARPS $120.31,
+        Burger King $23.75, Taco Bell $19.76 in current week. Remaining
+        $36.18. Threshold trips. AI nudge fires with structured payload
+        per spec. AI response acknowledges groceries within plan, flags
+        fast food as driver, offers raise/cut/accept options.
+
+[ ] Q02. Editing scenario reproduces exactly
+        Summary: Edit Taco Bell row from $19.76 to $19.67 via Ledger
+        view. Original row preserved. Supersede row written. ledger_edits
+        row captures field change. Grid shows new value with edited
+        indicator. KPI caches affected dirty-flagged. Threshold re-runs.
+
+[ ] Q03. Drill scenario reproduces exactly
+        Summary: From Budget Monthly KPI, double-click Food. Lands on
+        Food subcategories. Double-click Fast Food. Lands on Fast Food
+        merchants. Double-click McDonald's. Lands on McDonald's
+        transactions line chart. Right-click "Send to AI". Payload
+        includes drill_path=[Food, Fast Food, McDonald's].
+
+[ ] Q04. First-run scenario reproduces exactly
+        Summary: Install Finance.edm fresh. DeckRoot/Finances/ created.
+        finance.db created. Schema applied. Defaults seeded. Activate
+        workspace. Welcome panel renders. Take tour. Add opening balance
+        as first row. Welcome stays (only opening balance exists). Add
+        paycheck. Welcome swaps out, KPI view renders, Income tile
+        shows correct amount.
+
+================================================================================
+SECTION R. PRODUCTION READINESS GATES
+================================================================================
+
+[ ] R01. All Section A items pass (module structure)
+[ ] R02. All Section B items pass (runtime and lifecycle)
+[ ] R03. All Section C items pass (database schema)
+[ ] R04. All Section D items pass (append-only ledger)
+[ ] R05. All Section E items pass (Budget workspace)
+[ ] R06. All Section F items pass (Vision workspace)
+[ ] R07. All Section G items pass (Retirement workspace)
+[ ] R08. All Section H items pass (module panel)
+[ ] R09. All Section I items pass (view toggle and layout)
+[ ] R10. All Section J items pass (empty state and first run)
+[ ] R11. All Section K items pass (drill-down)
+[ ] R12. All Section L items pass (AI integration)
+[ ] R13. All Section M items pass (analytics)
+[ ] R14. All Section N items pass (pending transactions)
+[ ] R15. All Section O items pass (snapshots)
+[ ] R16. All Section P items pass (constraints and hard rules)
+[ ] R17. All Section Q items pass (worked examples)
+[ ] R18. Module sustains 24-hour run without crash or leak
+[ ] R19. Uninstall and reinstall cycle clean
+[ ] R20. Sign-off from Robert as primary user
+
+
+================================================================================
+                    END OF VERIFICATION CHECKLIST
+================================================================================
+
+Total items: 252 testable lines across 18 sections.
+
+Use this list as the gate between "Finance.py is written" and "Finance.py
+is shippable." A single [F] anywhere is a blocker. A single [ ] anywhere
+means the item has not been actively verified yet, not that it works.
+
+If you find a feature in the implementation that is not on this list, that
+is a sign the implementation drifted from the bible. Either the bible needs
+a v1.0.1 amendment or the implementation needs to be brought back into line.
+
+This checklist is the final acceptance gate.

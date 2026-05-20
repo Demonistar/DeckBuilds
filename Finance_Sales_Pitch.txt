@@ -1,0 +1,336 @@
+================================================================================
+                  ECHO DECK : FINANCE MODULE
+                       Sales & Marketing Pitch
+================================================================================
+
+
+--------------------------------------------------------------------------------
+ELEVATOR PITCH  (30 seconds)
+--------------------------------------------------------------------------------
+
+The Finance module turns your AI companion into a personal financial analyst
+that actually pays attention.
+
+Drop in a receipt. The system already knew your budget, the day of the week,
+the seasonal trend on your electric bill, and your retirement trajectory.
+Now it knows where the $19.76 at Taco Bell fits in. If your fast food habit
+is starting to dig into next month's savings, you don't get a generic warning.
+The AI walks up and says: "Hey, groceries were fine, but fast food's eating
+the budget. Want to adjust, or accept the savings hit?"
+
+Three workspaces. Budget, Vision, Retirement. Each one drillable down to
+which Tuesdays you bought fast food at McDonald's. Every transaction
+timestamped, nothing ever overwritten, so year over year actually means
+something. And because the AI has memory of every prior coaching session,
+it doesn't start from scratch every time you click for help.
+
+Other apps track money. This one teaches you the shape of your own life.
+
+
+--------------------------------------------------------------------------------
+FULL MARKETING PITCH
+--------------------------------------------------------------------------------
+
+> Built for the person who has never used a budget tool and doesn't know
+> what a Roth IRA is. Built deep enough that the person who runs financial
+> models for a living will still find something to like.
+
+
+The problem with personal finance software is that it lies to you by
+omission. It shows you what you spent. It doesn't show you why, when, with
+whom, or what it cost you in the long run. It tells you you're 60% through
+your food budget. It doesn't notice that 80% of that came from one merchant
+on Fridays, and it never asks if you want to change that.
+
+The Finance module for Echo Deck is built around a different promise:
+your financial life is data, and data is only valuable if someone (or
+something) is actually looking at it.
+
+
+-------- THE THREE WORKSPACES --------
+
+Budget lives in workspace one. Sub-tabs for Weekly, Monthly, Annual, and
+the raw Ledger. The Weekly view shows you where this week's money is going
+in real time. The Monthly view applies the budget method you choose (50/30/20,
+50/20/30, zero-based, pay-yourself-first, envelope, or none) and overlays
+the right visualization. The Annual view projects the rest of the year
+using your actual data, with year-over-year overlay once you've been
+running the system long enough to have that history. The Ledger view is
+your full transaction database, Excel-style, every row editable with a
+deliberate click-to-edit-and-save workflow.
+
+Financial Vision lives in workspace two. Current vs Goal across every
+category. Savings Goals with progress bars, pacing, ETA, and on-track
+indicators. Emergency Fund tracker built around the 3-6-9 rule, with the
+target dollar amount auto-derived from your actual monthly expenses. Debt
+panel with avalanche or snowball ordering and per-debt payoff estimates.
+
+Retirement Planning lives in workspace three. Eighteen input fields, each
+with a help icon, walking through current state, retirement state, and
+uncertainty parameters. A 45-year projection. A balance chart with under
+and over uncertainty bands. Sensitivity tiles: "what if my return were 5%?
+what if I saved $5,000 more annually? what if I worked until 67?" Each one
+re-renders the chart on click without committing the change.
+
+
+-------- THE LEDGER PHILOSOPHY --------
+
+Nothing is ever deleted. Nothing is ever overwritten. Every monetary event,
+every setting change, every budget threshold adjustment writes a new row
+with a timestamp. Edits happen as supersede rows behind the scenes. Voids
+flip a flag, they don't remove the data.
+
+Why does this matter? Because year-over-year analysis is only honest when
+the data behind it is honest. Because when you change your food budget
+from $200 to $250 in July, the June view should still show $200 (because
+that's what it was in June). Because real financial decisions need real
+history.
+
+The user never sees this. They see Edit, Save, Delete buttons that just
+work. The forensic integrity is invisible until it matters.
+
+
+-------- THE AI COACH --------
+
+Every methodology choice, every input field, every projection assumption
+has a help icon. Click it: get a plain-English explanation. Click "Ask AI
+to explain": get a coaching session with the active persona's voice, full
+context of your finance state, and clickable follow-up questions to keep
+the conversation going.
+
+The AI remembers. Six months from now, when you click the same help icon,
+the AI says: "Last June we talked about this and you decided to keep it
+at 6.25%. Your portfolio has grown to $X since then. Want to revisit?"
+Conversation continuity is built in via session tracking, topic keys, and
+context snapshots. Sessions close on satisfaction, idle timeout, module
+switch, or detected topic shift.
+
+When a budget threshold trips, the AI doesn't pop a modal that says "you
+spent too much." It looks at the actual transactions, the historical
+averages, the savings impact, and produces something useful: "Groceries
+were within plan this week, but fast food jumped 290% above your average.
+You have $36 left in food for the next three days. Want to raise the
+budget (which means $50 less to savings), cut fast food this weekend,
+or ride it out?"
+
+
+-------- DRILL-DOWN ON EVERY CHART --------
+
+Double-click a slice of the Food category donut. Now you're looking at
+Food broken down: Groceries, Fast Food, Dining Out. Double-click Fast
+Food. Now you see Taco Bell, McDonald's, Burger King, ranked by spend.
+Double-click McDonald's. Now you see a line chart of every McDonald's
+purchase you've made this year, point by point, day by day.
+
+Right-click any chart point: "Send this to AI." The AI doesn't get raw
+numbers; it gets the drill path, the filter context, your broader budget
+state, and any prior conversations on related topics. It says something
+useful.
+
+Drill state persists per workspace. Switch to Retirement, come back to
+Budget, you're still looking at McDonald's-on-Fridays. The view-mode
+toggle is drill-aware: switching from KPI to Data shows you the ledger
+pre-filtered to exactly the rows you were just charting.
+
+
+-------- WHAT IT DOES THAT OTHER APPS DON'T --------
+
+Most personal finance apps stop at "track and categorize."
+
+This module:
+
+  - Treats your data as append-only history, not mutable state, so
+    year-over-year actually compares apples to apples.
+
+  - Supports five real budgeting methodologies as first-class visualizations,
+    not just labels. The Monthly view literally renders differently
+    depending on which method you've picked.
+
+  - Lets you drill from a budget donut down to "which Fridays at McDonald's"
+    in three clicks.
+
+  - Auto-matches actual transactions to planned recurring entries so
+    variance becomes a queryable insight, not a guess. Surfaces trend-based
+    plan suggestions: "Your electric bill has averaged $147 the last six
+    months. Want to update your plan from $120 to $147?"
+
+  - Surfaces day-of-week and time-of-day spending patterns so you can see
+    the actual shape of your habits.
+
+  - Couples threshold breaches to an AI that has context: your budget,
+    your savings rate, your prior coaching conversations on similar issues,
+    the active persona's voice.
+
+  - Carries help content for every input field, with two-tier explanation
+    (short plus detailed plus worked example) and Ask AI as the escape hatch.
+
+  - Keeps automatic monthly and quarterly snapshots plus manual per-workspace
+    snapshots, so you can compare January-you to August-you.
+
+  - Tracks pending checks separately from cleared so budget tracking happens
+    immediately but display balance reflects actual cleared money.
+
+  - Computes the retirement projection iteratively with three scenarios
+    (base, under, over) and renders confidence bands you can toggle on
+    and off.
+
+  - Sensitivity tiles let you test what-if changes (return rate, savings
+    amount, retirement age) without committing them.
+
+  - Lives entirely on your machine. No bank API. No cloud sync. No data
+    leaving your system. Manual entry is a feature, not a limitation.
+
+
+-------- KEY FEATURES (BULLETED) --------
+
+  Architecture
+  - Single self-contained Finance.py packaged via edm_packager.py
+  - Claims three workspace slots (Budget / Vision / Retirement)
+  - One database: finance.db in DeckRoot/Finances/
+  - Append-only ledger, append-only settings history
+  - Computed account balances (never stored)
+  - Daily automatic backup with 30-day retention
+  - Pre-migration backups that never rotate
+  - Clean release() lifecycle (timers stopped, signals disconnected,
+    widgets destroyed properly, DB closed)
+
+  Budget Workspace
+  - Weekly sub-tab: pacing, transactions, reconciliation
+  - Monthly sub-tab: method-specific visualization
+  - Annual sub-tab: predictive + year-over-year + spending patterns
+  - Ledger sub-tab: full Excel-style grid with deliberate edit workflow
+  - Five budget methods: 50/30/20, 50/20/30, zero-based,
+    pay-yourself-first, envelope, plus none/freeform
+  - Per-category thresholds with three warning modes (silent, banner,
+    AI nudge)
+  - Need / Want / Savings-Debt tiers on every transaction
+  - Planned vs Actual variance with auto-match suggestions
+  - Trend-based plan suggestions when variance exceeds 20% over 6 months
+  - Pending and cleared check states
+  - Weekly reconciliation workflow
+
+  Vision Workspace
+  - Current vs Goal across seven Vision categories
+  - Savings Goals tracker with pacing and ETA
+  - Emergency Fund panel with 3-6-9 rule and auto-derived target
+  - Debt panel with avalanche or snowball strategy
+  - Auto-log savings contribution on goal completion
+  - Per-debt charge entry and payment logging shortcuts
+
+  Retirement Workspace
+  - Eighteen input fields across three blocks (Now / At Retirement /
+    Uncertainty)
+  - 45-year iterative projection in three scenarios (base / under / over)
+  - Verdict tile (CONGRATULATIONS! or OOPS! with computed end balance)
+  - Balance projection chart with toggleable uncertainty bands
+  - Salary and savings trajectory chart
+  - Replacement income visual
+  - Sensitivity tiles for what-if scenarios
+  - 90-day review banner
+
+  Module Panel
+  - Permanent Quick Transaction Entry strip at the top
+  - Budget tab: method selector, recurring entries, budget caps,
+    weekly reconciliation
+  - Vision tab: category goals, savings goals, emergency fund, debt
+  - Retirement tab: input editor with help icons on every field
+
+  KPI and Drill-Down
+  - KPI / Data toggle on every workspace and applicable sub-tab
+  - Pin-to-remember last view per workspace and sub-tab
+  - Every chart is a DrillableChart with breadcrumb and back/home
+  - Double-click drills, right-click opens context menu
+  - Keyboard navigation (Enter drills, Backspace back, Escape home)
+  - Drill state persists across workspace switches
+  - Data view respects current drill scope
+  - Send-to-AI is drill-aware (includes path, filters, context)
+
+  Analytics
+  - Year-over-year comparisons once 365 days of data exist
+  - Day-of-week heatmaps per category
+  - Time-of-day distribution analytics
+  - Merchant frequency analytics
+  - Predictive Annual with three-source priority (YoY / YTD trend /
+    recurring fallback)
+  - Source labeling on every projection (trust as a feature)
+  - KPI cache with dirty-flag pattern for performance
+
+  AI Integration
+  - Dispatch via existing ai_queue.db (no provider knowledge in module)
+  - Help session lifecycle (active / idle / closed)
+  - Topic continuity across deck sessions
+  - Threshold-triggered nudges with structured payloads
+  - Drill-triggered AI with full scope context
+  - One nudge per category per day default, user-adjustable
+  - Snooze and dismiss actions on every nudge
+  - Follow-up suggestion buttons on every AI response
+
+  Help System
+  - [?] icon on every input field, methodology selector, and chart axis
+  - Two-tier explanation (short + detailed + worked example)
+  - Ask AI escape hatch on every help popover
+  - Seeded help_topics covering all methodologies, retirement concepts,
+    and general personal-finance ideas
+  - Help session continuity across deck sessions
+
+  First-Run Experience
+  - Welcome panel with two options: take the tour or jump in
+  - Five-step guided tour covering workspaces, Quick Add, methods,
+    help icons, and snapshots
+  - "Always show tour" setting available for users who want it
+  - Empty-state Welcome panel that swaps out automatically once data exists
+  - Note shown: "once you begin entering data, this screen will no
+    longer show"
+
+  Snapshots
+  - Automatic monthly snapshot on the 1st
+  - Automatic quarterly snapshot on the 1st of each quarter
+  - Manual "Save snapshot" button per workspace
+  - JSON data_blob captures full state at the moment
+  - Snapshot browser with side-by-side compare
+
+  Layout
+  - Vertical scroll only (horizontal forbidden)
+  - ResponsiveGrid helper class for column reflow
+  - Charts size-policy Expanding with antialiasing
+  - Tables ellipsize columns at narrow widths with hover-to-reveal
+
+
+-------- WHO IT'S FOR --------
+
+You, if you:
+- Want a finance tool that respects your time and your intelligence
+- Are tired of apps that "track" but never "notice"
+- Want to see the shape of your spending, not just the totals
+- Are willing to enter data manually in exchange for keeping it private
+- Want an AI that learns your patterns and remembers your prior questions
+- Are planning for retirement and want to actually understand the math
+- Have debt and want a coherent strategy, not a pile of bills
+
+
+-------- WHO IT'S NOT FOR --------
+
+This is not the right tool if you:
+- Want automatic bank/CC aggregation (manual entry only in v1)
+- Need multi-currency support
+- Want tax optimization recommendations (separate future module)
+- Are looking for receipt-line-item drilling (deepest level is per-merchant)
+- Want a phone-first mobile-only experience
+
+
+-------- THE BOTTOM LINE --------
+
+You don't need another budget app. You need a finance tool that thinks.
+
+Finance for Echo Deck is the only personal finance module built around
+the principle that data is only useful when something's actually paying
+attention to it. The AI pays attention. The drill-down pays attention.
+The append-only ledger pays attention. The variance tracker pays attention.
+The threshold system pays attention.
+
+When you click "Add transaction," you're not just logging a purchase.
+You're feeding a system that's quietly thinking about your retirement,
+your savings goals, your spending patterns, and your future. And when
+it has something useful to say, it says it.
+
+That's the difference.
