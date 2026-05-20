@@ -124,12 +124,34 @@ class FinanceDB:
 
     def _init(self):
         cur = self.conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'")
+        has_schema_table = cur.fetchone() is not None
+        if has_schema_table:
+            current = cur.execute("SELECT IFNULL(MAX(version),0) FROM schema_version").fetchone()[0]
+        else:
+            current = 0
+        needs_schema_change = (not has_schema_table) or (int(current) < SCHEMA_TARGET)
+        if needs_schema_change:
+            self._pre_migration_backup()
         for sql in SCHEMA_SQL:
             cur.execute(sql)
         cur.execute("INSERT OR IGNORE INTO schema_version(version,applied_at,description) VALUES(?,?,?)", (SCHEMA_TARGET, _utc_now(), "initial"))
         self.seed_if_needed()
         self.daily_backup()
         self.conn.commit()
+
+    def _pre_migration_backup(self):
+        if not self.path.exists() or self.path.stat().st_size == 0:
+            return
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        target = self.backup_dir / f"finance_pre_migration_{stamp}.db"
+        self.conn.commit()
+        shutil.copy2(self.path, target)
+        sz = target.stat().st_size
+        self.conn.execute(
+            "INSERT INTO backup_log(backup_at,backup_path,backup_type,row_count,file_size_bytes) VALUES(?,?,?,?,?)",
+            (_utc_now(), str(target), "pre_migration", 0, sz),
+        )
 
     def seed_if_needed(self):
         cur = self.conn.cursor()
@@ -144,6 +166,14 @@ class FinanceDB:
                 cur.execute("INSERT INTO help_topics(topic_key,title,short_explanation,detailed_explanation,worked_example,ai_prompt_template,follow_up_buttons,related_topic_keys) VALUES(?,?,?,?,?,?,?,?)", (k,k.replace("_"," ").title(),"Short","Detailed","Example","Help me with {topic}",json.dumps(["Why?","How?"]),""))
         if cur.execute("SELECT COUNT(1) FROM settings_history WHERE setting_scope='budget_method' AND setting_key='active'").fetchone()[0] == 0:
             cur.execute("INSERT INTO settings_history(effective_from,recorded_at,setting_scope,setting_key,setting_value,changed_by,notes) VALUES(?,?,?,?,?,?,?)", (_utc_now(), _utc_now(), "budget_method", "active", "none", "system", "default"))
+        cur.execute(
+            "INSERT OR IGNORE INTO retirement_inputs(id,current_age,retirement_age,expected_return,updated_at) VALUES(1,?,?,?,?)",
+            (35.0, 65.0, 0.06, _utc_now()),
+        )
+        cur.execute(
+            "INSERT OR IGNORE INTO emergency_fund(id,target_months,updated_at) VALUES(1,?,?)",
+            (3.0, _utc_now()),
+        )
 
     def daily_backup(self):
         stamp = date.today().isoformat()
@@ -165,6 +195,9 @@ def append_ledger(db: FinanceDB, payload: dict[str, Any]) -> int:
     ))
     db.conn.commit()
     return int(cur.lastrowid)
+
+def _active_ledger_where(alias: str = "l") -> str:
+    return f"{alias}.voided=0 AND NOT EXISTS (SELECT 1 FROM ledger s WHERE s.supersedes_id={alias}.id)"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SECTION 08 — KPI CACHE HELPERS
@@ -200,7 +233,7 @@ class VScrollWidget(QWidget):
         s.setWidget(inner); l.addWidget(s)
 
 def month_totals(db: "FinanceDB") -> dict[str, float]:
-    rows = db.conn.execute("SELECT direction, amount FROM ledger WHERE voided=0").fetchall()
+    rows = db.conn.execute(f"SELECT direction, amount FROM ledger l WHERE {_active_ledger_where('l')}").fetchall()
     income = spent = savings = 0.0
     for r in rows:
         amt = float(r["amount"] or 0.0)
@@ -291,7 +324,7 @@ class BudgetWorkspace(QWidget):
             self.k_spent.setText(f"${totals['spent']:.2f}")
             self.k_remaining.setText(f"${totals['remaining']:.2f}")
             self.drill_path.setText(" > ".join(self.drill.path))
-        rows = self.db.conn.execute("SELECT l.id,l.event_time,l.direction,l.amount,COALESCE(c.name,''),l.merchant,IFNULL(l.account_id,''),l.voided FROM ledger l LEFT JOIN categories c ON c.id=l.category_id ORDER BY l.id DESC LIMIT 250").fetchall()
+        rows = self.db.conn.execute(f"SELECT l.id,l.event_time,l.direction,l.amount,COALESCE(c.name,''),l.merchant,IFNULL(l.account_id,''),l.voided FROM ledger l LEFT JOIN categories c ON c.id=l.category_id WHERE {_active_ledger_where('l')} ORDER BY l.id DESC LIMIT 250").fetchall()
         if hasattr(self, "tbl"):
             self.tbl.setRowCount(len(rows))
             for i, r in enumerate(rows):
@@ -305,7 +338,7 @@ class BudgetWorkspace(QWidget):
         chart = QChart()
         if len(self.drill.path) == 1:
             series = QPieSeries()
-            rows = self.db.conn.execute("SELECT COALESCE(c.name,'Uncategorized') n,SUM(l.amount) t FROM ledger l LEFT JOIN categories c ON c.id=l.category_id WHERE l.direction='expense' AND l.voided=0 GROUP BY COALESCE(c.name,'Uncategorized') ORDER BY t DESC LIMIT 8").fetchall()
+            rows = self.db.conn.execute(f"SELECT COALESCE(c.name,'Uncategorized') n,SUM(l.amount) t FROM ledger l LEFT JOIN categories c ON c.id=l.category_id WHERE l.direction='expense' AND {_active_ledger_where('l')} GROUP BY COALESCE(c.name,'Uncategorized') ORDER BY t DESC LIMIT 8").fetchall()
             for r in rows:
                 s = series.append(r["n"], float(r["t"] or 0.0))
                 s.setLabelVisible(True)
@@ -314,7 +347,7 @@ class BudgetWorkspace(QWidget):
         else:
             category = self.drill.path[-1]
             series = QBarSeries(); bar = QBarSet(category); cats=[]
-            rows = self.db.conn.execute("SELECT COALESCE(merchant,'Unknown') m,SUM(amount) t FROM ledger l LEFT JOIN categories c ON c.id=l.category_id WHERE l.direction='expense' AND l.voided=0 AND COALESCE(c.name,'Uncategorized')=? GROUP BY COALESCE(merchant,'Unknown') ORDER BY t DESC LIMIT 10",(category,)).fetchall()
+            rows = self.db.conn.execute(f"SELECT COALESCE(merchant,'Unknown') m,SUM(amount) t FROM ledger l LEFT JOIN categories c ON c.id=l.category_id WHERE l.direction='expense' AND {_active_ledger_where('l')} AND COALESCE(c.name,'Uncategorized')=? GROUP BY COALESCE(merchant,'Unknown') ORDER BY t DESC LIMIT 10",(category,)).fetchall()
             for r in rows: cats.append(r["m"]); bar.append(float(r["t"] or 0.0))
             series.append(bar); chart.addSeries(series)
             ax = QBarCategoryAxis(); ax.append(cats); chart.addAxis(ax, Qt.AlignBottom); series.attachAxis(ax)
@@ -330,19 +363,25 @@ class BudgetWorkspace(QWidget):
     def edit_selected(self):
         rid = self._selected_id()
         if rid is None: return
-        row = self.db.conn.execute("SELECT * FROM ledger WHERE id=?", (rid,)).fetchone()
+        row = self.db.conn.execute("SELECT * FROM ledger WHERE id=? AND voided=0", (rid,)).fetchone()
         if not row: return
-        nid = append_ledger(self.db, {k: row[k] for k in row.keys()})
         new_amt = float(row["amount"]) * 1.05
-        self.db.conn.execute("UPDATE ledger SET amount=? WHERE id=?", (new_amt, nid))
-        self.db.conn.execute("UPDATE ledger SET voided=1,voided_at=?,void_reason='edited',supersedes_id=? WHERE id=?", (_utc_now(), nid, rid))
+        nid = append_ledger(self.db, {
+            k: row[k] for k in row.keys()
+            if k not in {"id", "recorded_at", "voided", "voided_at", "void_reason", "supersedes_id"}
+        } | {"amount": new_amt, "supersedes_id": rid, "source": "edit"})
         self.db.conn.execute("INSERT INTO ledger_edits(original_ledger_id,supersede_ledger_id,edited_at,edit_reason,edited_field,old_value,new_value,edited_by) VALUES(?,?,?,?,?,?,?,?)", (rid, nid, _utc_now(), "quick-edit", "amount", str(row["amount"]), str(new_amt), "user"))
         self.db.conn.commit(); self.refresh()
 
     def void_selected(self):
         rid = self._selected_id()
         if rid is None: return
-        self.db.conn.execute("UPDATE ledger SET voided=1,voided_at=?,void_reason='user_void' WHERE id=?", (_utc_now(), rid))
+        row = self.db.conn.execute("SELECT * FROM ledger WHERE id=? AND voided=0", (rid,)).fetchone()
+        if not row: return
+        append_ledger(self.db, {
+            k: row[k] for k in row.keys()
+            if k not in {"id", "recorded_at", "supersedes_id"}
+        } | {"voided": 1, "voided_at": _utc_now(), "void_reason": "user_void", "supersedes_id": rid, "amount": float(row["amount"]), "source": "void"})
         self.db.conn.commit(); self.refresh()
 
     def link_selected(self):
@@ -359,7 +398,7 @@ class BudgetWorkspace(QWidget):
         alerts=[]
         rows = self.db.conn.execute("SELECT category_id,amount,threshold_pct FROM budget_periods WHERE superseded_by IS NULL").fetchall()
         for r in rows:
-            actual = self.db.conn.execute("SELECT IFNULL(SUM(amount),0) FROM ledger WHERE category_id=? AND direction='expense' AND voided=0", (r["category_id"],)).fetchone()[0]
+            actual = self.db.conn.execute(f"SELECT IFNULL(SUM(amount),0) FROM ledger WHERE category_id=? AND direction='expense' AND {_active_ledger_where('ledger')}", (r["category_id"],)).fetchone()[0]
             cap = float(r["amount"] or 0.0); pct = float(r["threshold_pct"] or 100.0)
             if cap > 0 and float(actual) >= cap * (pct / 100.0):
                 msg = f"Category {r['category_id']} at {actual:.2f}/{cap:.2f}"
